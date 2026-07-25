@@ -15,7 +15,7 @@ alternatives to it. Use this file when asked "what's our normal workflow."
    `status: planning`).
 2. **Plan** — owner: `tech-lead`. Instruction: `plan-a-goal`.
    Goal → tasks (`{{PROJECT_KEY}}-T#`), each with `targets` and `dependsOn`. Tasks wait
-   `pending` for human approval before running (draft → approve gate).
+   `todo` for human approval before running (draft → approve gate).
    Goal moves to `status: in-progress`.
 3. **Build & ship** — owners: `software-engineer` / `data-engineer` (build),
    `release-engineer` (ship), `code-reviewer` (approve). Instruction:

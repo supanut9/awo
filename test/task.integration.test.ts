@@ -77,6 +77,36 @@ test("task list reads authored frontmatter status before any state exists", () =
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test("pre-0.0.2 task files authored with the old status vocabulary still load", () => {
+  const ws = makeWorkspace();
+  const tasksDir = path.join(ws, "goals", "TEST-G1-demo", "tasks");
+
+  // The old vocabulary was pending|running|success|failed|skipped (§7.4).
+  fs.writeFileSync(
+    path.join(tasksDir, "TEST-T9-legacy.md"),
+    `---\nid: TEST-T9\ngoalId: TEST-G1\nname: Legacy task\ntargets: [api]\nstatus: pending\n---\n\n## Objective\nx\n`
+  );
+  fs.writeFileSync(
+    path.join(tasksDir, "TEST-T8-legacy-done.md"),
+    `---\nid: TEST-T8\ngoalId: TEST-G1\nname: Legacy done\ntargets: [api]\nstatus: success\n---\n\n## Objective\nx\n`
+  );
+
+  const out = awo(ws, ["task", "list"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /TEST-T9\ttodo/, "pending must translate to todo");
+  assert.match(out.stdout, /TEST-T8\tdone/, "success must translate to done");
+
+  // A genuinely unknown status is still an error, and names what it saw.
+  fs.writeFileSync(
+    path.join(tasksDir, "TEST-T7-bogus.md"),
+    `---\nid: TEST-T7\ngoalId: TEST-G1\nname: Bogus\nstatus: wat\n---\n\nx\n`
+  );
+  const bad = awo(ws, ["task", "list"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /has status "wat"/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 test("a full run: open -> events -> complete, writing state, events, index and detail", () => {
   const ws = makeWorkspace();
 

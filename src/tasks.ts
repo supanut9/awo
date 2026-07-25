@@ -23,6 +23,20 @@ export interface GoalDefinition {
   taskIds: string[];
 }
 
+/**
+ * Pre-0.0.2 task files were authored with the old single-vocabulary
+ * `pending | running | success | failed | skipped` (§7.4 explains why that
+ * conflated lifecycle with outcome). Translate on read rather than failing:
+ * an old workspace pulling a new `awo` must keep working, and the authored
+ * `status:` is only a starting point anyway.
+ */
+const LEGACY_STATUS_ALIASES: Record<string, TaskStatus> = {
+  pending: "todo",
+  success: "done",
+  failed: "blocked",
+  skipped: "cancelled",
+};
+
 function asArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map((v) => String(v));
   if (typeof value === "string" && value.trim() !== "") return [value.trim()];
@@ -50,10 +64,11 @@ export async function readTaskFile(file: string): Promise<TaskDefinition> {
     throw new Error(`${file} is missing a \`goalId:\` in its frontmatter.`);
   }
 
-  const authored = typeof fm.status === "string" ? fm.status : "todo";
+  const raw = typeof fm.status === "string" ? fm.status : "todo";
+  const authored = LEGACY_STATUS_ALIASES[raw] ?? raw;
   if (!TASK_STATUSES.includes(authored as TaskStatus)) {
     throw new Error(
-      `${file} has status "${authored}", which is not a task lifecycle state. Valid: ${TASK_STATUSES.join(", ")}.`
+      `${file} has status "${raw}", which is not a task lifecycle state. Valid: ${TASK_STATUSES.join(", ")}.`
     );
   }
 
