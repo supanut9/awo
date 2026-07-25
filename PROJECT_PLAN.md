@@ -248,7 +248,11 @@ Design notes: `git` entries fully reconstitute on a fresh clone via `sync`; `loc
 | `awo task run <task-id>` | Execute a task; writes state + a log. |
 | `awo task show <task-id>` | View a task and its last run. |
 | `awo log <...>` | View run history + audit trail. |
+| `awo task list [--status <s>]` | List tasks with lifecycle status; `--status blocked` is the "needs me" view. |
 | `awo task status <task-id> <status>` | Move a task's lifecycle state by hand (§7.4). The only way to reach `cancelled`. |
+| `awo task event <task-id> <kind>` | Append a progress event to the task's open run (§7.4). |
+| `awo task complete <task-id> --outcome <o>` | Close the open run: writes the log, index line, and lifecycle transition. `--gate` routes success to `in-review`. |
+| `awo task verify <task-id> [--reject]` | QA gate (§7.1): approve an `in-review` task to `done`, or reject it back to `todo`. |
 | `awo connector add <name>` / `list` / `remove` | Register or manage MCP/connectors in `connectors.json`. |
 | `awo upgrade` | Re-apply newer library scaffolding to an existing workspace. |
 | `awo doctor` | Diagnose broken links, missing repos, stale symlinks. |
@@ -516,7 +520,7 @@ The **transform** steps are agent-driven — this is where "requirement → task
 **Open sub-questions:**
 - Does `awo task run` *execute* steps itself, or hand the task to an agent to execute? (Leaning: it orchestrates ordering/state/logging; the agent does the actual work.)
 - Is `awo goal plan` fully automatic, or does it draft tasks for human review/approval before they become runnable? (Leaning: draft → approve, so a human gates the decomposition.)
-- Do we validate `targets` against the manifest at plan/run time and fail fast if a repo is missing?
+- ~~Do we validate `targets` against the manifest at plan/run time and fail fast if a repo is missing?~~ **Decided: yes, at run time, before any state is written** — `task run` refuses a task whose `targets` name repos absent from the manifest, and names them in the error. Validating at *plan* time too was rejected for now: a goal can legitimately be planned before its repos are linked.
 
 ### 7.3 Logs
 Append-only audit trail of every run: what ran, when, with which model, against which repos, and what changed. Lives under `logs/` (gitignored). Depends on Tasks so there's something to log.
@@ -859,8 +863,12 @@ Only if multi-machine visibility proves to be a real need — i.e. someone who c
 Everything here is a design decision made on paper, not something that's been proven out by actually using the thing. Phase 1's dogfood run is what answers these — treat any "leaning toward X" below as a guess, not a commitment.
 
 1. ~~**npm name availability**~~ — **RESOLVED, and the fallback was needed.** `awo` is **taken**: an unrelated 217-byte placeholder published 2022-04-24 by `79w <201444307@qq.com>`, no description, no repo. So the package is scoped as **`@supanut9/awo`** exactly as this item anticipated. Consequences, all small: install is `npx @supanut9/awo`, `publishConfig.access: "public"` is required for a scoped package to publish publicly, and the **command stays `awo`** because `bin` names it explicitly — so nothing in the docs about *using* the tool changes, only installing it. An npm name dispute over the placeholder is possible but slow and unreliable; not worth blocking on.
-2. **Task execution model** — does `awo task run` execute steps itself or hand the task to an agent? (Leaning: orchestrate-and-log, agent-does-the-work — but never run for real.)
-3. **The draft → approve gate is only documented, not enforced.** `plan-a-goal` says tasks stay `pending` for human review before `awo task run` is used — but nothing currently stops `task run` from executing a `pending` task anyway. Decide: pure convention, or should `task run` actually refuse without an explicit `awo task approve`?
+2. ~~**Task execution model**~~ — **RESOLVED as the leaning said: orchestrate-and-log.** `awo task run` does *not* execute the task's steps. It resolves `dependsOn`, validates `targets` against the manifest, moves lifecycle state to `running`, opens the run's `.events.jsonl`, and prints the task body for whoever does the work. The run stays **open**; the agent reports progress with `awo task event` and closes it with `awo task complete --outcome <success|failed|skipped>`. Consequences worth noting:
+   - The CLI owns state and logs; the agent owns the work. That's the only split that keeps §7.4's "single writer path" true while letting any runtime (Claude Code, Gemini CLI, a human) be the executor.
+   - It makes an abandoned run visible rather than silent: a task stuck in `running` with no `run.end` is a real, queryable condition — and one the Phase 2 board (§7.5) can surface. Cleaning those up is the same problem as item 10's abandoned worktrees.
+   - `--gate` on `complete` is what keeps the QA gate real: success routes to `in-review` instead of `done`, and `awo task verify` closes it. Without the flag, success goes straight to `done` for work that needs no gate.
+
+3. ~~**The draft → approve gate is only documented, not enforced**~~ — **partially resolved, deliberately.** `task run` now refuses to run a task that is `cancelled` or `done`, and blocks one with unmet `dependsOn`. It still does *not* require an explicit approval step before a `todo` task can run, because `todo` → `queued` → `running` is the normal path and adding an `approve` command before the pipeline has been used once would be ceremony invented on paper. If the dogfood shows tasks being run before a human meant them to be, the fix is a `status: draft` authored state that `task run` rejects — cheap to add later.
 4. **`stay-in-scope` for `data-engineer` vs `software-engineer` is honor-system, not enforced.** Both can be scoped to the same repo with an unwritten agreement to stay in different layers (DAL vs feature code). If that overlap causes real conflicts, the fix is path-scoped `targets` (e.g. `frontend-app:src/migrations/**`) — not built, just noted.
 5. **The `analytics` connector for `marketing-specialist` is a placeholder name/shape.** Needs to map to a real tool (GA, a tag manager, something else) before it means anything.
 6. **Windows symlink support** — `local` links need testing (developer-mode / junctions). How much do we care for v1?
@@ -972,8 +980,8 @@ The CLI surface in §6 is roughly ordered by dependency. If you build past `init
 1. `add`, `connect`, `list`, `remove` — pure manifest editing.
 2. `sync` — the first thing that touches git and the filesystem non-trivially.
 3. `connector add/list/remove` — same shape as (1) but on `connectors.json`.
-4. `req new` → `goal new` → `goal plan` → `task run` — the pipeline; needs everything above.
-5. `log list/show/tail` — reads what `task run` writes.
+4. `req new` → `goal new` → `goal plan` → `task run` — the pipeline; needs everything above. **`task run` and the §7.4 state/event layer are built (v0.0.2)**; `req new` / `goal new` / `goal plan` are not, so requirement/goal/task files are still hand-authored (or agent-authored) markdown for now. That ordering inversion was deliberate: `task run` is what the state model and event stream hang off, and authoring three markdown files by hand is cheap while `plan` remains unbuilt.
+5. `log list/show/tail` — reads what `task run` writes. **Built (v0.0.2)**, except that `tail` prints the current event stream rather than following it; the watch layer arrives with `awo status --watch` (§7.5), which is where file-watching belongs.
 6. `doctor` — depends on everything working so it has something to diagnose.
 
 Note that `task run` (4) is also what implements §7.4 — the state writer (atomic + `rev`), the lifecycle transition table, and the `.events.jsonl` stream. Build them together; they are not a separate later pass.
