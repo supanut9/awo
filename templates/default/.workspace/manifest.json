@@ -1,0 +1,8 @@
+{
+  "libraryVersion": "{{LIBRARY_VERSION}}",
+  "workspaceId": "{{WORKSPACE_ID}}",
+  "projectKey": "{{PROJECT_KEY}}",
+  "projectName": "{{PROJECT_KEY}}",
+  "createdAt": "{{CREATED_AT}}",
+  "repos": []
+}

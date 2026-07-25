@@ -1,0 +1,10 @@
+{
+  "connectors": [
+    {
+      "name": "github",
+      "type": "mcp",
+      "url": "https://mcp.github.example/sse",
+      "scopes": ["repo", "pr"]
+    }
+  ]
+}
