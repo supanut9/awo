@@ -81,6 +81,32 @@ test("awo init --key PROM matches the PROM-workspace reference", () => {
       continue;
     }
 
+    if (relPath === path.join(".workspace", "template.lock")) {
+      // §11.2: hashes are stable except for manifest.json, which embeds the
+      // per-run workspaceId/createdAt/libraryVersion. Compare the file set
+      // exactly, and every hash except that one.
+      const actual = JSON.parse(fs.readFileSync(actualPath, "utf8"));
+      const expected = JSON.parse(fs.readFileSync(expectedPath, "utf8"));
+
+      assert.equal(typeof actual.libraryVersion, "string");
+      assert.deepEqual(
+        Object.keys(actual.files).sort(),
+        Object.keys(expected.files).sort(),
+        "template.lock must cover exactly the files init laid down"
+      );
+      assert.ok(
+        !("\.workspace/template.lock" in actual.files),
+        "template.lock must not hash itself"
+      );
+
+      for (const [file, hash] of Object.entries(actual.files)) {
+        assert.match(hash as string, /^sha256-[0-9a-f]{64}$/, `${file} hash malformed`);
+        if (file === ".workspace/manifest.json") continue;
+        assert.equal(hash, expected.files[file], `template.lock hash drifted for ${file}`);
+      }
+      continue;
+    }
+
     const actual = fs.readFileSync(actualPath);
     const expected = fs.readFileSync(expectedPath);
     assert.ok(actual.equals(expected), `content mismatch for ${relPath}`);

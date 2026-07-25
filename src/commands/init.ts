@@ -1,5 +1,6 @@
 import fs from "fs-extra";
 import path from "path";
+import { createHash } from "crypto";
 import { v7 as uuidv7 } from "uuid";
 import { fileURLToPath } from "url";
 
@@ -101,4 +102,29 @@ export async function runInit(options: InitOptions): Promise<void> {
   for (const file of files) {
     await substituteTokens(file, replacements);
   }
+
+  await writeTemplateLock(targetDir, readLibraryVersion());
+}
+
+/**
+ * §11.2 — records a hash of every file `init` laid down, AFTER token
+ * substitution so the hashes describe what is actually on disk.
+ *
+ * This is what lets a future `awo upgrade` tell "the user customized this
+ * file" from "the template changed this file". A workspace created without
+ * it can never be upgraded reliably, and that cannot be fixed after the
+ * fact — which is why it ships now, before anything reads it.
+ */
+async function writeTemplateLock(targetDir: string, libraryVersion: string): Promise<void> {
+  const lockPath = path.join(targetDir, ".workspace", "template.lock");
+  const files: Record<string, string> = {};
+
+  for (const file of (await walkFiles(targetDir)).sort()) {
+    const rel = path.relative(targetDir, file).split(path.sep).join("/");
+    if (rel === ".workspace/template.lock") continue;
+    const hash = createHash("sha256").update(await fs.readFile(file)).digest("hex");
+    files[rel] = `sha256-${hash}`;
+  }
+
+  await fs.writeJson(lockPath, { libraryVersion, files }, { spaces: 2 });
 }
