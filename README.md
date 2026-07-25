@@ -6,8 +6,9 @@ or more working repos where the real code lives.
 
 ## Status
 
-v0.0.1 — scaffolding and repo linking (`init`, `add`, `connect`, `list`, `remove`).
-Not yet published to npm. See `PROJECT_PLAN.md` for the full design and roadmap.
+v0.0.1 — published on npm as [`@supanut9/awo`](https://www.npmjs.com/package/@supanut9/awo).
+Scaffolding and repo linking (`init`, `add`, `connect`, `list`, `remove`).
+See `PROJECT_PLAN.md` for the full design and roadmap.
 
 > **Package name:** published as **`@supanut9/awo`** — the unscoped `awo` name was
 > already taken on npm by an unrelated 2022 placeholder. The installed **command is
