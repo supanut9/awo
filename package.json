@@ -1,15 +1,25 @@
 {
-  "name": "awo",
+  "name": "@supanut9/awo",
   "version": "0.0.1",
   "description": "Scaffolds and orchestrates AI-agent development workspaces.",
   "type": "module",
   "bin": {
     "awo": "dist/cli.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supanut9/awo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/supanut9/awo/issues"
+  },
+  "homepage": "https://github.com/supanut9/awo#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
-    "templates",
-    "scripts"
+    "templates"
   ],
   "engines": {
     "node": ">=18"
@@ -19,8 +29,7 @@
     "build:test": "tsc -p tsconfig.test.json",
     "pretest": "npm run build && npm run build:test",
     "test": "node --test dist/test/**/*.test.js",
-    "prepublishOnly": "npm run build",
-    "postinstall": "node scripts/verify-template.mjs"
+    "prepublishOnly": "npm run build && node scripts/verify-template.mjs"
   },
   "keywords": [
     "ai",

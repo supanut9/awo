@@ -1,6 +1,6 @@
 # awo — AI Workflow Orchestration Library — Project Plan
 
-> **Name:** `awo` (locked) · **Status:** designed, not yet implemented · **Distribution:** npm (`npx awo …`)
+> **Name:** `awo` (locked) · **npm package:** `@supanut9/awo` (unscoped `awo` was taken — see §9 item 1) · **Distribution:** npm (`npx @supanut9/awo …`), binary is `awo`
 
 ---
 
@@ -15,7 +15,7 @@ If you're reading this because you've been asked to build `awo`, stop before tou
 **Your first and only initial target: the `init` command.**
 Not the whole CLI. Not the req→goal→task pipeline. Not the log runner. Just `init`. The success condition is:
 
-> `npx awo init --key PROM` in an empty directory produces a tree that matches `PROM-workspace/` **byte-for-byte** (with the project key substituted in the manifest and any templated locations).
+> `npx @supanut9/awo init --key PROM` in an empty directory produces a tree that matches `PROM-workspace/` **byte-for-byte** (with the project key substituted in the manifest and any templated locations).
 
 Write an integration test that runs `init` into a temp directory and diffs against the reference. If that test passes, ship v0.0.1 and *stop*, so the tool can be tried on a real project before more surface area is committed to (§8).
 
@@ -78,7 +78,7 @@ These are settled. Recorded here as a lightweight decision log so we don't relit
 
 5. **`AGENTS.md` is canonical.** Other agent files (`CLAUDE.md`, `GEMINI.md`, etc.) are thin pointers that import it (e.g. `@AGENTS.md`) rather than duplicating content. Adding support for a new agent = adding one more pointer file, never re-authoring instructions.
 
-6. **Distribution: npm package**, invoked via `npx awo <command>`.
+6. **Distribution: npm package**, invoked via `npx @supanut9/awo <command>`. The `bin` entry keeps the **command** `awo` regardless of the package name, so the scope affects only the install string.
 
 7. **Workspace-local config only — nothing in `~`.** Every read and write done by any `awo` command — whether invoked by a human, Claude Code, Gemini CLI, or any other agent — resolves paths relative to the current workspace directory (`process.cwd()` walking up to the nearest `.workspace/`), never `$HOME`, never `$XDG_CONFIG_HOME`, never a global cache. Adding a skill, defining an agent, refining a requirement, running a task — all of it lands inside the workspace tree. Consequences:
    - `git clone <workspace>` on any machine is a **complete restore**; there is no per-user setup to reproduce.
@@ -858,7 +858,7 @@ Only if multi-machine visibility proves to be a real need — i.e. someone who c
 
 Everything here is a design decision made on paper, not something that's been proven out by actually using the thing. Phase 1's dogfood run is what answers these — treat any "leaning toward X" below as a guess, not a commitment.
 
-1. **npm name availability** — `awo` is chosen; verify it's still available on npm before publishing and adjust with a scope (`@you/awo`) if not.
+1. ~~**npm name availability**~~ — **RESOLVED, and the fallback was needed.** `awo` is **taken**: an unrelated 217-byte placeholder published 2022-04-24 by `79w <201444307@qq.com>`, no description, no repo. So the package is scoped as **`@supanut9/awo`** exactly as this item anticipated. Consequences, all small: install is `npx @supanut9/awo`, `publishConfig.access: "public"` is required for a scoped package to publish publicly, and the **command stays `awo`** because `bin` names it explicitly — so nothing in the docs about *using* the tool changes, only installing it. An npm name dispute over the placeholder is possible but slow and unreliable; not worth blocking on.
 2. **Task execution model** — does `awo task run` execute steps itself or hand the task to an agent? (Leaning: orchestrate-and-log, agent-does-the-work — but never run for real.)
 3. **The draft → approve gate is only documented, not enforced.** `plan-a-goal` says tasks stay `pending` for human review before `awo task run` is used — but nothing currently stops `task run` from executing a `pending` task anyway. Decide: pure convention, or should `task run` actually refuse without an explicit `awo task approve`?
 4. **`stay-in-scope` for `data-engineer` vs `software-engineer` is honor-system, not enforced.** Both can be scoped to the same repo with an unwritten agreement to stay in different layers (DAL vs feature code). If that overlap causes real conflicts, the fix is path-scoped `targets` (e.g. `frontend-app:src/migrations/**`) — not built, just noted.
@@ -884,7 +884,9 @@ Everything here is a design decision made on paper, not something that's been pr
     - `add` (git clone) and `connect` (local symlink) are now implemented per §6/§10, plus `list` and `remove`. `add`'s CLI help text explicitly points at `connect` ("already have this repo checked out locally? use `connect` instead") since that's the exact mistake observed.
     - Deliberately **not** built: auto-detecting whether a URL passed to `add` already has a local checkout somewhere on the machine, and silently using `connect` instead. That would mean scanning the filesystem outside the workspace, which cuts against §3 decision 7's workspace-local-only spirit and is fragile (which of N local checkouts would it even pick?). The chosen fix is making the correct command (`connect`) easy to reach and well-signposted, not making `awo` guess. If this keeps happening in practice, revisit.
 
-18. **VS Code's Git Graph extension (and its built-in git integration generally) didn't detect repos under `repos/<name>` after `connect`/`add`.** Root cause: it doesn't reliably follow symlinks (breaks `connect`) or scan nested subfolders (breaks both) when looking for repos inside one opened folder — it detects a repo reliably only when that repo is its own top-level folder. First fix: `add`/`connect`/`remove` regenerate a `<projectKey>.code-workspace` file (multi-root VS Code workspace: the workspace root + one folder entry per linked repo) as a side effect — see `src/vscode-workspace.ts`. This is a derived artifact of the manifest, exactly like `repos/` itself: gitignored (`/*.code-workspace`), never hand-edited, regenerated on every manifest-mutating command. Not generated by `init` (nothing to list yet, and it's not part of the locked reference tree that command's acceptance test diffs against).
+19. **`postinstall` was the wrong hook for the embedded-template check, and was moved to `prepublishOnly`.** `scripts/verify-template.mjs` originally ran on every *consumer* install. Two problems: it can only fail loudly, never fix anything (and `init` already throws a clear "broken awo install" error at runtime if the template is missing, so the check was redundant); and a throwing postinstall breaks `npx` for users in ways that are miserable to debug remotely. It now runs at publish time, where a failure stops *you* instead of your users — and it was strengthened while moving, because the original check was near-useless there: running in the dev tree, `templates/default` always exists. It now shells out to `npm pack --dry-run --json` and asserts the required paths are actually **in the tarball**, which catches the failure mode that matters (a `files` field that silently drops `templates/`). `scripts/` was also removed from `files`, since it is no longer consumer-facing.
+
+20. **VS Code's Git Graph extension (and its built-in git integration generally) didn't detect repos under `repos/<name>` after `connect`/`add`.** Root cause: it doesn't reliably follow symlinks (breaks `connect`) or scan nested subfolders (breaks both) when looking for repos inside one opened folder — it detects a repo reliably only when that repo is its own top-level folder. First fix: `add`/`connect`/`remove` regenerate a `<projectKey>.code-workspace` file (multi-root VS Code workspace: the workspace root + one folder entry per linked repo) as a side effect — see `src/vscode-workspace.ts`. This is a derived artifact of the manifest, exactly like `repos/` itself: gitignored (`/*.code-workspace`), never hand-edited, regenerated on every manifest-mutating command. Not generated by `init` (nothing to list yet, and it's not part of the locked reference tree that command's acceptance test diffs against).
     - **Follow-up finding: opening that multi-root workspace has its own real cost.** Several linked repos have their own `CLAUDE.md`/`AGENTS.md` for their own unrelated dev conventions. Opening all folders as workspace peers surfaces all of them to an agent at once, alongside the orchestration root's `AGENTS.md` — read as project confusion during dogfooding, not a hypothetical. Practical guidance recorded here since it isn't enforceable in code: use the workspace root alone (plain single-folder open) for agent sessions; treat the `.code-workspace` file as a git-tooling view only, opened separately when needed.
     - **Better default, installed by `init`:** `.vscode/settings.json` with `"git.autoRepositoryDetection": "subFolders"` and `"git-graph.maxDepthOfRepoSearch": 2`, so a single-folder open of the workspace root (no multi-root, no `CLAUDE.md` pollution) still lets VS Code's Source Control panel and Git Graph discover repos nested under `repos/`. Whether this actually follows symlinks for `type:"local"` repos (vs. only real directories from `type:"git"` clones) was untested at time of writing — worth confirming in practice, and revisiting the `.code-workspace` generator's necessity if it does.
 
@@ -893,7 +895,7 @@ Everything here is a design decision made on paper, not something that's been pr
 ## 10. Implementation Notes
 
 ### Language and packaging
-- **TypeScript**, compiled to JS, shipped as an npm package with a `bin` entry so `npx awo …` works out of the box.
+- **TypeScript**, compiled to JS, shipped as an npm package with a `bin` entry so `npx @supanut9/awo …` works out of the box (and the local command is just `awo`).
 - Target Node LTS; declare `engines.node` accordingly in `package.json`.
 - Include a `postinstall` verifier that the embedded template folder is present (see below).
 
