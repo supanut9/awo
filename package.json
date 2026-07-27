@@ -1,6 +1,6 @@
 {
   "name": "@supanut9/awo",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Scaffolds and orchestrates AI-agent development workspaces.",
   "type": "module",
   "bin": {
@@ -19,7 +19,8 @@
   },
   "files": [
     "dist",
-    "templates"
+    "templates",
+    "ui"
   ],
   "engines": {
     "node": ">=18"
@@ -41,6 +42,7 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "chokidar": "^5.0.0",
     "commander": "^12.1.0",
     "fs-extra": "^11.2.0",
     "gray-matter": "^4.0.3",

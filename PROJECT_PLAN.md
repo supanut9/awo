@@ -726,6 +726,8 @@ awo ui                       # serve this workspace on 127.0.0.1:<port>
 awo ui --root ~/dev/spaces   # portfolio mode: scan a directory of workspaces
 ```
 
+**Built in v0.0.3.** Deviation from the sketch below worth recording: there is **no Vite/React build step**. The page is a single hand-written, dependency-free `ui/index.html` (~12 kB) shipped in the package alongside `templates/`. A bundler would have added a toolchain, a second build, and a dependency tree to maintain for one page — revisit only if the UI grows past what one file can carry. The `WorkspaceReader` boundary is implemented as specced, so that decision doesn't affect the hosted site later.
+
 **Serving model.** Binds `127.0.0.1` only — never `0.0.0.0`, so it is not exposed on the LAN. Static assets are **prebuilt and embedded in the npm package** at `dist/ui/`, copied by the same mechanism as `templates/default/` (§10) — so the UI is offline-capable and version-locked to the workspace's `libraryVersion`, with no CDN dependency. Live updates come from `chokidar` watching `goals/**/state.json`, `logs/runs.jsonl`, `logs/runs/**/*.events.jsonl`, and `.workspace/manifest.json`, pushed to the browser over SSE. Killing the process leaves zero residue: no daemon, no cache, nothing in `~` (§3.7).
 
 **The reader boundary.** The UI is built against an interface, not against `fs`:
@@ -755,7 +757,15 @@ interface WorkspaceReader {
 
 **`awo status --watch`** ships first: the same data as the Board, rendered in the terminal. Since the runner already emits events, this is a few hundred lines and captures most of the verification win without any web stack. Build it before the web UI, not after.
 
-#### Multi-project (portfolio) view
+#### Multi-project — moved out of `awo ui` entirely (decided)
+
+**`awo ui` is single-workspace. It will not grow a portfolio mode.** Multi-project monitoring becomes a **separate hosted website** for this library — Next.js on Vercel — which reads from a MongoDB connection the user supplies. That is a different product with its own auth and hosting; it is tracked in §7.6, not here.
+
+This kills `awo ui --root`, and that is a simplification worth taking: the CLI stays a local, zero-infrastructure tool over one workspace, and everything cross-project lives in the thing that is actually good at it. The `WorkspaceReader` boundary below still matters — it is what lets the website reuse these components over HTTP instead of re-implementing them.
+
+The options below are retained only as the reasoning behind that decision:
+
+#### Multi-project (portfolio) view — NOT BUILT, see above
 
 Seeing many projects at once is an **aggregation concern, not a nesting one** (§2). Three ways to get it, in increasing cost:
 
@@ -845,8 +855,8 @@ Event volume is what would blow a free-tier quota (Atlas M0 is 512 MB), so `even
 **Phase 2 — Visibility (designed in §7.5; build order fixed, timing not)**
 Unlike the rest of Phase 2, this one is *designed* rather than deferred-and-undefined — because §7.4's data format had to be settled in Phase 1 anyway. Build order, cheapest first:
 1. `awo status --watch` — terminal board over `state.json` + events. Most of the verification win, none of the web stack.
-2. `awo ui` — local, file-backed, `127.0.0.1`, SSE, embedded assets. Built against `WorkspaceReader` from the first commit.
-3. `awo ui --root <dir>` — portfolio scan across sibling workspaces.
+2. `awo ui` — local, file-backed, `127.0.0.1`, SSE, embedded assets. Built against `WorkspaceReader` from the first commit. **Built in v0.0.3, ahead of the dogfood** at the user's direction: the UI is what makes the dogfood faster to verify, so building it first is tooling up rather than skipping a step.
+3. ~~`awo ui --root <dir>`~~ — **cut.** Multi-project moved to the separate hosted site (§7.5).
 
 Still gated on the Phase 1 dogfood: after real use you will know which of the five views (§7.5) you actually open, and you will have real event data to design against instead of guesses.
 

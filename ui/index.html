@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>awo</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --line: #e4e4e1; --ink: #1a1a18; --muted: #6f6f68;
+    --accent: #3b5bdb; --ok: #2f8f4e; --warn: #b06d00; --bad: #c0392b; --idle: #8a8a82;
+    --radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141414; --panel: #1c1c1b; --line: #2e2e2c; --ink: #ededea; --muted: #9a9a92;
+      --accent: #7c93f0; --ok: #5cba7d; --warn: #d9a13b; --bad: #e8705f; --idle: #6a6a63;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .key {
+    font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--accent); color: #fff; padding: 4px 7px; border-radius: 5px;
+  }
+  .muted { color: var(--muted); font-size: 12px; }
+  .live { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  .dot.off { background: var(--idle); }
+
+  main { padding: 18px 20px 40px; display: grid; gap: 20px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  section > h2 {
+    margin: 0; padding: 11px 14px; font-size: 12px; font-weight: 650; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line);
+  }
+  .pad { padding: 14px; }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 0; }
+  .stat { padding: 12px 18px; border-right: 1px solid var(--line); min-width: 110px; }
+  .stat:last-child { border-right: 0; }
+  .stat b { display: block; font-size: 21px; font-weight: 650; letter-spacing: -0.02em; }
+  .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+  .board { display: grid; grid-template-columns: repeat(7, minmax(150px, 1fr)); gap: 10px; padding: 14px; overflow-x: auto; }
+  .col { min-width: 150px; }
+  .col > h3 {
+    margin: 0 0 8px; font-size: 11px; font-weight: 650; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted); display: flex; justify-content: space-between;
+  }
+  .card {
+    border: 1px solid var(--line); border-left: 3px solid var(--idle); border-radius: 6px;
+    padding: 9px 10px; margin-bottom: 8px; background: var(--bg); cursor: pointer;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .card .id { font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .card .nm { font-size: 12px; margin-top: 2px; }
+  .card .meta { font-size: 11px; color: var(--muted); margin-top: 5px; }
+  .card.running { border-left-color: var(--accent); }
+  .card.blocked { border-left-color: var(--bad); }
+  .card.done { border-left-color: var(--ok); }
+  .card.in-review { border-left-color: var(--warn); }
+  .card.cancelled { opacity: .55; }
+
+  .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 99px; border: 1px solid var(--line); }
+  .badge.success { color: var(--ok); border-color: currentColor; }
+  .badge.failed { color: var(--bad); border-color: currentColor; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  th, td { padding: 7px 14px; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--bg); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+  .timeline { margin: 0; padding: 0; list-style: none; }
+  .timeline li { display: flex; gap: 12px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .timeline li:last-child { border-bottom: 0; }
+  .timeline .t { color: var(--muted); font-size: 11px; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; }
+  .timeline .k { font-weight: 600; font-size: 12px; min-width: 88px; }
+  .timeline .d { font-size: 12px; color: var(--muted); word-break: break-word; }
+
+  button {
+    font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 5px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  .empty { padding: 22px 14px; color: var(--muted); font-size: 13px; text-align: center; }
+  .err { color: var(--bad); font-size: 12px; padding: 8px 14px; }
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } .board { grid-template-columns: repeat(3, minmax(150px,1fr)); } }
+</style>
+</head>
+<body>
+<header>
+  <span class="key" id="key">—</span>
+  <h1 id="name">awo</h1>
+  <span class="muted" id="version"></span>
+  <span class="live"><span class="dot off" id="dot"></span><span id="livetext">connecting…</span></span>
+</header>
+
+<main>
+  <section><h2>Overview</h2><div class="stats" id="stats"></div></section>
+
+  <section>
+    <h2>Board</h2>
+    <div class="board" id="board"></div>
+  </section>
+
+  <div class="split">
+    <section>
+      <h2>Run timeline</h2>
+      <div id="timeline" class="pad"><div class="empty">Select a task or run.</div></div>
+    </section>
+    <section>
+      <h2>Repos</h2>
+      <div id="repos"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Runs</h2>
+    <div id="runs"></div>
+  </section>
+</main>
+
+<script>
+const STATUSES = ["todo", "queued", "running", "blocked", "in-review", "done", "cancelled"];
+let selectedRun = null, selectedTask = null;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  return r.json();
+}
+
+function renderStats(s, goals) {
+  const pct = s.successRate === null ? "—" : Math.round(s.successRate * 100) + "%";
+  const dur = s.avgDurationSec === null ? "—" : s.avgDurationSec + "s";
+  const cells = [
+    ["Tasks", s.totalTasks], ["Goals", goals.length], ["Running", s.openRuns],
+    ["Blocked", s.byStatus.blocked || 0], ["Done", s.byStatus.done || 0],
+    ["Runs", s.totalRuns], ["Success", pct], ["Avg run", dur],
+  ];
+  document.getElementById("stats").innerHTML = cells
+    .map(([k, v]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("");
+}
+
+function renderBoard(goals) {
+  const tasks = goals.flatMap((g) => g.tasks);
+  const board = document.getElementById("board");
+  if (!tasks.length) {
+    board.innerHTML = `<div class="empty" style="grid-column:1/-1">No tasks yet. Author one under <code>goals/&lt;goal&gt;/tasks/</code>.</div>`;
+    return;
+  }
+  board.innerHTML = STATUSES.map((st) => {
+    const inCol = tasks.filter((t) => t.status === st);
+    const cards = inCol.map((t) => `
+      <div class="card ${esc(t.status)} ${t.id === selectedTask ? "sel" : ""}" data-task="${esc(t.id)}" data-run="${esc(t.lastRunId || "")}">
+        <div class="id">${esc(t.id)}</div>
+        <div class="nm">${esc(t.name)}</div>
+        <div class="meta">
+          ${t.agent ? esc(t.agent) + " · " : ""}${esc(t.targets.join(", ") || "no targets")}
+          ${t.lastRunOutcome ? ` <span class="badge ${esc(t.lastRunOutcome)}">${esc(t.lastRunOutcome)}</span>` : ""}
+        </div>
+        ${t.blockedReason ? `<div class="meta" style="color:var(--bad)">${esc(t.blockedReason)}</div>` : ""}
+      </div>`).join("");
+    return `<div class="col"><h3><span>${esc(st)}</span><span>${inCol.length || ""}</span></h3>${cards}</div>`;
+  }).join("");
+
+  board.querySelectorAll(".card").forEach((el) => el.addEventListener("click", () => {
+    selectedTask = el.dataset.task;
+    selectedRun = el.dataset.run || null;
+    refresh();
+  }));
+}
+
+function renderRepos(repos) {
+  const el = document.getElementById("repos");
+  if (!repos.length) { el.innerHTML = `<div class="empty">No repos linked.</div>`; return; }
+  el.innerHTML = `<table><thead><tr><th>Repo</th><th>Type</th><th>Status</th></tr></thead><tbody>${
+    repos.map((r) => `<tr><td class="mono">${esc(r.name)}</td><td>${esc(r.type)}</td>
+      <td style="color:${r.status === "missing" ? "var(--bad)" : r.status === "dirty" ? "var(--warn)" : "var(--ok)"}">${esc(r.status)}</td></tr>`).join("")
+  }</tbody></table>`;
+}
+
+function renderRuns(runs) {
+  const el = document.getElementById("runs");
+  if (!runs.length) { el.innerHTML = `<div class="empty">No runs recorded yet.</div>`; return; }
+  el.innerHTML = `<table><thead><tr><th>Run</th><th>Task</th><th>Outcome</th><th>Duration</th><th>Repos</th></tr></thead><tbody>${
+    runs.map((r) => `<tr data-run="${esc(r.runId)}"><td class="mono">${esc(r.runId)}</td><td class="mono">${esc(r.taskId || "—")}</td>
+      <td><span class="badge ${esc(r.status)}">${esc(r.status)}</span></td>
+      <td>${r.durationSec === null ? "—" : esc(r.durationSec) + "s"}</td>
+      <td class="muted">${esc(r.reposChanged.join(", ") || "—")}</td></tr>`).join("")
+  }</tbody></table>`;
+  el.querySelectorAll("tr[data-run]").forEach((tr) => tr.addEventListener("click", () => {
+    selectedRun = tr.dataset.run; renderTimeline();
+  }));
+}
+
+async function renderTimeline() {
+  const el = document.getElementById("timeline");
+  if (!selectedRun) { el.innerHTML = `<div class="empty">Select a task or run.</div>`; return; }
+  try {
+    const events = await getJSON("/api/events?run=" + encodeURIComponent(selectedRun));
+    if (!events.length) { el.innerHTML = `<div class="empty">No events for this run.</div>`; return; }
+    el.innerHTML = `<div class="mono muted" style="margin-bottom:8px">${esc(selectedRun)}</div>
+      <ul class="timeline">${events.map((e) => {
+        const detail = Object.entries(e).filter(([k]) => k !== "t" && k !== "kind")
+          .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
+        return `<li><span class="t">${esc((e.t || "").slice(11, 19))}</span>
+          <span class="k">${esc(e.kind)}</span><span class="d">${esc(detail)}</span></li>`;
+      }).join("")}</ul>`;
+  } catch (err) {
+    el.innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  }
+}
+
+async function refresh() {
+  try {
+    const snap = await getJSON("/api/snapshot");
+    document.getElementById("key").textContent = snap.project.projectKey;
+    document.getElementById("name").textContent = snap.project.projectName;
+    document.getElementById("version").textContent = "awo " + snap.project.libraryVersion;
+    document.title = snap.project.projectKey + " — awo";
+    renderStats(snap.stats, snap.goals);
+    renderBoard(snap.goals);
+    renderRepos(snap.repos);
+    renderRuns(snap.runs);
+    if (!selectedRun && snap.runs.length) selectedRun = snap.runs[0].runId;
+    renderTimeline();
+  } catch (err) {
+    document.getElementById("stats").innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  }
+}
+
+function connect() {
+  const src = new EventSource("/api/stream");
+  const dot = document.getElementById("dot"), text = document.getElementById("livetext");
+  src.onopen = () => { dot.classList.remove("off"); text.textContent = "live"; };
+  src.onerror = () => { dot.classList.add("off"); text.textContent = "reconnecting…"; };
+  src.addEventListener("changed", refresh);
+}
+
+refresh();
+connect();
+</script>
+</body>
+</html>

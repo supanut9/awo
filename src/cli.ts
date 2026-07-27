@@ -15,6 +15,7 @@ import {
   runTaskVerify,
 } from "./commands/task.js";
 import { runLogList, runLogShow, runLogTail } from "./commands/log.js";
+import { runUi } from "./commands/ui.js";
 
 const program = new Command();
 
@@ -289,6 +290,27 @@ log
           .join(" ");
         console.log(`${e.t}  ${e.kind}${rest ? `  ${rest}` : ""}`);
       }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("ui")
+  .description("Serve a local dashboard for this workspace on 127.0.0.1 (board, runs, repos).")
+  .option("--port <port>", "port to bind (default: an OS-assigned free port)", (v) => parseInt(v, 10))
+  .action(async (opts: { port?: number }) => {
+    try {
+      const handle = await runUi({ port: opts.port });
+      console.log(`awo ui running at ${handle.url}`);
+      console.log("Press Ctrl+C to stop.");
+      const stop = async (): Promise<void> => {
+        await handle.close();
+        process.exit(0);
+      };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
