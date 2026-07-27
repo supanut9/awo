@@ -19,6 +19,7 @@ import {
 } from "./commands/task.js";
 import { runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
+import { runGoalNew, runReqNew, runTaskNew } from "./commands/plan.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -126,7 +127,89 @@ program
     }
   });
 
+const req = program.command("req").description("Requirement intake (§7.2).");
+
+req
+  .command("new")
+  .description("Create the next requirement skeleton (allocates <KEY>-R#).")
+  .requiredOption("--title <title>", "what is being asked for")
+  .option("--source <source>", "where the ask came from (stakeholder, ticket, …)")
+  .action(async (opts: { title: string; source?: string }) => {
+    try {
+      const r = await runReqNew(opts);
+      console.log(`${r.id} created at ${r.file}`);
+      console.log(`Refine it, then: awo goal new --from ${r.id}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+const goal = program.command("goal").description("Goals: the objective distilled from a requirement (§7.2).");
+
+goal
+  .command("new")
+  .description("Turn a requirement into a goal folder, moving it in as requirement.md.")
+  .requiredOption("--from <reqId>", "requirement to transform (e.g. PROM-R1)")
+  .option("--title <title>", "goal title (defaults to the requirement's)")
+  .action(async (opts: { from: string; title?: string }) => {
+    try {
+      const g = await runGoalNew(opts);
+      console.log(`${g.id} created at ${g.dir}/ (from ${g.requirementId})`);
+      console.log(`Then add tasks: awo task new --goal ${g.id} --name "…" --targets <repo>`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("list")
+  .description("List goals with rolled-up task status.")
+  .action(async () => {
+    try {
+      const rows = await runTaskList();
+      const byGoal = new Map<string, { total: number; done: number; blocked: number }>();
+      for (const r of rows) {
+        const g = byGoal.get(r.goalId) ?? { total: 0, done: 0, blocked: 0 };
+        g.total += 1;
+        if (r.status === "done") g.done += 1;
+        if (r.status === "blocked") g.blocked += 1;
+        byGoal.set(r.goalId, g);
+      }
+      if (byGoal.size === 0) {
+        console.log("No goals yet. Start with `awo req new --title \"…\"`.");
+        return;
+      }
+      for (const [id, g] of byGoal) {
+        console.log(`${id}\t${g.done}/${g.total} done${g.blocked ? `, ${g.blocked} blocked` : ""}`);
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
 const task = program.command("task").description("Inspect and run tasks (§7.2/§7.4).");
+
+task
+  .command("new")
+  .description("Create the next task skeleton under a goal (allocates <KEY>-T# and wires taskIds).")
+  .requiredOption("--goal <goalId>", "goal this task belongs to")
+  .requiredOption("--name <name>", "what the task does")
+  .option("--targets <repos>", "comma-separated repo names from the manifest", (v) => v.split(","))
+  .option("--depends-on <taskIds>", "comma-separated task ids that must finish first", (v) => v.split(","))
+  .option("--agent <agent>", "agent that should run it")
+  .action(async (opts: { goal: string; name: string; targets?: string[]; dependsOn?: string[]; agent?: string }) => {
+    try {
+      const t = await runTaskNew(opts);
+      console.log(`${t.id} created at ${t.file}`);
+      console.log(`Run it with: awo task run ${t.id}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
 
 task
   .command("list")

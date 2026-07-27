@@ -1,11 +1,11 @@
 {
-  "libraryVersion": "0.0.2",
+  "libraryVersion": "0.0.4",
   "files": {
     ".gitignore": "sha256-31937e66e80cffaf13e993128f962d8b40a0e682ba245a990ef6f07a59290acb",
     ".vscode/settings.json": "sha256-e840a4fd9901e647654b323b9d4945b720a052ab8f4b6166e3e93adfbd12f260",
     ".workspace/connectors.json": "sha256-3d34cd29227263d3f8b2355cd9c67c87d747ae6c2f581a5ab52ab831d8d803f6",
     ".workspace/credentials/README.md": "sha256-aef0575f4480f67d859290124e87dab06295f7e6e63118555a8f5153bf31f9db",
-    ".workspace/manifest.json": "sha256-e3e9bb7a36472f535a1dfb34a03b101806787b64c5a4b6a20bf77e1e64779771",
+    ".workspace/manifest.json": "sha256-8e8f33527973029ad921eadd07751b3be35735b3c59c4864c410c14f9f1f6642",
     "AGENTS.md": "sha256-e6229fbaf1bcba1ac672ac206560c48ec1118051aaa3d77d60b75506129c4bee",
     "CLAUDE.md": "sha256-4f8734db558e89e8960237c3b9890b2b7075c5e751428916dbb1c525b73d1e65",
     "GEMINI.md": "sha256-9a8a2e391feb60d8d69f4fe7579275aef53fef51af3804bf13103b53057a2cad",
@@ -27,7 +27,7 @@
     "goals/.gitkeep": "sha256-410dcf5765a3e9d4f908b52fcc258f9f86c6c4fe25f260b1693b6a5a51887336",
     "instructions/capture-requirement.md": "sha256-730419d8e03ddb9c8b4a749cff3f1d625ec0688676fcb9b4d936a54944f90232",
     "instructions/full-workflow.md": "sha256-462121d707aec89030d619cf4edb867fe8dd6b975e1f440ef296488c5aaa2b1d",
-    "instructions/plan-a-goal.md": "sha256-276f7ef1c372b9e1ed96faacbf5f39c1f5e550a5fc2789bb1f4a9b480afd747a",
+    "instructions/plan-a-goal.md": "sha256-9d0af0e1ec9a4282e209e0073b933115429465a9e68e611d57ca90659f350b86",
     "instructions/ship-a-change.md": "sha256-9c1a31fb893ae3a0fda02146d09ac1fe560f8c9316cfd47205796ff32a54dfac",
     "logs/.gitkeep": "sha256-87dfea88c9a53335f153c91683b3493f46ecd790370365b70e0f505130738bf0",
     "repos/.gitkeep": "sha256-80ea0e749c6b7516032fce6a22fc0d4608ab8572f0c91dc629b3cce41993ce08",
