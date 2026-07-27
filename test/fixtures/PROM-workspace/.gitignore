@@ -18,3 +18,6 @@
 
 # Node
 node_modules/
+
+# Upgrade backups — copies of scaffolding replaced by `awo upgrade` (§11.4)
+/.workspace/upgrade-backups/

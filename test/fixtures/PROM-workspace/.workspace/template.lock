@@ -1,11 +1,11 @@
 {
-  "libraryVersion": "0.0.4",
+  "libraryVersion": "0.0.6",
   "files": {
-    ".gitignore": "sha256-31937e66e80cffaf13e993128f962d8b40a0e682ba245a990ef6f07a59290acb",
+    ".gitignore": "sha256-3fd7d8f6fd9682873ad3da985b29f5d4b4b64ed0db9beb96f8f0a29743e8ce56",
     ".vscode/settings.json": "sha256-e840a4fd9901e647654b323b9d4945b720a052ab8f4b6166e3e93adfbd12f260",
     ".workspace/connectors.json": "sha256-3d34cd29227263d3f8b2355cd9c67c87d747ae6c2f581a5ab52ab831d8d803f6",
     ".workspace/credentials/README.md": "sha256-aef0575f4480f67d859290124e87dab06295f7e6e63118555a8f5153bf31f9db",
-    ".workspace/manifest.json": "sha256-8e8f33527973029ad921eadd07751b3be35735b3c59c4864c410c14f9f1f6642",
+    ".workspace/manifest.json": "sha256-ec5a0e42cd1c291f5496a64140e4bdc883639629181a5a1c08b3bfe6bdfd06f1",
     "AGENTS.md": "sha256-e6229fbaf1bcba1ac672ac206560c48ec1118051aaa3d77d60b75506129c4bee",
     "CLAUDE.md": "sha256-4f8734db558e89e8960237c3b9890b2b7075c5e751428916dbb1c525b73d1e65",
     "GEMINI.md": "sha256-9a8a2e391feb60d8d69f4fe7579275aef53fef51af3804bf13103b53057a2cad",

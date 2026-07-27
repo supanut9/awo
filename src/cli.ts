@@ -22,6 +22,7 @@ import { runUi } from "./commands/ui.js";
 import { runGoalNew, runReqNew, runTaskNew } from "./commands/plan.js";
 import { runSync, syncHadProblems } from "./commands/sync.js";
 import { doctorExitCode, runDoctor } from "./commands/doctor.js";
+import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -132,6 +133,57 @@ program
         console.log(`${r.name}\t${r.action}${r.detail ? `\t${r.detail}` : ""}`);
       }
       if (syncHadProblems(results)) process.exitCode = 1;
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("upgrade")
+  .description(
+    "Bring this workspace up to the installed awo version: run migrations and reconcile scaffolding (§11)."
+  )
+  .option("--dry-run", "show what would change without touching anything")
+  .option("--to <version>", "assert the intended target version (must match the installed awo)")
+  .option("--force", "proceed even with uncommitted changes in the workspace")
+  .action(async (opts: { dryRun?: boolean; to?: string; force?: boolean }) => {
+    try {
+      const r = await runUpgrade(opts);
+
+      if (r.from === r.to && !planHasWork(r)) {
+        console.log(`Already at ${r.to}; nothing to do.`);
+        return;
+      }
+
+      console.log(`${r.from} -> ${r.to}${opts.dryRun ? "  (dry run)" : ""}`);
+      if (!r.hadLock) {
+        console.log(
+          "No template.lock: this workspace predates it, so nothing will be overwritten — every changed file is written alongside as .new (§11.2)."
+        );
+      }
+
+      for (const m of r.migrations) console.log(`  migration ${m.version}: ${m.description}`);
+
+      const counts = new Map<string, number>();
+      for (const f of r.files) counts.set(f.action, (counts.get(f.action) ?? 0) + 1);
+      for (const [action, n] of [...counts].sort()) {
+        if (action === "unchanged") continue;
+        console.log(`  ${action}: ${n}`);
+      }
+      for (const f of r.files.filter((f) => f.action === "conflict")) {
+        console.log(`    ! ${f.path} — customized, new version written alongside`);
+      }
+
+      if (opts.dryRun) {
+        console.log(`\nRun \`awo upgrade\` to apply.`);
+        return;
+      }
+      if (r.backupDir) console.log(`\nReplaced files backed up to ${r.backupDir}`);
+      if (r.conflictFiles.length > 0) {
+        console.log(`Review and merge: ${r.conflictFiles.join(", ")}`);
+      }
+      console.log(`Workspace is now at ${r.to}.`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

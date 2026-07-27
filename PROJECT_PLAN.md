@@ -255,7 +255,7 @@ Design notes: `git` entries fully reconstitute on a fresh clone via `sync`; `loc
 | `awo task complete <task-id> --outcome <o>` | Close the open run: writes the log, index line, and lifecycle transition. `--gate` routes success to `in-review`. |
 | `awo task verify <task-id> [--reject]` | QA gate (§7.1): approve an `in-review` task to `done`, or reject it back to `todo`. |
 | `awo connector add <name>` / `list` / `remove` | Register or manage MCP/connectors in `connectors.json`. |
-| `awo upgrade` | Re-apply newer library scaffolding to an existing workspace. |
+| `awo upgrade [--dry-run] [--to <v>] [--force]` | Bring a workspace up to the **installed** awo version: run migrations, reconcile scaffolding (§11). `--to` asserts intent — it cannot fetch another version, since the template ships in the package. |
 | `awo doctor` | Diagnose: version skew (§11), missing/mislinked repos, task `targets` and `dependsOn` that don't resolve, `taskIds` drift, orphaned `state.json` entries, abandoned runs, un-transformed requirements. Read-only; exits non-zero on errors. |
 
 **Phase 2 — visibility** (§7.4, §7.5; built only after Phase 1 has been dogfooded)
@@ -921,6 +921,10 @@ Everything here is a design decision made on paper, not something that's been pr
     - **Follow-up finding: opening that multi-root workspace has its own real cost.** Several linked repos have their own `CLAUDE.md`/`AGENTS.md` for their own unrelated dev conventions. Opening all folders as workspace peers surfaces all of them to an agent at once, alongside the orchestration root's `AGENTS.md` — read as project confusion during dogfooding, not a hypothetical. Practical guidance recorded here since it isn't enforceable in code: use the workspace root alone (plain single-folder open) for agent sessions; treat the `.code-workspace` file as a git-tooling view only, opened separately when needed.
     - **Better default, installed by `init`:** `.vscode/settings.json` with `"git.autoRepositoryDetection": "subFolders"` and `"git-graph.maxDepthOfRepoSearch": 2`, so a single-folder open of the workspace root (no multi-root, no `CLAUDE.md` pollution) still lets VS Code's Source Control panel and Git Graph discover repos nested under `repos/`. Whether this actually follows symlinks for `type:"local"` repos (vs. only real directories from `type:"git"` clones) was untested at time of writing — worth confirming in practice, and revisiting the `.code-workspace` generator's necessity if it does.
 
+25. **`awo upgrade` nearly shipped a data-loss bug, caught by one assertion.** Rebuilding `template.lock` from disk after an upgrade made a user's edits the new baseline, so a *second* upgrade would classify their customized `AGENTS.md` as unmodified and overwrite it. The only thing that caught it was asserting the upgrade was **idempotent** — run it twice and nothing further happens. Two lessons: **for anything that reconciles state against a baseline, test running it twice**, and the baseline must describe the *source of truth* (the template), never the current state (the disk). §11.2 now says this explicitly.
+
+26. **§11.2's third case existed in the spec and not in the code.** "User-edited, template unchanged → leave it alone silently" was written down, then not implemented — so a customized file was re-flagged as a conflict on every upgrade, regenerating a `.new` file identical to the baseline the user had already diverged from. Writing the spec first did not stop the omission; running the command twice did.
+
 24. **`doctor` found a real bug within seconds of existing — requirement IDs were being reissued.** `goal new` *moves* the requirement into the goal folder as `requirement.md`, so its ID stopped appearing in `goals/`'s listing — and `nextId` therefore handed `SHOP-R1` to the *next* requirement while `goal.md`'s `requirementId: SHOP-R1` still pointed at the first. Two different requirements, one ID, in a scheme §7.2 calls unique across projects. Fixed by also scanning each goal's `requirement.md` id and `goal.md`'s `requirementId`; regression test added. Two lessons: **an ID allocator must scan wherever IDs can hide, not just where they are created**, and a diagnostic command pays for itself immediately — this was invisible to 30 passing tests because none of them created a requirement *after* a transform.
 
 22. **Where does a requirement live *before* it has a goal?** §4 and §7.2 both show `requirement.md` nested inside the goal folder, but a requirement exists first — intake happens before the goal is distilled. The spec never says. Implemented as `goals/<KEY>-R#.md` at the top of `goals/`, which `goal new --from` then **moves** into the goal folder as `requirement.md`. Chosen because it is what an agent did unprompted in the first dogfood, so it is at least the intuitive reading. Revisit if a `requirements/` folder turns out to read better once there are many un-transformed asks.
@@ -1135,5 +1139,25 @@ The worked example is real, not hypothetical — see §9 item 21. v0.0.2 replace
 
 - **Phase 1 (now):** `init` writes `.workspace/template.lock`. Same argument as `workspaceId` (§5) — nothing reads it yet, but a workspace created without it can never be upgraded reliably, and that's unfixable after the fact.
 - **Phase 1 (discipline, free):** tolerant reads on every new field and enum.
-- **Phase 2:** `awo doctor` version-skew reporting, then `awo upgrade` with `--dry-run` and the four-case reconciliation.
+- ~~**Phase 2:**~~ **BUILT in v0.0.7**: `awo doctor` (v0.0.6) and `awo upgrade` with `--dry-run`, `--force`, and the four-case reconciliation.
 - **Not planned:** auto-upgrade, down-migrations, and true three-way merge with conflict markers.
+
+#### What `--to` can and cannot mean (decided while building)
+
+Because the template ships **inside** the installed package (§10), the only version a given `awo` can upgrade a workspace *to* is its own. So `--to <version>` is an **assertion of intent**, not a download selector: if it disagrees with the installed version the command refuses and points at the right invocation —
+
+```
+$ awo upgrade --to 0.0.4
+Cannot upgrade to 0.0.4: this awo is 0.0.6, and the template ships inside the
+package (§10) — there is nothing to fetch.
+Run it with that version instead:
+  npx @supanut9/awo@0.0.4 upgrade
+```
+
+This is the same shape as any other tool where the installed binary defines the target, and it keeps §10's offline/version-locked property intact. A workspace newer than the installed awo is refused outright rather than downgraded (§11.3 is forward-only).
+
+#### The lock records the TEMPLATE's content, not the disk's
+
+Non-obvious and load-bearing, caught only by an idempotency assertion. After an upgrade leaves a customized file alone, it is tempting to rebuild `template.lock` from what is on disk. **That silently arms a data-loss bug:** the user's edit becomes the new baseline, so the *next* upgrade sees `current == lock`, classifies the file as unmodified, and overwrites their work.
+
+The lock must therefore record the hash of **what this version of the template provides**. Then an unmerged edit keeps showing as `current != lock` and is left alone. `manifest.json` is the one exception — its content is per-workspace, so its baseline comes from disk, and it is excluded from file reconciliation entirely because migrations own it.
