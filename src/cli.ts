@@ -26,6 +26,22 @@ const { version } = JSON.parse(
   fs.readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8")
 ) as { version: string };
 
+// Every command resolves paths from the current directory (§3 decision 7).
+// If that directory has been deleted out from under the shell — which happens
+// when a workspace is removed and recreated while a terminal sits in it —
+// process.cwd() throws a bare `ENOENT: uv_cwd` before any command runs. Turn
+// that into something actionable.
+try {
+  process.cwd();
+} catch {
+  console.error(
+    "awo: your shell's current directory no longer exists (it was deleted or replaced).\n" +
+      "Re-enter it with an absolute path, or open a new terminal:\n" +
+      "  cd \"$PWD\""
+  );
+  process.exit(1);
+}
+
 const program = new Command();
 
 program
