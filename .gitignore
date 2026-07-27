@@ -3,3 +3,10 @@ dist/
 *.log
 .DS_Store
 .claude/
+
+# Compiled output must never live next to sources (build goes to dist/)
+src/**/*.js
+src/**/*.d.ts
+src/**/*.js.map
+test/**/*.js
+test/**/*.d.ts
