@@ -97,6 +97,28 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test("a requirement id is never reissued after it moves into a goal folder", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "First ask"]);
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+
+  // PL-R1 now lives at goals/PL-G1-first-ask/requirement.md, invisible in the
+  // goals/ listing — but it is still referenced by goal.md's requirementId, so
+  // reusing the number would give two requirements the same id.
+  const second = awo(ws, ["req", "new", "--title", "Second ask"]);
+  assert.equal(second.code, 0, second.stderr);
+  assert.match(second.stdout, /PL-R2 created/, "must not reissue PL-R1");
+  assert.ok(!fs.existsSync(path.join(ws, "goals", "PL-R1.md")));
+
+  // Same for goal ids after a goal exists.
+  awo(ws, ["goal", "new", "--from", "PL-R2"]);
+  assert.match(
+    fs.readdirSync(path.join(ws, "goals")).join(" "),
+    /PL-G1-first-ask.*PL-G2-second-ask|PL-G2-second-ask.*PL-G1-first-ask/
+  );
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 test("goal new rejects an unknown requirement and names what exists", () => {
   const ws = makeWorkspace();
   const empty = awo(ws, ["goal", "new", "--from", "PL-R9"]);
@@ -154,4 +176,83 @@ test("ID allocation skips numbers already used by hand-authored files", () => {
   assert.equal(next.code, 0, next.stderr);
   assert.match(next.stdout, /PL-T3 created/);
   fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("doctor reports a clean workspace, and finds broken targets, deps and links", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Thing"]);
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Work", "--targets", "api"]);
+
+  const clean = awo(ws, ["doctor"]);
+  assert.equal(clean.code, 0, "a healthy workspace must exit 0");
+  assert.match(clean.stdout, /No problems found\.|0 error\(s\)/);
+
+  // Break things: a bad target, a bad dependency, and a missing repo link.
+  const tasksDir = path.join(ws, "goals", "PL-G1-thing", "tasks");
+  fs.writeFileSync(
+    path.join(tasksDir, "PL-T9-broken.md"),
+    `---\nid: PL-T9\ngoalId: PL-G1\nname: Broken\ntargets: [ghost]\ndependsOn: [PL-T42]\nstatus: todo\n---\n\nx\n`
+  );
+  fs.rmSync(path.join(ws, "repos", "api"), { recursive: true, force: true });
+
+  const broken = awo(ws, ["doctor"]);
+  assert.equal(broken.code, 1, "errors must set a non-zero exit code");
+  assert.match(broken.stdout, /targets "ghost", which is not in the manifest/);
+  assert.match(broken.stdout, /dependsOn "PL-T42", which does not exist/);
+  assert.match(broken.stdout, /api: missing from repos\//);
+  assert.match(broken.stdout, /taskIds/, "an unlisted task must be reported");
+
+  // sync puts the missing link back.
+  const synced = awo(ws, ["sync"]);
+  assert.equal(synced.code, 0, synced.stderr);
+  assert.match(synced.stdout, /api\tlinked|api\tup-to-date/);
+  assert.match(awo(ws, ["doctor"]).stdout, /0 error\(s\)|ghost/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("doctor flags a run that was opened but never closed", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Thing"]);
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Work", "--targets", "api"]);
+  awo(ws, ["task", "run", "PL-T1"]);
+
+  const out = awo(ws, ["doctor"]);
+  assert.match(out.stdout, /PL-T1: run .* was opened but never closed/);
+  assert.match(out.stdout, /awo task complete PL-T1/);
+
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success"]);
+  assert.ok(
+    !/never closed/.test(awo(ws, ["doctor"]).stdout),
+    "closing the run must clear the warning"
+  );
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("sync relinks a local repo whose symlink points at the wrong path", () => {
+  const ws = makeWorkspace();
+  const link = path.join(ws, "repos", "api");
+  fs.rmSync(link, { recursive: true, force: true });
+  fs.symlinkSync(os.tmpdir(), link, "dir");
+
+  const out = awo(ws, ["sync"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /api\trelinked/);
+  assert.match(awo(ws, ["list"]).stdout, /api\tlocal\tpresent/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("sync reports a local repo whose source has disappeared, and exits non-zero", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "awo-gone-"));
+  execFileSync(process.execPath, [CLI, "init", "--key", "GN"], { cwd: dir });
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "awo-gonerepo-"));
+  execFileSync(process.execPath, [CLI, "connect", repo, "--name", "temp"], { cwd: dir });
+  fs.rmSync(repo, { recursive: true, force: true });
+
+  const out = awo(dir, ["sync"]);
+  assert.equal(out.code, 1, "an unusable repo must set a non-zero exit code");
+  assert.match(out.stdout, /temp\tsource-missing/);
+  assert.match(awo(dir, ["doctor"]).stdout, /source path no longer exists/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

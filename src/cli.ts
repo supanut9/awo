@@ -20,6 +20,8 @@ import {
 import { runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 import { runGoalNew, runReqNew, runTaskNew } from "./commands/plan.js";
+import { runSync, syncHadProblems } from "./commands/sync.js";
+import { doctorExitCode, runDoctor } from "./commands/doctor.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -108,6 +110,53 @@ program
       for (const r of results) {
         console.log(`${r.name}\t${r.type}\t${r.status}`);
       }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("sync")
+  .description(
+    "Reconcile repos/ with the manifest: clone missing git repos, fast-forward clean ones, relink local ones."
+  )
+  .action(async () => {
+    try {
+      const results = await runSync();
+      if (results.length === 0) {
+        console.log("Nothing to sync — no repos linked.");
+        return;
+      }
+      for (const r of results) {
+        console.log(`${r.name}\t${r.action}${r.detail ? `\t${r.detail}` : ""}`);
+      }
+      if (syncHadProblems(results)) process.exitCode = 1;
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("doctor")
+  .description("Diagnose the workspace: version skew, broken links, bad targets, abandoned runs.")
+  .action(async () => {
+    try {
+      const findings = await runDoctor();
+      if (findings.length === 0) {
+        console.log("No problems found.");
+        return;
+      }
+      const icon = { error: "✗", warn: "!", info: "·" } as const;
+      for (const f of findings) {
+        console.log(`${icon[f.severity]} [${f.area}] ${f.message}`);
+        if (f.fix) console.log(`    fix: ${f.fix}`);
+      }
+      const errors = findings.filter((f) => f.severity === "error").length;
+      const warns = findings.filter((f) => f.severity === "warn").length;
+      console.log(`\n${errors} error(s), ${warns} warning(s), ${findings.length - errors - warns} note(s).`);
+      process.exitCode = doctorExitCode(findings);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

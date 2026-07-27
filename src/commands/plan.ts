@@ -47,6 +47,22 @@ async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promi
   for (const goal of await findGoals(root)) {
     consider(path.basename(goal.dir));
     consider(goal.id);
+
+    // A transformed requirement lives INSIDE the goal folder as
+    // requirement.md, so its id is no longer visible in goals/'s listing.
+    // Missing this reissued R1 to a second requirement while the first was
+    // still referenced by goal.md's requirementId.
+    const goalFm = matter(await fs.readFile(path.join(goal.dir, "goal.md"), "utf8")).data as Record<
+      string,
+      unknown
+    >;
+    if (typeof goalFm.requirementId === "string") consider(goalFm.requirementId);
+
+    const reqFile = path.join(goal.dir, "requirement.md");
+    if (await fs.pathExists(reqFile)) {
+      const reqFm = matter(await fs.readFile(reqFile, "utf8")).data as Record<string, unknown>;
+      if (typeof reqFm.id === "string") consider(reqFm.id);
+    }
   }
   for (const { task } of await findAllTasks(root)) consider(task.id);
 
