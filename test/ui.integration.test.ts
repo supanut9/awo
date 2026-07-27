@@ -87,7 +87,20 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
   const page = await fetch(`${ui.url}/`);
   assert.equal(page.status, 200);
   assert.match(page.headers.get("content-type") ?? "", /text\/html/);
-  assert.match(await page.text(), /<title>awo<\/title>/);
+  const html = await page.text();
+  assert.match(html, /<title>awo<\/title>/);
+  assert.match(html, /id="root"/, "the React root must be present");
+
+  // The prebuilt bundle must be served, or the page renders nothing.
+  const bundle = await fetch(`${ui.url}/app.js`);
+  assert.equal(bundle.status, 200);
+  assert.match(bundle.headers.get("content-type") ?? "", /javascript/);
+  const css = await fetch(`${ui.url}/app.css`);
+  assert.equal(css.status, 200);
+
+  // Traversal outside the asset dir is refused.
+  const escape = await fetch(`${ui.url}/../package.json`);
+  assert.equal(escape.status, 404);
 
   // Snapshot shape.
   const snap = await (await fetch(`${ui.url}/api/snapshot`)).json();
@@ -123,6 +136,21 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
 
   const noRun = await fetch(`${ui.url}/api/events`);
   assert.equal(noRun.status, 400);
+
+  // Task detail: definition body + state, for the drawer.
+  const detail = await (await fetch(`${ui.url}/api/task?id=UI-T1`)).json();
+  assert.equal(detail.id, "UI-T1");
+  assert.match(detail.body, /Do it\./, "the task's markdown body must come through");
+  assert.deepEqual(detail.dependsOn, []);
+  assert.match(detail.file, /UI-T1\.md$/);
+  assert.equal((await fetch(`${ui.url}/api/task?id=NOPE`)).status, 404);
+  assert.equal((await fetch(`${ui.url}/api/task`)).status, 400);
+
+  // Run log: the markdown record written at completion.
+  const log = await (await fetch(`${ui.url}/api/run?id=${encodeURIComponent(runId)}`)).json();
+  assert.match(log.markdown, /^---/, "run log is markdown with frontmatter");
+  assert.match(log.markdown, /taskId: UI-T1/);
+  assert.equal((await fetch(`${ui.url}/api/run?id=nope`)).status, 404);
 
   // Writes: only human lifecycle moves, and invalid ones are refused.
   const bad = await fetch(`${ui.url}/api/task/status`, {

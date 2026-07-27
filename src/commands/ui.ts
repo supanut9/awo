@@ -9,7 +9,19 @@ import { runTaskStatus } from "./task.js";
 
 // dist/commands/ui.js -> package root is two levels up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const UI_DIR = path.join(PACKAGE_ROOT, "ui");
+// The dashboard is prebuilt by vite into dist/dashboard and shipped in the
+// package (§7.5) — offline, version-locked, no CDN. Deliberately NOT dist/ui:
+// that is where src/ui/*.ts compiles to, and vite's emptyOutDir would wipe it.
+const UI_DIR = path.join(PACKAGE_ROOT, "dist", "dashboard");
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
+  ".map": "application/json",
+};
 
 export interface UiOptions {
   cwd?: string;
@@ -73,6 +85,26 @@ export async function runUi(options: UiOptions = {}): Promise<UiHandle> {
         return sendJson(res, 200, await reader.snapshot());
       }
 
+      if (req.method === "GET" && url.pathname === "/api/task") {
+        const id = url.searchParams.get("id");
+        if (!id) return sendJson(res, 400, { error: "missing ?id=<taskId>" });
+        try {
+          return sendJson(res, 200, await reader.task(id));
+        } catch (err) {
+          return sendJson(res, 404, { error: (err as Error).message });
+        }
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/run") {
+        const id = url.searchParams.get("id");
+        if (!id) return sendJson(res, 400, { error: "missing ?id=<runId>" });
+        try {
+          return sendJson(res, 200, { runId: id, markdown: await reader.runDetail(id) });
+        } catch (err) {
+          return sendJson(res, 404, { error: (err as Error).message });
+        }
+      }
+
       if (req.method === "GET" && url.pathname === "/api/events") {
         const runId = url.searchParams.get("run");
         if (!runId) return sendJson(res, 400, { error: "missing ?run=<runId>" });
@@ -101,6 +133,16 @@ export async function runUi(options: UiOptions = {}): Promise<UiHandle> {
           return sendJson(res, 200, { taskId, status: to });
         } catch (err) {
           return sendJson(res, 409, { error: (err as Error).message });
+        }
+      }
+
+      // Static assets from the prebuilt bundle. Resolved inside UI_DIR only —
+      // a traversal attempt lands outside and is refused.
+      if (req.method === "GET") {
+        const asset = path.join(UI_DIR, path.normalize(url.pathname).replace(/^(\.\.[/\\])+/, ""));
+        if (asset.startsWith(UI_DIR + path.sep) && (await fs.pathExists(asset))) {
+          const type = CONTENT_TYPES[path.extname(asset)] ?? "application/octet-stream";
+          return send(res, 200, type, await fs.readFile(asset));
         }
       }
 

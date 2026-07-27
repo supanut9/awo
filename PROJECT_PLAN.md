@@ -726,7 +726,15 @@ awo ui                       # serve this workspace on 127.0.0.1:<port>
 awo ui --root ~/dev/spaces   # portfolio mode: scan a directory of workspaces
 ```
 
-**Built in v0.0.3.** Deviation from the sketch below worth recording: there is **no Vite/React build step**. The page is a single hand-written, dependency-free `ui/index.html` (~12 kB) shipped in the package alongside `templates/`. A bundler would have added a toolchain, a second build, and a dependency tree to maintain for one page — revisit only if the UI grows past what one file can carry. The `WorkspaceReader` boundary is implemented as specced, so that decision doesn't affect the hosted site later.
+**Built in v0.0.3 (hand-written HTML), rebuilt on Vite + React + Tailwind in v0.0.4** once it grew past one view. Recorded because the size question is the obvious objection:
+
+- **React source, Preact runtime.** `vite.config.ts` aliases `react`/`react-dom` to `preact/compat`. Identical source (still plain React components, reusable by the Next.js site), but the bundle is **76 kB / 25 kB gzipped** instead of 248 kB / 77 kB. Nothing in the dashboard touches React internals, which is the only thing that alias breaks.
+- **Nothing reaches a user's `node_modules`.** React, Vite, Tailwind, and `marked` are **devDependencies** compiled away at build time. Runtime deps are unchanged: `commander`, `fs-extra`, `simple-git`, `uuid`, `gray-matter`, `chokidar`.
+- **Cost is one bundle in the tarball**: package 20.8 kB → 68.9 kB, and it is only read when someone runs `awo ui`. `init`, `add`, `task run` never touch it.
+- **Output path is `dist/dashboard/`, not `dist/ui/`** — `src/ui/*.ts` compiles to `dist/ui/`, and vite's `emptyOutDir` deletes it otherwise. This was a real breakage, not a hypothetical.
+- **The build restores `dist/cli.js`'s exec bit** (`chmodSync 0o755`), because `rm -rf dist` otherwise breaks an `npm link`ed `awo`.
+
+The `WorkspaceReader` boundary is implemented as specced, so the hosted site (§7.6) reuses both the data layer and the React components.
 
 **Serving model.** Binds `127.0.0.1` only — never `0.0.0.0`, so it is not exposed on the LAN. Static assets are **prebuilt and embedded in the npm package** at `dist/ui/`, copied by the same mechanism as `templates/default/` (§10) — so the UI is offline-capable and version-locked to the workspace's `libraryVersion`, with no CDN dependency. Live updates come from `chokidar` watching `goals/**/state.json`, `logs/runs.jsonl`, `logs/runs/**/*.events.jsonl`, and `.workspace/manifest.json`, pushed to the browser over SSE. Killing the process leaves zero residue: no daemon, no cache, nothing in `~` (§3.7).
 
@@ -748,7 +756,9 @@ interface WorkspaceReader {
 **Views, in priority order** (priority = how much verification time each saves):
 
 1. **Board** — columns are the seven lifecycle states (§7.4), swimlane per goal, card shows task ID, agent, target repos, and a last-run outcome badge. Live-updating as agents work. The `blocked` column is the one you actually look at.
-2. **Run timeline** — the in-flight run rendered from its event stream: step list with durations, per-repo diffstat, test results. This is the "what is happening right now" screen.
+2. **Run timeline** — the in-flight run rendered from its event stream: step list with durations, per-repo diffstat, test results. This is the "what is happening right now" screen. **Built**, reachable two ways: the Events tab of a task's drawer, and clicking any row in Runs.
+2b. **Task drawer** — added in v0.0.4, not in the original five: clicking a card opens the task's **definition body** (markdown), its state fields, `dependsOn`, the file path it came from, one-click transitions, and tabs for its **event stream** and its **run log** (`.md`). This is what "see log, task, …" from the UI means in practice, and it is the view that made a component framework worth it.
+2c. **Drag-and-drop** — dragging a card between columns POSTs a human transition. Invalid moves surface §7.4's rejection message as a toast rather than silently snapping back. Native HTML5 drag events, no drag library.
 3. **Goal detail** — requirement → goal → tasks in one pane, definition-of-done as a checklist, QA verdict. The traceability chain (§7.2) made visual.
 4. **Repos** — manifest entries × live git state (present / missing / dirty / branch) plus active `.worktrees/` per task. `awo list` and `awo doctor` as a panel.
 5. **Log explorer** — `runs.jsonl` as a filterable table (model, repo, status, date), click through to the run's `.md`.

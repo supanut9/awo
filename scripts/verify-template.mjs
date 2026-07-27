@@ -45,6 +45,9 @@ const missing = [
   "templates/default/.workspace/manifest.json",
   "templates/default/AGENTS.md",
   "dist/cli.js",
+  // The prebuilt dashboard (§7.5) — without it `awo ui` serves nothing.
+  "dist/dashboard/index.html",
+  "dist/dashboard/app.js",
 ].filter((required) => !files.includes(required));
 
 if (missing.length > 0) {

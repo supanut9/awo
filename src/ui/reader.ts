@@ -1,9 +1,10 @@
 import path from "path";
 import { readManifest } from "../manifest.js";
 import { runList, type RepoStatusEntry } from "../commands/list.js";
-import { findGoals, findTasksInGoal, type TaskDefinition } from "../tasks.js";
+import { findGoals, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
 import { newTaskState, readState, type GoalStatus, type TaskStatus } from "../state.js";
-import { readEvents, readIndex, type RunEvent, type RunIndexEntry } from "../runs.js";
+import { detailFile, readEvents, readIndex, type RunEvent, type RunIndexEntry } from "../runs.js";
+import fs from "fs-extra";
 
 export interface ProjectSummary {
   workspaceId: string | null;
@@ -53,6 +54,12 @@ export interface Snapshot {
   generatedAt: string;
 }
 
+export interface TaskDetailView extends TaskView {
+  body: string;
+  dependsOn: string[];
+  file: string;
+}
+
 /**
  * §7.5 — the boundary the UI is built against. `FileReader` implements it over
  * the local workspace tree; the hosted site (§7.6) implements the same shape
@@ -60,6 +67,8 @@ export interface Snapshot {
  */
 export interface WorkspaceReader {
   project(): Promise<ProjectSummary>;
+  task(taskId: string): Promise<TaskDetailView>;
+  runDetail(runId: string): Promise<string>;
   goals(): Promise<GoalView[]>;
   repos(): Promise<RepoStatusEntry[]>;
   runs(): Promise<RunIndexEntry[]>;
@@ -111,6 +120,26 @@ export class FileReader implements WorkspaceReader {
       });
     }
     return out;
+  }
+
+  /** A task's definition plus its state — the drill-down the board links to. */
+  async task(taskId: string): Promise<TaskDetailView> {
+    const { task, goal } = await locateTask(this.root, taskId);
+    const state = await readState(goal.dir, goal.id);
+    const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
+    return {
+      ...toView(task, ts),
+      body: task.body,
+      dependsOn: task.dependsOn,
+      file: path.relative(this.root, task.file),
+    };
+  }
+
+  /** The run's markdown record (§7.3), read verbatim. */
+  async runDetail(runId: string): Promise<string> {
+    const file = detailFile(this.root, runId);
+    if (!(await fs.pathExists(file))) throw new Error(`No run log for "${runId}".`);
+    return fs.readFile(file, "utf8");
   }
 
   async repos(): Promise<RepoStatusEntry[]> {

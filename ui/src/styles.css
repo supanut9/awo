@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #1a1a18;
+  --color-muted: #6f6f68;
+}
+
+/* The board scrolls horizontally on narrow screens; the page never does. */
+html, body { overflow-x: hidden; }
