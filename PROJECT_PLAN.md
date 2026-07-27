@@ -982,6 +982,18 @@ export function findWorkspaceRoot(from = process.cwd()): string {
 
 **Never fall back to `$HOME`, `$XDG_CONFIG_HOME`, or any global cache** — see §3 decision 7. If a required file is missing, error clearly and exit non-zero. Do not "helpfully" create things in the user's home directory.
 
+### Release procedure — every version gets a tag
+
+```sh
+npm version patch|minor|<version>   # bumps package.json, commits, tags vX.Y.Z
+git push --follow-tags
+npm publish                          # prepublishOnly builds + verifies the tarball
+```
+
+**Let `npm version` create the tag.** Passing `--no-git-tag-version` (as the first few releases here did) leaves the release untagged, and the tags then have to be reconstructed by walking `package.json` across history — which only works while the history is short.
+
+Tag every version even if it never reaches npm. A workspace manifest records `libraryVersion` (§5), and §11's upgrade path keys migrations off it — so every value that can appear there must correspond to a resolvable point in history, published or not.
+
 ### Acceptance test for `init` (the v0.0.1 bar)
 The single test that decides whether the first release is done:
 

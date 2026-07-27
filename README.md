@@ -44,12 +44,17 @@ npm run build
 npm test
 ```
 
-## Publishing
+## Releasing
 
 ```sh
-npm login                 # interactive
+npm version patch         # bumps package.json, commits, and creates the vX.Y.Z tag
+git push --follow-tags    # pushes the commit and its tag together
 npm publish               # prepublishOnly builds + verifies the embedded template
 ```
 
-`publishConfig.access` is `public`, so the scoped package publishes publicly without
-extra flags.
+Let `npm version` create the tag — do **not** pass `--no-git-tag-version`, or the
+release ends up untagged. `publishConfig.access` is `public`, so the scoped package
+publishes publicly without extra flags.
+
+Every version gets a tag, whether or not it reaches npm: the tag marks what the code
+was at that version, which is what `libraryVersion` in a workspace manifest points at.
