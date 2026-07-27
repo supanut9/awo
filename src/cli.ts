@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { Command } from "commander";
 import { runInit } from "./commands/init.js";
 import { runAdd } from "./commands/add.js";
@@ -17,11 +20,18 @@ import {
 import { runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 
+// dist/cli.js -> package root is one level up.
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const { version } = JSON.parse(
+  fs.readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8")
+) as { version: string };
+
 const program = new Command();
 
 program
   .name("awo")
-  .description("Scaffolds and orchestrates AI-agent development workspaces.");
+  .description("Scaffolds and orchestrates AI-agent development workspaces.")
+  .version(version, "-v, --version", "print the installed awo version");
 
 program
   .command("init")

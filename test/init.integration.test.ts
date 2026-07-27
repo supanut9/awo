@@ -36,6 +36,12 @@ function listFilesRecursive(dir: string, base = dir): string[] {
   return out.sort();
 }
 
+test("awo --version reports the package version", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  const out = execFileSync(process.execPath, [CLI, "--version"], { encoding: "utf8" }).trim();
+  assert.equal(out, pkg.version);
+});
+
 test("awo init --key PROM matches the PROM-workspace reference", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "awo-init-"));
 

@@ -44,6 +44,18 @@ npm run build
 npm test
 ```
 
+To use your local build as the real `awo` command anywhere on the machine:
+
+```sh
+npm link          # once, from this repo — puts `awo` on your PATH
+awo --version     # -> your local build
+npm rm -g @supanut9/awo   # to undo
+```
+
+`npm link` symlinks the package, so `npm run build` is picked up immediately —
+no relinking after changes. This is how to drive a workspace during development
+instead of typing `node /path/to/awo/dist/cli.js …`.
+
 ## Releasing
 
 ```sh
