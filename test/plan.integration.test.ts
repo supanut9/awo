@@ -88,7 +88,7 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
   assert.match(run.stdout, /PL-T1 is running/);
 
   // T2 depends on T1, so it must refuse until T1 is done.
-  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--untested", "fixture"]);
   assert.equal(awo(ws, ["task", "run", "PL-T2"]).code, 0);
 
   const goals = awo(ws, ["goal", "list"]);
@@ -222,7 +222,7 @@ test("doctor flags a run that was opened but never closed", () => {
   assert.match(out.stdout, /PL-T1: run .* was opened but never closed/);
   assert.match(out.stdout, /awo task complete PL-T1/);
 
-  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--untested", "fixture"]);
   assert.ok(
     !/never closed/.test(awo(ws, ["doctor"]).stdout),
     "closing the run must clear the warning"

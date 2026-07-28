@@ -132,7 +132,7 @@ test("a full run: open -> events -> complete, writing state, events, index and d
     0
   );
 
-  const done = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--summary", "Did it."]);
+  const done = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--summary", "Did it."]);
   assert.equal(done.code, 0, done.stderr);
   assert.match(done.stdout, /task is now done/);
 
@@ -176,7 +176,7 @@ test("a task with unmet dependencies is blocked rather than run", () => {
 test("dependencies clear once the dependency is done", () => {
   const ws = makeWorkspace();
   awo(ws, ["task", "run", "TEST-T1"]);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture"]);
 
   const out = awo(ws, ["task", "run", "TEST-T2"]);
   assert.equal(out.code, 0, out.stderr);
@@ -199,7 +199,7 @@ test("a failed run blocks the task and records the outcome", () => {
 test("--gate routes a success to in-review, and verify closes the QA gate", () => {
   const ws = makeWorkspace();
   awo(ws, ["task", "run", "TEST-T1"]);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--gate"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--gate"]);
   assert.equal(readState(ws).tasks["TEST-T1"].status, "in-review");
   assert.equal(readState(ws).goalStatus, "qa-review");
 
@@ -208,7 +208,7 @@ test("--gate routes a success to in-review, and verify closes the QA gate", () =
   assert.equal(readState(ws).tasks["TEST-T1"].status, "todo");
 
   awo(ws, ["task", "run", "TEST-T1"]);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--gate"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--gate"]);
   assert.equal(awo(ws, ["task", "verify", "TEST-T1"]).code, 0);
   assert.equal(readState(ws).tasks["TEST-T1"].status, "done");
   assert.equal(readState(ws).tasks["TEST-T1"].attempts, 2);
@@ -280,7 +280,7 @@ test("state.json rev increments on every write and never leaves a .tmp behind", 
   const ws = makeWorkspace();
   awo(ws, ["task", "run", "TEST-T1"]);
   const rev1 = readState(ws).rev;
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture"]);
   const rev2 = readState(ws).rev;
   assert.ok(rev2 > rev1, `rev must increase (${rev1} -> ${rev2})`);
 
@@ -298,7 +298,7 @@ test("log list, show and tail read back what a run wrote", () => {
   // reposChanged is derived from repo.diff only — a test event doesn't mean the
   // repo was modified — so emit one to exercise the --repo filter.
   awo(ws, ["task", "event", "TEST-T1", "repo.diff", "--data", '{"repo":"api","files":1}']);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--summary", "green"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--summary", "green"]);
 
   const list = awo(ws, ["log", "list"]);
   assert.equal(list.code, 0, list.stderr);
@@ -384,7 +384,7 @@ test("tier follows the work: agent default, manifest policy, and per-task overri
     fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
   };
   const rerun = (id: string): RunResult => {
-    awo(ws, ["task", "complete", id, "--outcome", "success"]);
+    awo(ws, ["task", "complete", id, "--outcome", "success", "--untested", "fixture"]);
     awo(ws, ["task", "status", id, "todo"]);
     return awo(ws, ["task", "run", id]);
   };
@@ -507,14 +507,14 @@ test("reposChanged is derived from any repo-bearing event, and falls back to tar
   // A worker that reports a test and a commit but never a repo.diff — exactly
   // what the dogfood produced, which used to yield reposChanged: [].
   awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":10}']);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--summary", "done"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--summary", "done"]);
   let index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n")[0]);
   assert.deepEqual(index.reposChanged, ["api"], "a test event naming a repo counts");
 
   awo(ws, ["task", "status", "TEST-T1", "todo"]);
   awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
   awo(ws, ["task", "event", "TEST-T1", "commit", "--label", "abc123 feat: thing"]);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture"]);
   const lines = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n");
   index = JSON.parse(lines[lines.length - 1]);
   assert.deepEqual(index.reposChanged, ["api"], "a commit with no repo falls back to the task's targets");
@@ -633,7 +633,7 @@ test("the index records tier, model, effort and attempts, and log list can filte
   awo(ws, ["task", "complete", "TEST-T1", "--outcome", "failed"]);
   awo(ws, ["task", "status", "TEST-T1", "todo"]);
   awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture"]);
 
   const lines = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(lines.length, 2);
@@ -652,7 +652,7 @@ test("the index records tier, model, effort and attempts, and log list can filte
     `---\nid: TEST-T7\ngoalId: TEST-G1\nname: Think hard\ntargets: [api]\nagent: software-engineer\ntier: high\nstatus: todo\n---\n\nx\n`
   );
   awo(ws, ["task", "run", "TEST-T7", "--no-worktree"]);
-  awo(ws, ["task", "complete", "TEST-T7", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "TEST-T7", "--outcome", "success", "--untested", "fixture"]);
 
   const listed = awo(ws, ["log", "list"]);
   assert.match(listed.stdout, /low effort=medium/);
@@ -663,5 +663,43 @@ test("the index records tier, model, effort and attempts, and log list can filte
   assert.equal(awo(ws, ["log", "list", "--effort", "medium"]).stdout.trim().split("\n").length, 2);
   assert.equal(awo(ws, ["log", "list", "--tier", "low"]).stdout.trim().split("\n").length, 2);
   assert.match(awo(ws, ["log", "list", "--tier", "low", "--status", "failed"]).stdout, /failed/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("a task cannot close as success without test evidence", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+
+  // §7.1 tests-must-pass, previously unenforceable: six tasks closed as success
+  // with no evidence and composed into a broken feature (§9 item 47).
+  const bare = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  assert.equal(bare.code, 1);
+  assert.match(bare.stderr, /cannot close as success with no test evidence/);
+  assert.match(bare.stderr, /rule: tests-must-pass/);
+  assert.match(awo(ws, ["task", "show", "TEST-T1"]).stdout, /status: {3}running/, "still open");
+
+  // Recording what ran satisfies it.
+  awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":12,"fail":0}']);
+  assert.equal(awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]).code, 0);
+  assert.match(awo(ws, ["task", "show", "TEST-T1"]).stdout, /status: {3}done/);
+
+  // Failure needs no evidence — a failed run is allowed to have run nothing.
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  assert.equal(awo(ws, ["task", "complete", "TEST-T1", "--outcome", "failed"]).code, 0);
+
+  // And an honest escape hatch that records WHY in the run log.
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  const excused = awo(ws, [
+    "task", "complete", "TEST-T1", "--outcome", "success",
+    "--untested", "no database available in this environment",
+  ]);
+  assert.equal(excused.code, 0, excused.stderr);
+  const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
+  const detail = fs.readFileSync(
+    path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.md`), "utf8"
+  );
+  assert.match(detail, /UNTESTED: no database available/);
   fs.rmSync(ws, { recursive: true, force: true });
 });

@@ -139,6 +139,29 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
     // An abandoned run: state says running, but the event stream never closed.
     const state = await readState(goal.dir, goal.id);
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
+
+    // Work claimed with no evidence. The QA gate caught six such tasks composing
+    // into a broken feature (§9 item 47); this is the cheap version of that check.
+    if ((ts.status === "done" || ts.status === "in-review") && ts.lastRunId) {
+      const events = await readEvents(root, ts.lastRunId);
+      if (!events.some((e) => e.kind === "commit" || e.kind === "repo.diff")) {
+        add({
+          severity: "warn",
+          area: "runs",
+          message: `${task.id} is ${ts.status} but its run recorded no commit or diff`,
+          fix: "confirm the work exists; a run that changed nothing should not be a success",
+        });
+      }
+      if (!events.some((e) => e.kind === "test")) {
+        add({
+          severity: "warn",
+          area: "runs",
+          message: `${task.id} is ${ts.status} with no test evidence in its run`,
+          fix: "rule tests-must-pass — record `awo task event <id> test`, or re-close with --untested \"<why>\"",
+        });
+      }
+    }
+
     if (ts.status === "running" && ts.lastRunId) {
       const events = await readEvents(root, ts.lastRunId);
       if (!events.some((e) => e.kind === "run.end")) {

@@ -465,6 +465,7 @@ task
   .option("--interpreted <text>", "the agent's own reading of the request")
   .option("--note <text...>", "deferred items, risks, follow-ups")
   .option("--gate", "route a success to in-review for the QA gate instead of done")
+  .option("--untested <why>", "close as success without test evidence, stating why (tests-must-pass)")
   .action(async (taskId: string, opts: Record<string, never>) => {
     try {
       const r = await runTaskComplete(taskId, opts as unknown as { outcome: string });

@@ -120,7 +120,7 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
   // A run's events are readable through the API.
   awo(ws, ["task", "run", "UI-T1"]);
   awo(ws, ["task", "event", "UI-T1", "step.start", "--label", "Working"]);
-  awo(ws, ["task", "complete", "UI-T1", "--outcome", "success", "--summary", "done"]);
+  awo(ws, ["task", "complete", "UI-T1", "--outcome", "success", "--untested", "fixture", "--summary", "done"]);
 
   const after = await (await fetch(`${ui.url}/api/snapshot`)).json();
   assert.equal(after.goals[0].tasks[0].status, "done");

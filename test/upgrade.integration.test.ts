@@ -293,7 +293,7 @@ test("upgrade never touches goals, logs or the manifest's repos", () => {
   awo(ws, ["goal", "new", "--from", "UP-R1"]);
   awo(ws, ["task", "new", "--goal", "UP-G1", "--name", "Work", "--targets", "api"]);
   awo(ws, ["task", "run", "UP-T1"]);
-  awo(ws, ["task", "complete", "UP-T1", "--outcome", "success"]);
+  awo(ws, ["task", "complete", "UP-T1", "--outcome", "success", "--untested", "fixture"]);
 
   const goalsBefore = execFileSync("find", ["goals", "-type", "f"], { cwd: ws, encoding: "utf8" });
   const logsBefore = execFileSync("find", ["logs", "-type", "f"], { cwd: ws, encoding: "utf8" });

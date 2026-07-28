@@ -326,6 +326,8 @@ export async function runTaskComplete(
     interpreted?: string;
     note?: string[];
     gate?: boolean;
+    /** Close as success without test evidence — requires stating why. */
+    untested?: string;
   }
 ): Promise<TaskCompleteResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
@@ -342,6 +344,21 @@ export async function runTaskComplete(
     throw new Error(`${task.id} has no open run to complete (status: ${ts.status}).`);
   }
   const runId = ts.lastRunId;
+
+  // §7.1 `tests-must-pass` was unenforceable: a task could close as `success` with
+  // no evidence of anything having run, and six such tasks composed into a broken
+  // feature (§9 item 47). A successful run must therefore carry a `test` event, or
+  // say out loud why it cannot.
+  if (outcome === "success" && !options.untested) {
+    const priorEvents = await readEvents(workspaceRoot, runId);
+    if (!priorEvents.some((e) => e.kind === "test")) {
+      throw new Error(
+        `${task.id} cannot close as success with no test evidence (rule: tests-must-pass).\n` +
+          `Record what ran:  awo task event ${task.id} test --data '{"repo":"<name>","pass":<n>}'\n` +
+          `If tests genuinely could not run, say so:  --untested "<why>"`
+      );
+    }
+  }
 
   await appendEvent(workspaceRoot, runId, "run.end", { outcome });
 
@@ -386,7 +403,12 @@ export async function runTaskComplete(
       prompt: options.prompt,
       interpreted: options.interpreted,
       summary: options.summary,
-      notes: options.note,
+      // An excused-untested run must say so in its own record, or the exemption
+      // is invisible to anyone reading the log later.
+      notes: [
+        ...(options.note ?? []),
+        ...(options.untested ? [`UNTESTED: ${options.untested}`] : []),
+      ],
     }
   );
 
