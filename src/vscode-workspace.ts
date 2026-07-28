@@ -28,4 +28,33 @@ export async function regenerateCodeWorkspace(workspaceRoot: string): Promise<vo
 
   const file = path.join(workspaceRoot, `${manifest.projectKey}.code-workspace`);
   await fs.writeJson(file, { folders, settings: {} }, { spaces: 2 });
+
+  await updateScanRepositories(workspaceRoot, manifest.repos.map((r) =>
+    r.type === "local" ? r.path : path.join(workspaceRoot, "repos", r.name)
+  ));
+}
+
+/**
+ * `git.autoRepositoryDetection: "subFolders"` scans real subdirectories and
+ * does NOT follow symlinks — so `type: "local"` repos, which are symlinks under
+ * repos/, stay invisible to the Source Control panel on a plain folder open.
+ *
+ * `git.scanRepositories` takes explicit paths, so listing each repo's real
+ * location fixes detection without forcing a multi-root open (which surfaces
+ * every linked repo's own CLAUDE.md/AGENTS.md to agents — see §9 item 20).
+ *
+ * Note this makes .vscode/settings.json diverge from the shipped template, so
+ * `awo upgrade` will treat it as user-edited and leave it alone (§11.2's third
+ * case). That is the correct outcome: it is workspace-specific derived state.
+ */
+async function updateScanRepositories(workspaceRoot: string, repoPaths: string[]): Promise<void> {
+  const file = path.join(workspaceRoot, ".vscode", "settings.json");
+  const existing = (await fs.readJson(file).catch(() => ({}))) as Record<string, unknown>;
+
+  await fs.ensureDir(path.dirname(file));
+  await fs.writeJson(
+    file,
+    { ...existing, "git.scanRepositories": repoPaths },
+    { spaces: 2 }
+  );
 }

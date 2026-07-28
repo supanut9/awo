@@ -168,3 +168,24 @@ test("connect/add/remove keep the *.code-workspace file in sync", () => {
   fs.rmSync(localRepo, { recursive: true, force: true });
   fs.rmSync(sourceRepo, { recursive: true, force: true });
 });
+
+test("connect/add/remove keep git.scanRepositories pointing at real repo paths", () => {
+  const ws = makeWorkspace();
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "awo-scan-"));
+  fs.writeFileSync(path.join(repo, "README.md"), "# x\n");
+
+  execFileSync(process.execPath, [CLI, "connect", repo, "--name", "api"], { cwd: ws });
+  const settingsPath = path.join(ws, ".vscode", "settings.json");
+  const read = (): Record<string, unknown> => JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+
+  // A local repo is a symlink under repos/, which VS Code's subFolders scan
+  // will not follow — so the REAL path must be listed explicitly.
+  assert.deepEqual(read()["git.scanRepositories"], [fs.realpathSync(repo)]);
+  // Template settings must survive the merge.
+  assert.equal(read()["git.autoRepositoryDetection"], "subFolders");
+
+  execFileSync(process.execPath, [CLI, "remove", "api"], { cwd: ws });
+  assert.deepEqual(read()["git.scanRepositories"], []);
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repo, { recursive: true, force: true });
+});
