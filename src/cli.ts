@@ -142,7 +142,7 @@ program
 program
   .command("upgrade")
   .description(
-    "Bring this workspace up to the installed awo version: run migrations and reconcile scaffolding (§11)."
+    "Bring this workspace up to the INSTALLED awo version (not npm's latest): run migrations and reconcile scaffolding (§11). Use `npx @supanut9/awo@latest upgrade` to target the newest release."
   )
   .option("--dry-run", "show what would change without touching anything")
   .option("--to <version>", "assert the intended target version (must match the installed awo)")
@@ -153,6 +153,13 @@ program
 
       if (r.from === r.to && !planHasWork(r)) {
         console.log(`Already at ${r.to}; nothing to do.`);
+        // The target is the awo you are running, not whatever npm calls latest
+        // — migrations ship inside the package, so a newer version has to be
+        // executed, not fetched. Say so, or this reads as "you are up to date".
+        console.log(
+          `This targets the installed awo (${r.to}). For a newer release:\n` +
+            `  npx @supanut9/awo@latest upgrade`
+        );
         return;
       }
 

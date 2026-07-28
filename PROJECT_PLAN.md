@@ -1154,7 +1154,11 @@ Run it with that version instead:
   npx @supanut9/awo@0.0.4 upgrade
 ```
 
-This is the same shape as any other tool where the installed binary defines the target, and it keeps §10's offline/version-locked property intact. A workspace newer than the installed awo is refused outright rather than downgraded (§11.3 is forward-only).
+**Why not fetch latest by default, when `npm update`/`yarn upgrade` feel like they do?** They don't, in fact: both stay inside the semver range you declared, and yarn makes you type `--latest` to escape it. The relevant split is between *tool-defines-target* (Rails' `app:update`, which uses the installed gem — awo's model) and *command-fetches-target* (`ng update`, which downloads and executes the new package).
+
+awo must be the former, and the reason is stronger than §10: **migrations ship inside the package**. Applying 0.0.9's migrations means *running* 0.0.9 — fetching only its template would skip them and leave state half-converted. Keeping the installed version as the target also makes the result independent of *when* it is run, keeps it working offline, and stops a background release from changing the rules an agent is mid-run under.
+
+Since `npx @supanut9/awo upgrade` resolves latest while a globally-installed `awo upgrade` does not, the output states which version it is targeting and how to reach a newer one — otherwise "nothing to do" reads as "you are up to date" when npm has moved on. This is the same shape as any other tool where the installed binary defines the target, and it keeps §10's offline/version-locked property intact. A workspace newer than the installed awo is refused outright rather than downgraded (§11.3 is forward-only).
 
 #### The lock records the TEMPLATE's content, not the disk's
 
