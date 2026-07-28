@@ -1127,6 +1127,8 @@ Rules that keep them safe:
 
 Before applying, `upgrade` copies the scaffolding it is about to touch into `.workspace/upgrade-backups/<from>-to-<to>/` (gitignored). Belt and braces alongside git, because a workspace may legitimately not be a git repo yet.
 
+**When the workspace is not a git repo, the dirty-tree gate cannot apply — and `upgrade` must say so rather than skip it silently.** A guard that quietly does nothing is worse than no guard, because the user believes it ran. In that case the output states plainly that there is no diff to review and no commit to revert to, and that the backup folder is the only way back. It still proceeds: the point is to inform, not to force every workspace into git.
+
 `upgrade` **never** touches `goals/`, `logs/`, `repos/`, or `credentials/`, and never edits `manifest.repos`. It updates `libraryVersion`, runs migrations, reconciles scaffolding, and rewrites `template.lock`.
 
 ### 11.5 The discipline that matters more than the tooling

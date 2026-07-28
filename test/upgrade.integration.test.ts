@@ -248,6 +248,22 @@ test("a workspace newer than the installed awo is refused, not downgraded", () =
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test("a workspace with no git repo is warned that nothing can be reviewed or reverted", () => {
+  const ws = makeWorkspace();
+  pretendOlder(ws, "0.0.1");
+  assert.ok(!fs.existsSync(path.join(ws, ".git")), "precondition: not a git repo");
+
+  const out = awo(ws, ["upgrade", "--dry-run"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /not a git repo/);
+  assert.match(out.stdout, /upgrade-backups/);
+
+  // And it still proceeds — the point is to say so, not to block.
+  assert.equal(awo(ws, ["upgrade"]).code, 0);
+  assert.equal(manifest(ws).libraryVersion, INSTALLED);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 test("upgrade refuses a dirty git tree unless forced", () => {
   const ws = makeWorkspace();
   pretendOlder(ws, "0.0.1");

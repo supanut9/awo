@@ -164,6 +164,12 @@ program
       }
 
       console.log(`${r.from} -> ${r.to}${opts.dryRun ? "  (dry run)" : ""}`);
+      if (r.unreviewable) {
+        console.log(
+          "This workspace is not a git repo, so there is no diff to review and nothing to revert to.\n" +
+            "Replaced files are copied to .workspace/upgrade-backups/ — that is the only way back."
+        );
+      }
       if (!r.hadLock) {
         console.log(
           "No template.lock: this workspace predates it, so nothing will be overwritten — every changed file is written alongside as .new (§11.2)."

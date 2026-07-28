@@ -70,6 +70,8 @@ export interface UpgradeResult extends UpgradePlan {
   backupDir: string | null;
   conflictFiles: string[];
   migrationsRun: string[];
+  /** True when the workspace isn't a git repo, so §11.4's review gate can't apply. */
+  unreviewable: boolean;
 }
 
 const CHANGED_ACTIONS = new Set<FileAction>(["replace", "add", "conflict"]);
@@ -197,21 +199,25 @@ export async function runUpgrade(
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const plan = await planUpgrade(options);
 
+  const isRepo = await simpleGit(root).checkIsRepo().catch(() => false);
+
   const base: UpgradeResult = {
     ...plan,
     applied: false,
     backupDir: null,
     conflictFiles: [],
     migrationsRun: [],
+    unreviewable: !isRepo,
   };
 
   if (options.dryRun) return base;
 
   // §11.4 — insist on a reviewable diff, so there is always a way back.
-  if (!options.force) {
-    const git = simpleGit(root);
-    if (await git.checkIsRepo().catch(() => false)) {
-      const status = await git.status();
+  // If the workspace isn't a git repo there is no diff to insist on; the caller
+  // is told rather than left assuming the guard ran.
+  if (!options.force && isRepo) {
+    {
+      const status = await simpleGit(root).status();
       if (!status.isClean()) {
         throw new Error(
           `Workspace has uncommitted changes (${status.files.length} file(s)). Commit or stash them first so the upgrade is reviewable, or pass --force.`
@@ -270,6 +276,7 @@ export async function runUpgrade(
 
   return {
     ...plan,
+    unreviewable: !isRepo,
     applied: true,
     backupDir: touchedAnything && (await fs.pathExists(backupDir)) ? path.relative(root, backupDir) : null,
     conflictFiles,
