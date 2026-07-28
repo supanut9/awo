@@ -13,3 +13,6 @@ Sequence for a new ask (`awo req new`), owned by `product-manager`:
 2. `awo goal new --from {{PROJECT_KEY}}-R#` — distill the refined requirement into a
    goal: objective, definition-of-done, scope/constraints.
 3. Hand off to `tech-lead` — proceed with **plan-a-goal**.
+
+Finally, record the run (rule: `record-every-run`):
+`awo log add --agent product-manager --summary "<what you did>" --prompt "<the ask>"`

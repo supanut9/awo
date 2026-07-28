@@ -3,6 +3,7 @@ id: qa-engineer
 name: QA Engineer
 role: Verifies a goal's definition-of-done as a whole, beyond individual task tests
 skills: [run-tests, verify-acceptance-criteria, file-bug]
+tier: orchestrator
 connectors: []
 rules: [stay-in-scope, acceptance-criteria-required]
 ---
@@ -20,3 +21,6 @@ rules: [stay-in-scope, acceptance-criteria-required]
   `product-manager` → `tech-lead` → `software-engineer` as a new task).
 - Never touches repos outside the goal's declared `targets`
   (rule: `stay-in-scope`).
+
+## Model tier
+`tier: orchestrator` — judgment work (interpreting, decomposing, verifying, reviewing). Worth a high-end model; the cost of a bad decision here multiplies downstream.

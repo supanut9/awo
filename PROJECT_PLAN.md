@@ -126,7 +126,7 @@ PROM-workspace/
 │   ├── verify-acceptance-criteria.md
 │   └── file-bug.md
 │
-├── rules/                     # installed by default — 7 always-on policies
+├── rules/                     # installed by default — 8 always-on policies
 │   ├── conventional-commits.md
 │   ├── no-push-to-main.md
 │   ├── pr-requirements.md
@@ -857,7 +857,7 @@ Event volume is what would blow a free-tier quota (Atlas M0 is 512 MB), so `even
 
 **Phase 1 — Try it (everything built so far)**
 - `init`, `add`, `connect`, `sync`, `list`, `remove` — scaffolding + linking.
-- Full workspace template: `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`, the 6 default agents, 9 skills, 7 rules, 4 instructions, the catalog.
+- Full workspace template: `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`, the 6 default agents, 9 skills, 8 rules, 4 instructions, the catalog.
 - The `req` → `goal` → `task` pipeline, worktree isolation, and the log format.
 - **The status model + progress events (§7.4)** — the lifecycle/outcome split, `blocked`/`cancelled`, `state.json` with `rev` + atomic writes, and `<runId>.events.jsonl`. In Phase 1 *not* because the UI is wanted early, but because this is the data format every later reader depends on and it cannot be retrofitted cheaply. The UI itself is Phase 2.
 - **`workspaceId` written by `init` (§5).** One uuid, nothing reads it until Phase 3, impossible to add cheaply once workspaces exist in the wild.
@@ -901,7 +901,7 @@ Everything here is a design decision made on paper, not something that's been pr
 11. **Do agents reliably emit progress events (§7.4)?** The event stream is only as good as the runner's discipline in appending to it. If `awo task run` orchestrates while an agent does the work, the agent has to report step boundaries — or the stream degenerates to `run.start` / `run.end` and the progress view is a spinner again. Watch for this during the dogfood; the fallback is having the runner synthesise events from observable side effects (file changes, test invocations) rather than trusting self-reporting.
 12. **Is `in-review` a real state or ceremony?** It assumes the QA gate (§7.1) is a distinct human/agent step. If in practice tasks go `running` → `done` and QA only ever runs at goal level, the state is dead weight and should be cut.
 13. **Does `--watch` in the terminal make the web UI unnecessary?** Genuine possibility. If `awo status --watch` answers "what's happening / what's blocked" fully, `awo ui` is a nice-to-have and Phase 2 item 2 can be dropped. Build order (§8) is deliberately arranged so this is discoverable before the expensive part is built.
-14. **Is 6 default agents + 7 rules + 9 skills the right amount of ceremony, or too much for a first real project?** This is the biggest unknown of all — everything else on this list is a specific mechanism; this one is whether the whole shape is right. Only real usage answers it.
+14. **Is 6 default agents + 8 rules + 9 skills the right amount of ceremony, or too much for a first real project?** This is the biggest unknown of all — everything else on this list is a specific mechanism; this one is whether the whole shape is right. Only real usage answers it.
 
 **Implementation decisions made while building v0.0.1 (not specified above, recorded so they're not mistaken for spec):**
 
@@ -924,6 +924,8 @@ Everything here is a design decision made on paper, not something that's been pr
     - **ANSWERED (was untested above): `subFolders` does *not* follow symlinks.** It scans real subdirectories only, so every `type: "local"` repo — a symlink under `repos/` — stayed invisible on a plain folder open. Confirmed against the dogfood workspace, where all 8 repos are symlinks and none were detected.
     - **Fix: generate `git.scanRepositories`.** It takes an explicit list of paths rather than scanning, so `add`/`connect`/`remove` now write each repo's **real** location into `.vscode/settings.json` alongside regenerating the `.code-workspace`. Detection then works on a plain single-folder open, with no multi-root and no `CLAUDE.md` pollution. Template keys in that file are preserved through the merge. It does make `settings.json` diverge from the shipped template, so `awo upgrade` treats it as user-edited and leaves it alone (§11.2's third case) — correct, since it is workspace-specific derived state.
     - **Git Graph specifically may still need the multi-root file.** `git.scanRepositories` is a built-in Git extension setting; whether Git Graph honours VS Code's resulting repository list or only scans workspace folders is **not verified here**. If Git Graph still comes up empty, open the generated `<KEY>.code-workspace`, or use its "Add Repository" command.
+
+29. **`runId` collided when the same task ran twice inside one second.** The ID was `<ISO-timestamp-to-seconds>_<taskId>`, so two runs in the same second shared it: they appended to one events file and wrote two index lines with the same key — breaking the uniqueness §7.3 depends on to link index ↔ detail ↔ `state.json`. Found by a test that ran one task three times in a row; unlikely in real use, where a run takes minutes, but trivially reachable and silently corrupting when reached. Fixed by keeping milliseconds. The lesson: **a timestamp is only an identifier at a precision finer than the fastest thing that can produce two of them.**
 
 28. **Two full agent stages produced ZERO log entries — the audit trail only covered task runs.** Driving Codex through intake and planning (11 min / 33k tokens, then 18 min / 60k tokens) left `logs/` containing nothing but `.gitkeep`. Cause: every log write lived in `task.ts`, so only `task run`/`task event`/`task complete` could produce one, and neither stage involves a task. §7.3 *already* permitted `taskId: null` "for an ad-hoc prompt not tied to a task" — the format anticipated this and no command delivered it. This is the second time the gap surfaced: §9 item 14's agent hand-wrote a `runs.jsonl` entry typed `manual-planning` for exactly this reason, and that improvisation was recorded as a curiosity rather than read as a missing command. Fixed with `awo log add`. The lesson: **when an agent invents a workaround, the workaround is a feature request** — and a spec allowing something is not the same as a command producing it.
 
@@ -1175,3 +1177,47 @@ Since `npx @supanut9/awo upgrade` resolves latest while a globally-installed `aw
 Non-obvious and load-bearing, caught only by an idempotency assertion. After an upgrade leaves a customized file alone, it is tempting to rebuild `template.lock` from what is on disk. **That silently arms a data-loss bug:** the user's edit becomes the new baseline, so the *next* upgrade sees `current == lock`, classifies the file as unmodified, and overwrites their work.
 
 The lock must therefore record the hash of **what this version of the template provides**. Then an unmerged edit keeps showing as `current != lock` and is left alone. `manifest.json` is the one exception — its content is per-workspace, so its baseline comes from disk, and it is excluded from file reconciliation entirely because migrations own it.
+
+---
+
+## 12. Model tiering — orchestrator and worker
+
+**Goal:** spend a high-end model where judgment happens and a cheaper one where a spec is merely executed, without the workspace having to be re-taught which is which every session.
+
+**Declarative, not executive.** §9 item 2 settled that `task run` orchestrates and logs; it does not execute. This section does not change that. awo *resolves and records* which runtime+model should do a piece of work and tells whoever is driving; it does not spawn anything. Making awo an agent runtime is a separate, much larger decision — see §12.4.
+
+### 12.1 The two tiers
+
+| Tier | Work | Default roles |
+|---|---|---|
+| `orchestrator` | Judgment: interpreting an ask, decomposing a goal, verifying a definition-of-done, reviewing a PR. A bad decision here multiplies downstream. | `product-manager`, `tech-lead`, `qa-engineer`, `code-reviewer`, `audit` |
+| `worker` | Execution against a spec that already exists. The judgment was made upstream. | `software-engineer`, `data-engineer`, `release-engineer`, `marketing-specialist` |
+
+Each agent file declares its own tier in frontmatter (`tier: orchestrator`), so the classification travels with the role rather than living in a lookup table someone has to maintain. A role absent from both the file and the built-in map defaults to `worker` — the cheaper, less-trusted option, which is the right way for a default to fail.
+
+### 12.2 Policy lives in the manifest
+
+```jsonc
+"models": {
+  "orchestrator": { "runtime": "claude", "model": "opus" },
+  "worker":       { "runtime": "codex",  "model": "gpt-5-codex" },
+  "byRole": { "code-reviewer": { "runtime": "claude", "model": "opus" } }
+}
+```
+
+Optional in full: a workspace with no `models` key resolves to built-in defaults (`claude:opus` / `claude:sonnet`), so nothing breaks and no migration is needed.
+
+### 12.3 Resolution order
+
+Most specific wins:
+
+1. the agent file's own `model:` — pins a role regardless of tier
+2. `models.byRole[<agent>]`
+3. `models[<tier>]`
+4. the built-in fallback for that tier
+
+`awo task run` prints the resolved pairing and a ready-to-paste invocation (`codex exec -m …`, `claude --model …`, `gemini -m …`), and writes `tier` and `model` into the run's `run.start` event. That last part is the payoff beyond convenience: the log can answer "do worker-tier runs fail more often than orchestrator-tier ones?" — which is the evidence needed before trusting a cheaper model with more.
+
+### 12.4 What is deliberately NOT built
+
+`awo task dispatch` — actually spawning the worker, piping its output into `task event`, closing the run on exit. It is the obvious next step and was consciously deferred, because it makes awo an agent runtime that can let a runaway worker loose in linked repos. The declarative layer is a prerequisite for it either way, so nothing is wasted by waiting.

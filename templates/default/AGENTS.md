@@ -30,6 +30,7 @@ prefixed: `{{PROJECT_KEY}}-R#` (requirement), `{{PROJECT_KEY}}-G#` (goal), `{{PR
 - `isolate-task-worktrees` — concurrent tasks on the same repo never share a working tree.
 - `tests-must-pass` — a task/PR can't proceed with failing or unverified tests.
 - `acceptance-criteria-required` — a goal needs QA sign-off, not just passing tasks, before `done`.
+- `record-every-run` — every piece of work leaves a log entry; non-task work uses `awo log add`.
 
 ## Choosing a role — you usually don't need to be told
 Every artifact already says who owns the work. Adopt the role yourself, in this

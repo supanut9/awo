@@ -393,9 +393,11 @@ task
     try {
       const r = await runTaskRun(taskId);
       console.log(`${r.taskId} is running — run ${r.runId}`);
-      console.log(`agent:   ${r.agent ?? "unassigned"}`);
+      console.log(`agent:   ${r.agent ?? "unassigned"} (${r.model.tier})`);
+      console.log(`model:   ${r.model.runtime}:${r.model.model}`);
       console.log(`targets: ${r.targets.join(", ") || "none"}`);
       console.log(`events:  ${r.eventsFile}`);
+      console.log(`hand to: ${r.invocation}`);
       if (r.body) console.log(`\n${r.body}`);
       console.log(
         `\nRecord progress with \`awo task event ${r.taskId} <kind> --label "…"\`, then close with \`awo task complete ${r.taskId} --outcome success\`.`

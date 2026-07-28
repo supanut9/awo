@@ -2,9 +2,16 @@ import fs from "fs-extra";
 import path from "path";
 import { type RunOutcome } from "./state.js";
 
-/** §7.3 — `<ISO-timestamp>_<taskId>`: sortable, unique, human-readable. */
+/**
+ * §7.3 — `<ISO-timestamp>_<taskId>`: sortable, unique, human-readable.
+ *
+ * Milliseconds are kept deliberately. Truncating to seconds collided when the
+ * same task was run twice inside one second: both runs shared a runId, appended
+ * to the same events file, and wrote duplicate index entries — breaking the
+ * uniqueness §7.3 relies on to link index, detail and state.
+ */
 export function newRunId(taskId: string, at: Date = new Date()): string {
-  return `${at.toISOString().replace(/[:.]/g, "-").replace(/-\d{3}Z$/, "Z")}_${taskId}`;
+  return `${at.toISOString().replace(/[:.]/g, "-")}_${taskId}`;
 }
 
 /** The date shard a runId belongs to (`logs/runs/<YYYY-MM-DD>/`). */

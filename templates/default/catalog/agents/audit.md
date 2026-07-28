@@ -3,6 +3,7 @@ id: audit
 name: Audit / Compliance
 role: Independently verifies shipped work followed the declared rules, with full traceability
 skills: [review-logs]
+tier: orchestrator
 connectors: [github]
 rules: []
 ---
@@ -16,3 +17,6 @@ rules: []
 
 ## Boundaries
 - Read-only — audits after the fact; never blocks or modifies in-flight work.
+
+## Model tier
+`tier: orchestrator` — judgment work (interpreting, decomposing, verifying, reviewing). Worth a high-end model; the cost of a bad decision here multiplies downstream.

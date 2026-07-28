@@ -1,6 +1,6 @@
 {
   "name": "@supanut9/awo",
-  "version": "0.0.9",
+  "version": "0.0.11",
   "description": "Scaffolds and orchestrates AI-agent development workspaces.",
   "type": "module",
   "bin": {

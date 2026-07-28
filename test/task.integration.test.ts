@@ -57,7 +57,10 @@ function makeWorkspace(): string {
 function readState(ws: string): {
   rev: number;
   goalStatus: string;
-  tasks: Record<string, { status: string; lastRunOutcome: string | null; attempts: number }>;
+  tasks: Record<
+    string,
+    { status: string; lastRunOutcome: string | null; attempts: number; lastRunId: string | null }
+  >;
 } {
   return JSON.parse(
     fs.readFileSync(path.join(ws, "goals", "TEST-G1-demo", "state.json"), "utf8")
@@ -360,7 +363,7 @@ test("log add records work that is not a task run, with taskId null", () => {
     "log", "add", "--agent", "tech-lead", "--summary", "planned",
     "--started", "2026-01-02T03:04:05.000Z", "--duration", "60",
   ]);
-  assert.match(dated.stdout, /2026-01-02T03-04-05Z_adhoc/);
+  assert.match(dated.stdout, /2026-01-02T03-04-05-000Z_adhoc/);
 
   const bad = awo(ws, ["log", "add", "--agent", "x", "--summary", "y", "--started", "not-a-date"]);
   assert.equal(bad.code, 1);
@@ -369,5 +372,60 @@ test("log add records work that is not a task run, with taskId null", () => {
   const badOutcome = awo(ws, ["log", "add", "--agent", "x", "--summary", "y", "--outcome", "great"]);
   assert.equal(badOutcome.code, 1);
   assert.match(badOutcome.stderr, /Unknown outcome "great"/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("task run resolves a model from the agent's tier, and the manifest can override it", () => {
+  const ws = makeWorkspace();
+  const manifestPath = path.join(ws, ".workspace", "manifest.json");
+  const setModels = (models: unknown): void => {
+    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    m.models = models;
+    fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+  };
+
+  // TEST-T1 has `agent: software-engineer`, which the shipped agent file marks
+  // `tier: worker`. With no policy, the built-in fallback applies.
+  let out = awo(ws, ["task", "run", "TEST-T1"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /agent:\s+software-engineer \(worker\)/);
+  assert.match(out.stdout, /model:\s+claude:sonnet/);
+  assert.match(out.stdout, /hand to: claude --model sonnet/);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+
+  // A tier-level policy wins over the fallback.
+  setModels({ worker: { runtime: "codex", model: "gpt-5-codex" }, orchestrator: { runtime: "claude", model: "opus" } });
+  out = awo(ws, ["task", "run", "TEST-T1"]);
+  assert.match(out.stdout, /model:\s+codex:gpt-5-codex/);
+  assert.match(out.stdout, /hand to: codex exec -m gpt-5-codex/);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+
+  // byRole is more specific than the tier default.
+  setModels({
+    worker: { runtime: "codex", model: "gpt-5-codex" },
+    byRole: { "software-engineer": { runtime: "claude", model: "opus" } },
+  });
+  out = awo(ws, ["task", "run", "TEST-T1"]);
+  assert.match(out.stdout, /model:\s+claude:opus/);
+
+  // The tier and model land in the run.start event, so the log records what ran.
+  const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
+  const events = fs
+    .readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(events[0].kind, "run.start");
+  assert.equal(events[0].tier, "worker");
+  assert.equal(events[0].model, "claude:opus");
+
+  // An unassigned task falls back to the worker tier rather than erroring.
+  const goalDir = path.join(ws, "goals", "TEST-G1-demo");
+  fs.writeFileSync(
+    path.join(goalDir, "tasks", "TEST-T5-noagent.md"),
+    `---\nid: TEST-T5\ngoalId: TEST-G1\nname: No agent\ntargets: [api]\nstatus: todo\n---\n\nx\n`
+  );
+  out = awo(ws, ["task", "run", "TEST-T5"]);
+  assert.match(out.stdout, /agent:\s+unassigned \(worker\)/);
   fs.rmSync(ws, { recursive: true, force: true });
 });

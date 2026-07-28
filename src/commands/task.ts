@@ -14,6 +14,7 @@ import {
   type RunOutcome,
   type TaskStatus,
 } from "../state.js";
+import { invocationHint, resolveModel, type ResolvedModel } from "../models.js";
 import {
   appendEvent,
   appendIndex,
@@ -128,6 +129,9 @@ export interface TaskRunResult {
   targets: string[];
   agent: string | null;
   body: string;
+  /** §12 — who should do this work, and how to hand it to them. */
+  model: ResolvedModel;
+  invocation: string;
 }
 
 /**
@@ -214,14 +218,20 @@ export async function runTaskRun(
     s.tasks[task.id] = ts;
   });
 
+  const model = await resolveModel(workspaceRoot, task.agent);
+
   await appendEvent(workspaceRoot, runId, "run.start", {
     taskId: task.id,
     goalId: goal.id,
     agent: task.agent,
     targets: task.targets,
+    tier: model.tier,
+    model: `${model.runtime}:${model.model}`,
   });
 
   return {
+    model,
+    invocation: invocationHint(model, task.id),
     taskId: task.id,
     runId,
     eventsFile: path.relative(workspaceRoot, eventsFilePath(workspaceRoot, runId)),

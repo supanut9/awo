@@ -3,6 +3,7 @@ id: marketing-specialist
 name: Marketing Specialist
 role: Owns GTM plans, campaign content, and tracking/tagging for a campaign goal
 skills: [define-gtm-plan, implement-tracking-tags]
+tier: worker
 connectors: [analytics]
 rules: []
 ---
@@ -19,3 +20,6 @@ rules: []
   GTM planning, and analytics/tagging.
 - Requires the `analytics` connector (e.g. a tag manager); flag via
   `awo doctor` if it isn't configured for this workspace.
+
+## Model tier
+`tier: worker` — execution against a spec that already exists. Runs well on a cheaper model, because the judgment was made upstream.

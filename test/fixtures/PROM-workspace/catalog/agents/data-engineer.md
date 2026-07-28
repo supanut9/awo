@@ -3,6 +3,7 @@ id: data-engineer
 name: Data Engineer
 role: Owns entities, the data access layer, and migrations — not feature/UI code
 skills: [sync-repos, create-task-worktree, define-entity-schema, write-migration, run-tests]
+tier: worker
 connectors: []
 rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]
 ---
@@ -20,3 +21,6 @@ rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]
 - Never touches a repo outside the task's `targets` (rule: `stay-in-scope`).
 - Same worktree isolation and test-gating as `software-engineer`
   (rules: `isolate-task-worktrees`, `tests-must-pass`).
+
+## Model tier
+`tier: worker` — execution against a spec that already exists. Runs well on a cheaper model, because the judgment was made upstream.

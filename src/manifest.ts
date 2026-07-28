@@ -18,6 +18,18 @@ export interface LocalRepoEntry {
 
 export type RepoEntry = GitRepoEntry | LocalRepoEntry;
 
+export interface ModelChoiceEntry {
+  runtime?: string;
+  model: string;
+}
+
+/** §12 — which runtime+model should do which kind of work. Optional. */
+export interface ModelPolicyEntry {
+  orchestrator?: ModelChoiceEntry;
+  worker?: ModelChoiceEntry;
+  byRole?: Record<string, ModelChoiceEntry>;
+}
+
 export interface Manifest {
   libraryVersion: string;
   /**
@@ -30,6 +42,8 @@ export interface Manifest {
   projectKey: string;
   projectName: string;
   createdAt: string;
+  /** §12 — model tiering policy. Absent means built-in defaults apply. */
+  models?: ModelPolicyEntry;
   repos: RepoEntry[];
 }
 

@@ -24,3 +24,6 @@ Sequence for `awo goal plan {{PROJECT_KEY}}-G#`, owned by `tech-lead` (preceded 
    `qa-engineer` for **verify-acceptance-criteria** before the goal is
    marked `done` (rule: `acceptance-criteria-required`). A gap found there
    re-enters via `file-bug` → back to `product-manager`.
+
+Finally, record the run (rule: `record-every-run`):
+`awo log add --agent tech-lead --summary "<what you did>" --prompt "<the ask>"`
