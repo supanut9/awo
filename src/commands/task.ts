@@ -224,9 +224,18 @@ export async function runTaskRun(
   });
 
   const model = await resolveModel(workspaceRoot, task.agent, task.tier);
-  const worktrees = options.noWorktree
+  const worktreesForRun = options.noWorktree
     ? []
     : await ensureTaskWorktrees(workspaceRoot, manifest, task.id, task.targets);
+
+  const worktrees = worktreesForRun;
+  // A worker sandboxed to the workspace still needs write access to the repo that
+  // owns the worktree's .git, or it can edit but not commit (§9 item 40).
+  const usable = worktrees.filter((w) => !w.error);
+  const workerContext = {
+    cwd: usable[0] ? usable[0].path : undefined,
+    allow: [...new Set(usable.map((w) => w.gitOwnerPath))],
+  };
 
   for (const wt of worktrees.filter((w) => w.created)) {
     await appendEvent(workspaceRoot, runId, "step.start", {
@@ -249,8 +258,8 @@ export async function runTaskRun(
   return {
     model,
     worktrees,
-    invocation: invocationHint(model, task.id),
-    fallbackInvocation: fallbackHint(model, task.id),
+    invocation: invocationHint(model, task.id, workerContext),
+    fallbackInvocation: fallbackHint(model, task.id, workerContext),
     taskId: task.id,
     runId,
     eventsFile: path.relative(workspaceRoot, eventsFilePath(workspaceRoot, runId)),

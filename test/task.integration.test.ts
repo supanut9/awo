@@ -457,6 +457,11 @@ test("task run creates the isolated worktree at the specced path", () => {
   const out = awo(ws, ["task", "run", "TEST-T1"]);
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /work in: repos\/\.worktrees\/api\/TEST-T1  \(api on feature\/TEST-T1\)/);
+  // The printed command must be runnable: a worker sandboxed to the workspace
+  // cannot commit unless it can also write the repo that owns the worktree's
+  // .git (§9 item 40).
+  assert.match(out.stdout, /hand to: .* -C repos\/\.worktrees\/api\/TEST-T1 --add-dir /);
+  assert.ok(out.stdout.includes(`--add-dir ${repoPath}`), "the git-owning repo must be granted");
 
   const wt = path.join(ws, "repos", ".worktrees", "api", "TEST-T1");
   assert.ok(fs.existsSync(wt), "the worktree directory must exist");

@@ -9,6 +9,8 @@ export interface Worktree {
   path: string;
   branch: string;
   created: boolean;
+  /** The repo whose .git the worktree points into — a worker must be able to write it. */
+  gitOwnerPath: string;
   /** True when git already had a worktree on this branch and we reused it. */
   reused: boolean;
   /** Set when isolation could NOT be established — never advertise a path then. */
@@ -48,7 +50,7 @@ export async function ensureTaskWorktrees(
     const branch = `feature/${taskId}`;
 
     if (await fs.pathExists(abs)) {
-      out.push({ repo: name, path: rel, branch, created: false, reused: true, error: null });
+      out.push({ repo: name, path: rel, branch, created: false, reused: true, error: null, gitOwnerPath: repoPath });
       continue;
     }
 
@@ -67,6 +69,7 @@ export async function ensureTaskWorktrees(
         created: false,
         reused: true,
         error: null,
+        gitOwnerPath: repoPath,
       });
       continue;
     }
@@ -79,7 +82,7 @@ export async function ensureTaskWorktrees(
           ? ["worktree", "add", abs, branch]
           : ["worktree", "add", "-b", branch, abs]
       );
-      out.push({ repo: name, path: rel, branch, created: true, reused: false, error: null });
+      out.push({ repo: name, path: rel, branch, created: true, reused: false, error: null, gitOwnerPath: repoPath });
     } catch (err) {
       // A worktree that cannot be created must not look like isolation.
       out.push({
@@ -89,6 +92,7 @@ export async function ensureTaskWorktrees(
         created: false,
         reused: false,
         error: (err as Error).message.split("\n")[0],
+        gitOwnerPath: repoPath,
       });
     }
   }

@@ -214,15 +214,45 @@ export async function resolveModel(
   };
 }
 
+/**
+ * Where the worker should run, and what else it must be allowed to touch.
+ *
+ * A worktree's `.git` is a pointer to `<repo>/.git/worktrees/<name>`, which lives
+ * OUTSIDE the workspace. A worker sandboxed to the workspace can therefore edit
+ * files but cannot commit — git has to write that external gitdir. The invocation
+ * must grant it, or isolation silently costs you the commit (§9 item 40).
+ */
+export interface WorkerContext {
+  /** Directory the worker should treat as its root. */
+  cwd?: string;
+  /** Extra paths the worker must be able to write — e.g. the repo holding .git. */
+  allow?: string[];
+}
+
 /** The command the orchestrator would run to hand this task to a worker. */
-export function invocationHint(choice: ModelChoice, taskId: string): string {
-  return invocationFor(choice.runtime, choice.model, choice.mode, taskId, choice.effort);
+export function invocationHint(
+  choice: ModelChoice,
+  taskId: string,
+  context: WorkerContext = {}
+): string {
+  return invocationFor(choice.runtime, choice.model, choice.mode, taskId, choice.effort, context);
 }
 
 /** The same command for the declared fallback, if any. */
-export function fallbackHint(choice: ModelChoice, taskId: string): string | null {
+export function fallbackHint(
+  choice: ModelChoice,
+  taskId: string,
+  context: WorkerContext = {}
+): string | null {
   if (!choice.fallback) return null;
-  return invocationFor(choice.fallback.runtime, choice.fallback.model, undefined, taskId);
+  return invocationFor(
+    choice.fallback.runtime,
+    choice.fallback.model,
+    undefined,
+    taskId,
+    undefined,
+    context
+  );
 }
 
 function invocationFor(
@@ -230,20 +260,23 @@ function invocationFor(
   model: string,
   mode: string | undefined,
   taskId: string,
-  effort?: string
+  effort?: string,
+  context: WorkerContext = {}
 ): string {
-  const choice = { runtime, model, mode } as ModelChoice;
   const prompt = `Follow instructions/ship-a-change.md for ${taskId}.`;
-  switch (choice.runtime) {
+  const cwd = context.cwd ? ` -C ${context.cwd}` : "";
+  const allow = (context.allow ?? []).map((p) => ` --add-dir ${p}`).join("");
+
+  switch (runtime) {
     case "codex": {
       const eff = effort ? ` -c model_reasoning_effort=${effort}` : "";
-      return `codex exec -m ${choice.model}${eff} "${prompt}"`;
+      return `codex exec -m ${model}${eff} -s workspace-write${cwd}${allow} "${prompt}"`;
     }
     case "gemini":
-      return `gemini -m ${choice.model} -p "${prompt}"`;
+      return `gemini -m ${model} -p "${prompt}"`;
     default: {
-      const mode = choice.mode === "plan" ? " --permission-mode plan" : "";
-      return `claude --model ${choice.model}${mode} "${prompt}"`;
+      const m = mode === "plan" ? " --permission-mode plan" : "";
+      return `claude --model ${model}${m}${cwd}${allow} "${prompt}"`;
     }
   }
 }
