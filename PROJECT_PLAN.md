@@ -943,6 +943,8 @@ Everything here is a design decision made on paper, not something that's been pr
 
 46. **The linked `node_modules` had to be writable, or the test run failed as a permission error.** Vitest writes `node_modules/.vite-temp`; with the link pointing into the repo and the sandbox granting only the git dir, the suite died on permissions rather than on a test. Granted alongside the git dir — caches and dependencies, never source, which is the distinction item 42 was about. The first task able to actually run tests was `SHOP-T5`, five tasks in.
 
+48. **Low effort was removed from the library, on the evidence of item 47.** Keeping it would have meant offering a setting whose only demonstrated effect was producing work that passed locally and failed at integration. The remaining honest use — commit messages, type conversions — is not worth a tier, and `medium` covers it. Two design notes: the change **tolerates** `low` in existing policies and normalizes it to `medium` rather than erroring, because breaking a workspace to enforce a taste is the mistake §9 item 21 already taught; and the `low` **tier** still exists (it selects a cheaper *model*) — only the low *effort* is gone, which keeps the two axes independent as §12.2 requires. Caveat recorded honestly: the run varied model and effort together, so it does not prove effort alone was responsible.
+
 47. **The tier distinction earned its keep, decisively — and this is the finding the whole exercise existed for.** Six tasks were implemented by `gpt-5.6-luna` at `effort=low`; each passed its own lint/tests and each was individually plausible. The goal-level QA gate, run by `gpt-5.6-sol` at `effort=high` and read-only, returned **GAP** and found the composed feature functionally broken:
     - the public response shape did not match what the PDP read (`{value:{items}}` vs `data.items`), so the FAQ list was **always empty** — the headline feature never worked
     - the admin UI sent `productNo` where the controller required an integer `productId`
@@ -1294,23 +1296,33 @@ Effort is **how long the model should think**, not a different level of intellig
 Lower effort answers faster on fewer reasoning tokens; higher effort improves
 completeness and accuracy on hard problems at the cost of latency and tokens.
 
-**Only `low`, `medium`, `high` are selectable.** Runtimes expose more (xhigh, max),
-and they are deliberately not offered: they are quality-first settings whose benefit
-has to be *measured* before it justifies the cost, and merely listing them invites
-reaching for them by default. `medium` is the balanced default; tiers supply
-`high`/`medium`/`low` respectively when a policy names only a model.
+**Only `medium` and `high` are selectable**, and `medium` is the default.
+
+`low` was **removed on evidence** (§9 item 47), not taste: six tasks implemented at
+low effort each passed their own lint and tests, and the composed feature was broken
+— a response-shape mismatch that made the FAQ list always empty, an unauthenticated
+admin route, and mismatched identifiers between caller and controller. Whatever low
+effort saves on a task that writes code, it gives back at the review. A policy that
+still says `low` is **read as `medium`** rather than rejected, so existing workspaces
+keep working (§11.5).
+
+`xhigh`/`max` are excluded for the opposite reason: they are quality-first settings
+whose benefit must be measured before it justifies the latency and cost, and merely
+listing them invites reaching for them by default.
 
 | Effort | Use for |
 |---|---|
-| `low` | Transforming information you already have — commit messages, JSON→types, explaining a small function, repetitive CRUD from a clear pattern |
-| `medium` | Normal professional work — design an endpoint, implement a service, review a PR, compare two reasonable architectures |
+| `medium` | Normal professional work, and the floor for anything that writes code — design an endpoint, implement a service, review a PR, a commit message, JSON→types |
 | `high` | Interacting constraints or hidden failure cases — auth and token rotation, concurrency and caching bugs, migration planning, decisions expensive to reverse |
 
 The decision test, shipped as the `pick-reasoning-effort` rule:
 
-1. Would a wrong answer be easy to spot? → `low`/`medium` suffices.
-2. Are there many interacting constraints? → move toward `high`.
+1. Would a wrong answer be easy to spot? → `medium` suffices.
+2. Are there many interacting constraints? → `high`.
 3. Could an error cause security, financial, production or migration damage? → `high`.
+4. **Does the work have to agree with something it cannot see** — another repo's
+   response shape, another task's DTO, an auth contract? → `high`, however small the
+   diff. This is the one the dogfood added, and it is the one that was missed.
 
 **Length is not difficulty.** A long but verbose prompt stays `medium`; a short
 question about token revocation is `high`. And an invalid effort is now a hard error

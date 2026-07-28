@@ -394,7 +394,7 @@ test("tier follows the work: agent default, manifest policy, and per-task overri
   let out = awo(ws, ["task", "run", "TEST-T1"]);
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /agent:\s+software-engineer — low tier \(from agent\)/);
-  assert.match(out.stdout, /model:\s+claude:haiku/);
+  assert.match(out.stdout, /model:\s+claude:haiku effort=medium/);
 
   // A tiers policy maps the kind of work to a runtime+model.
   setModels({
@@ -621,7 +621,7 @@ test("the index records tier, model, effort and attempts, and log list can filte
   const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   m.models = {
     tiers: {
-      low: { runtime: "codex", model: "gpt-5.4-mini", effort: "low" },
+      low: { runtime: "codex", model: "gpt-5.4-mini", effort: "medium" },
       high: { runtime: "codex", model: "gpt-5.4-mini", effort: "high" },
     },
   };
@@ -639,7 +639,7 @@ test("the index records tier, model, effort and attempts, and log list can filte
   assert.equal(lines.length, 2);
   for (const l of lines) {
     assert.equal(l.tier, "low");
-    assert.equal(l.effort, "low");
+    assert.equal(l.effort, "medium", "the low TIER still exists; only low EFFORT was dropped");
     assert.equal(l.model, "codex:gpt-5.4-mini");
   }
   assert.equal(lines[0].attempts, 1);
@@ -655,11 +655,12 @@ test("the index records tier, model, effort and attempts, and log list can filte
   awo(ws, ["task", "complete", "TEST-T7", "--outcome", "success"]);
 
   const listed = awo(ws, ["log", "list"]);
-  assert.match(listed.stdout, /low effort=low/);
+  assert.match(listed.stdout, /low effort=medium/);
   assert.match(listed.stdout, /high effort=high/);
   assert.match(listed.stdout, /try#2/);
 
   assert.equal(awo(ws, ["log", "list", "--effort", "high"]).stdout.trim().split("\n").length, 1);
+  assert.equal(awo(ws, ["log", "list", "--effort", "medium"]).stdout.trim().split("\n").length, 2);
   assert.equal(awo(ws, ["log", "list", "--tier", "low"]).stdout.trim().split("\n").length, 2);
   assert.match(awo(ws, ["log", "list", "--tier", "low", "--status", "failed"]).stdout, /failed/);
   fs.rmSync(ws, { recursive: true, force: true });

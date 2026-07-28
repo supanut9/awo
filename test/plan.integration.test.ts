@@ -298,7 +298,7 @@ test("context orients a new session and says what to do next", () => {
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test("only low, medium and high effort are selectable", () => {
+test("only medium and high effort are selectable; low is normalized", () => {
   const ws = makeWorkspace();
   const manifestPath = path.join(ws, ".workspace", "manifest.json");
   const set = (effort: string): void => {
@@ -311,7 +311,14 @@ test("only low, medium and high effort are selectable", () => {
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "W", "--targets", "api", "--agent", "software-engineer"]);
 
   set("high");
-  assert.equal(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).code, 0);
+  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=high/);
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "failed"]);
+  awo(ws, ["task", "status", "PL-T1", "todo"]);
+
+  // `low` was dropped on evidence (§9 item 47) but must not break a policy that
+  // still says it — tolerate and normalize, per §11.5.
+  set("low");
+  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=medium/);
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "failed"]);
   awo(ws, ["task", "status", "PL-T1", "todo"]);
 
@@ -321,7 +328,7 @@ test("only low, medium and high effort are selectable", () => {
   const bad = awo(ws, ["task", "run", "PL-T1", "--no-worktree"]);
   assert.equal(bad.code, 1);
   assert.match(bad.stderr, /Invalid effort "xhigh"/);
-  assert.match(bad.stderr, /Only low, medium, high are selectable/);
+  assert.match(bad.stderr, /Only medium and high are selectable/);
 
   // A config error must not have opened a run — the task is still runnable.
   assert.match(awo(ws, ["task", "show", "PL-T1"]).stdout, /status: {3}todo/);
@@ -331,6 +338,6 @@ test("only low, medium and high effort are selectable", () => {
   const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   m.models = { tiers: { low: { runtime: "codex", model: "gpt-5.4-mini" } } };
   fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
-  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=low/);
+  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=medium/);
   fs.rmSync(ws, { recursive: true, force: true });
 });

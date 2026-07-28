@@ -27,19 +27,33 @@ export type Tier = (typeof TIERS)[number];
 
 /**
  * §12.10 — reasoning effort is "how long the model should think", not a different
- * intelligence level. Restricted to three on purpose: xhigh/max exist on some
- * runtimes but are quality-first settings whose gain has to be *measured* before
- * it is worth the latency and cost, and offering them invites reaching for them
- * by default. `medium` is the balanced starting point.
+ * intelligence level.
+ *
+ * Only `medium` and `high` are selectable. `low` was dropped on evidence (§9 item
+ * 47): six implementation tasks run at low effort each passed their own checks and
+ * composed into a functionally broken feature — an always-empty response, an
+ * unauthenticated admin route, mismatched identifiers — all cross-boundary defects.
+ * Whatever low effort saves on a task that writes code, it gives back at the gate.
+ * `xhigh`/`max` are excluded for the opposite reason: they are quality-first
+ * settings whose benefit must be measured before it justifies the cost.
+ *
+ * `medium` is the default.
  */
-export const EFFORTS = ["low", "medium", "high"] as const;
+export const EFFORTS = ["medium", "high"] as const;
 export type Effort = (typeof EFFORTS)[number];
+
+/**
+ * `low` is still accepted from existing workspaces and normalized to `medium`
+ * rather than throwing — a policy written before this change must keep working
+ * (§11.5, and the lesson of §9 item 21).
+ */
+const LEGACY_EFFORTS: Record<string, Effort> = { low: "medium" };
 
 /** Effort that matches each tier's kind of work — see §12.10's decision test. */
 const EFFORT_BY_TIER: Record<Tier, Effort> = {
   high: "high",
   standard: "medium",
-  low: "low",
+  low: "medium",
 };
 
 export interface ModelChoice {
@@ -157,10 +171,12 @@ function parseChoice(value: unknown): ModelChoice | null {
 
 function parseEffort(value: unknown, where: string): Effort | null {
   if (typeof value !== "string") return null;
+  if (LEGACY_EFFORTS[value]) return LEGACY_EFFORTS[value];
   if (!EFFORTS.includes(value as Effort)) {
     throw new Error(
-      `Invalid effort "${value}" in ${where}. Only ${EFFORTS.join(", ")} are selectable — ` +
-        `higher settings are quality-first and should be proven to help before being used.`
+      `Invalid effort "${value}" in ${where}. Only ${EFFORTS.join(" and ")} are selectable: ` +
+        `lower effort was dropped after low-effort implementation produced cross-boundary ` +
+        `defects (§9 item 47), and higher settings must be proven to help before being used.`
     );
   }
   return value as Effort;
