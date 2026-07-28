@@ -15,4 +15,5 @@ Sequence for a new ask (`awo req new`), owned by `product-manager`:
 3. Hand off to `tech-lead` — proceed with **plan-a-goal**.
 
 Finally, record the run (rule: `record-every-run`):
-`awo log add --agent product-manager --summary "<what you did>" --prompt "<the ask>"`
+`awo log add --label <short-slug> --agent product-manager --model <model> --started <iso-when-you-began> --summary "<what you did>" --prompt "<the ask>"`
+Pass `--label` and `--started`, or the entry is named `adhoc` with a 0s duration.

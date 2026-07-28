@@ -23,6 +23,7 @@ import { runGoalNew, runReqNew, runTaskNew } from "./commands/plan.js";
 import { runSync, syncHadProblems } from "./commands/sync.js";
 import { doctorExitCode, runDoctor } from "./commands/doctor.js";
 import { planHasWork, runUpgrade } from "./commands/upgrade.js";
+import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -387,16 +388,21 @@ task
 task
   .command("run <taskId>")
   .description(
-    "Open a run for a task: resolves dependsOn, validates targets, moves state to running, starts the event stream. The agent then does the work and closes it with `task complete`."
+    "Open a run for a task: resolves dependsOn, validates targets, creates the isolated worktrees, moves state to running, starts the event stream. The agent then does the work and closes it with `task complete`."
   )
-  .action(async (taskId: string) => {
+  .option("--no-worktree", "skip worktree creation (work in the shared checkout)")
+  .action(async (taskId: string, opts: { worktree?: boolean }) => {
     try {
-      const r = await runTaskRun(taskId);
+      const r = await runTaskRun(taskId, { noWorktree: opts.worktree === false });
       console.log(`${r.taskId} is running — run ${r.runId}`);
       console.log(`agent:   ${r.agent ?? "unassigned"} — ${r.model.tier} tier (from ${r.model.tierSource})`);
       console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.mode ? ` (${r.model.mode} mode)` : ""}`);
       console.log(`targets: ${r.targets.join(", ") || "none"}`);
       console.log(`events:  ${r.eventsFile}`);
+      for (const wt of r.worktrees) {
+        console.log(`work in: ${wt.path}  (${wt.repo} on ${wt.branch})`);
+      }
+      if (r.worktrees.length === 0) console.log(`work in: shared checkout — NO worktree isolation`);
       console.log(`hand to: ${r.invocation}`);
       if (r.body) console.log(`\n${r.body}`);
       console.log(
@@ -572,5 +578,38 @@ program
       process.exitCode = 1;
     }
   });
+
+for (const kind of ["agent", "skill"] as CatalogKind[]) {
+  const group = program
+    .command(kind)
+    .description(`Install ${kind}s from the workspace catalog (§7.1).`);
+
+  group
+    .command("list")
+    .description(`Show installed and available ${kind}s.`)
+    .action(async () => {
+      try {
+        const { installed, available } = await runCatalogList(kind);
+        console.log(`installed: ${installed.join(", ") || "none"}`);
+        console.log(`available: ${available.join(", ") || "none left in the catalog"}`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  group
+    .command(`add <name>`)
+    .description(`Install a ${kind} from catalog/${kind}s into ${kind}s/.`)
+    .action(async (name: string) => {
+      try {
+        const r = await runCatalogAdd(kind, name);
+        console.log(`installed ${kind} ${r.name} at ${r.file}`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+}
 
 program.parseAsync(process.argv);

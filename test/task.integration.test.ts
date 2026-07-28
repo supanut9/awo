@@ -443,3 +443,98 @@ test("tier follows the work: agent default, manifest policy, and per-task overri
   assert.match(out.stdout, /unassigned — standard tier \(from default\)/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+test("task run creates the isolated worktree at the specced path", () => {
+  const ws = makeWorkspace();
+  // Make the linked repo a real git repo so a worktree can be created.
+  const repoPath = JSON.parse(
+    fs.readFileSync(path.join(ws, ".workspace", "manifest.json"), "utf8")
+  ).repos[0].path as string;
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repoPath });
+  execFileSync("git", ["add", "-A"], { cwd: repoPath });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repoPath });
+
+  const out = awo(ws, ["task", "run", "TEST-T1"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /work in: repos\/\.worktrees\/api\/TEST-T1  \(api on feature\/TEST-T1\)/);
+
+  const wt = path.join(ws, "repos", ".worktrees", "api", "TEST-T1");
+  assert.ok(fs.existsSync(wt), "the worktree directory must exist");
+  assert.match(
+    execFileSync("git", ["worktree", "list"], { cwd: repoPath, encoding: "utf8" }),
+    /TEST-T1/,
+    "git must know about the worktree"
+  );
+
+  // It is announced in the event stream, so the log shows isolation happened.
+  const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
+  const events = fs
+    .readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(events.some((e) => String(e.label ?? "").includes("worktree ready for api")));
+
+  // Re-running reuses it rather than failing.
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "failed"]);
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  assert.equal(awo(ws, ["task", "run", "TEST-T1"]).code, 0);
+
+  // --no-worktree opts out, and says so loudly.
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "failed"]);
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  const shared = awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  assert.match(shared.stdout, /NO worktree isolation/);
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("reposChanged is derived from any repo-bearing event, and falls back to targets on commit", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  // A worker that reports a test and a commit but never a repo.diff — exactly
+  // what the dogfood produced, which used to yield reposChanged: [].
+  awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":10}']);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--summary", "done"]);
+  let index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n")[0]);
+  assert.deepEqual(index.reposChanged, ["api"], "a test event naming a repo counts");
+
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  awo(ws, ["task", "event", "TEST-T1", "commit", "--label", "abc123 feat: thing"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  const lines = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n");
+  index = JSON.parse(lines[lines.length - 1]);
+  assert.deepEqual(index.reposChanged, ["api"], "a commit with no repo falls back to the task's targets");
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("agent add installs from the catalog and refuses unknown or duplicate names", () => {
+  const ws = makeWorkspace();
+  let out = awo(ws, ["agent", "list"]);
+  assert.match(out.stdout, /available: audit, data-engineer, marketing-specialist/);
+  assert.ok(!fs.existsSync(path.join(ws, "agents", "data-engineer.md")));
+
+  out = awo(ws, ["agent", "add", "data-engineer"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.ok(fs.existsSync(path.join(ws, "agents", "data-engineer.md")));
+  assert.match(awo(ws, ["agent", "list"]).stdout, /installed: .*data-engineer/);
+
+  const dup = awo(ws, ["agent", "add", "data-engineer"]);
+  assert.equal(dup.code, 1);
+  assert.match(dup.stderr, /already installed/);
+
+  const missing = awo(ws, ["agent", "add", "nope"]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /Available: audit, marketing-specialist/);
+
+  // An installed data-engineer is high tier, so schema work stops landing on a
+  // low-tier implementer (§9 item 33).
+  const goalDir = path.join(ws, "goals", "TEST-G1-demo");
+  fs.writeFileSync(
+    path.join(goalDir, "tasks", "TEST-T4-model.md"),
+    `---\nid: TEST-T4\ngoalId: TEST-G1\nname: Model\ntargets: [api]\nagent: data-engineer\nstatus: todo\n---\n\nx\n`
+  );
+  assert.match(awo(ws, ["task", "run", "TEST-T4", "--no-worktree"]).stdout, /data-engineer — high tier/);
+
+  assert.match(awo(ws, ["skill", "list"]).stdout, /available: .*write-migration/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});

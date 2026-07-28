@@ -15,6 +15,7 @@ import {
   type TaskStatus,
 } from "../state.js";
 import { invocationHint, resolveModel, type ResolvedModel } from "../models.js";
+import { ensureTaskWorktrees, type Worktree } from "../worktrees.js";
 import {
   appendEvent,
   appendIndex,
@@ -132,6 +133,8 @@ export interface TaskRunResult {
   /** §12 — who should do this work, and how to hand it to them. */
   model: ResolvedModel;
   invocation: string;
+  /** §7.1 — isolation, created rather than merely required. */
+  worktrees: Worktree[];
 }
 
 /**
@@ -142,7 +145,7 @@ export interface TaskRunResult {
  */
 export async function runTaskRun(
   taskId: string,
-  options: { cwd?: string } = {}
+  options: { cwd?: string; noWorktree?: boolean } = {}
 ): Promise<TaskRunResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const manifest = await readManifest(workspaceRoot);
@@ -219,6 +222,16 @@ export async function runTaskRun(
   });
 
   const model = await resolveModel(workspaceRoot, task.agent, task.tier);
+  const worktrees = options.noWorktree
+    ? []
+    : await ensureTaskWorktrees(workspaceRoot, manifest, task.id, task.targets);
+
+  for (const wt of worktrees.filter((w) => w.created)) {
+    await appendEvent(workspaceRoot, runId, "step.start", {
+      label: `worktree ready for ${wt.repo} at ${wt.path} on ${wt.branch}`,
+      repo: wt.repo,
+    });
+  }
 
   await appendEvent(workspaceRoot, runId, "run.start", {
     taskId: task.id,
@@ -232,6 +245,7 @@ export async function runTaskRun(
 
   return {
     model,
+    worktrees,
     invocation: invocationHint(model, task.id),
     taskId: task.id,
     runId,
@@ -318,13 +332,19 @@ export async function runTaskComplete(
     : null;
 
   const events = await readEvents(workspaceRoot, runId);
-  const reposChanged = [
+
+  // Any event may name a repo — repo.diff, test, commit. Deriving only from
+  // repo.diff reported `reposChanged: []` for a run that changed 8 files and
+  // committed, because the worker emitted `test` and `commit` instead (§9 item 32).
+  let reposChanged = [
     ...new Set(
-      events
-        .filter((e) => e.kind === "repo.diff" && typeof e.repo === "string")
-        .map((e) => e.repo as string)
+      events.filter((e) => typeof e.repo === "string").map((e) => e.repo as string)
     ),
   ];
+  // A commit is proof the targets were touched, even if no event named a repo.
+  if (reposChanged.length === 0 && events.some((e) => e.kind === "commit")) {
+    reposChanged = [...task.targets];
+  }
 
   const nextStatus: TaskStatus =
     outcome === "success" ? (options.gate ? "in-review" : "done") : "blocked";

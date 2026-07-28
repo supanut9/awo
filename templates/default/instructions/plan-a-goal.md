@@ -18,6 +18,13 @@ Sequence for `awo goal plan {{PROJECT_KEY}}-G#`, owned by `tech-lead` (preceded 
    places the file under `tasks/`, validates `targets` against the manifest, and
    wires the goal's `taskIds`. Then fill in Objective / Steps / Done when.
    Do NOT hand-author task files or invent IDs — the command owns both.
+   - **Pick the right role.** `awo agent list` shows what is installed and what is
+     still in the catalog; `awo agent add <name>` installs one. Schema/data-model
+     work belongs to `data-engineer`, not `software-engineer` — install it rather
+     than assigning data work to an implementer.
+   - **Flag thinking-heavy work.** A task's model tier follows its role, so add
+     `tier: high` to a task whose work needs judgment even though the role
+     normally runs low (e.g. "define the data model"). See §12.
 5. Leave tasks in `todo` status for human review before `awo task run`
    is used (draft → approve gate).
 6. Once every task reaches `done` (see **ship-a-change**), hand off to
@@ -26,4 +33,5 @@ Sequence for `awo goal plan {{PROJECT_KEY}}-G#`, owned by `tech-lead` (preceded 
    re-enters via `file-bug` → back to `product-manager`.
 
 Finally, record the run (rule: `record-every-run`):
-`awo log add --agent tech-lead --summary "<what you did>" --prompt "<the ask>"`
+`awo log add --label <short-slug> --agent tech-lead --model <model> --started <iso-when-you-began> --summary "<what you did>" --prompt "<the ask>"`
+Pass `--label` and `--started`, or the entry is named `adhoc` with a 0s duration.
