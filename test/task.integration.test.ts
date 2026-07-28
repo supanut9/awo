@@ -329,3 +329,45 @@ function readStateRunId(ws: string): string {
     fs.readFileSync(path.join(ws, "goals", "TEST-G1-demo", "state.json"), "utf8")
   ).tasks["TEST-T1"].lastRunId as string;
 }
+
+test("log add records work that is not a task run, with taskId null", () => {
+  const ws = makeWorkspace();
+
+  const out = awo(ws, [
+    "log", "add", "--label", "intake", "--agent", "product-manager",
+    "--model", "codex", "--summary", "Refined the requirement.",
+    "--prompt", "capture the FAQ ask", "--note", "two questions open",
+  ]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /recorded \d{4}-\d{2}-\d{2}T.*_intake/);
+
+  const index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim());
+  assert.equal(index.taskId, null, "ad-hoc work has no task (§7.3)");
+  assert.equal(index.agent, "product-manager");
+  assert.equal(index.status, "success");
+
+  const detail = fs.readFileSync(path.join(ws, "logs", "runs", index.runId.slice(0, 10), `${index.runId}.md`), "utf8");
+  assert.match(detail, /taskId: null/);
+  assert.match(detail, /Refined the requirement\./);
+  assert.match(detail, /two questions open/);
+
+  // It shows up in the same index the rest of the log tooling reads.
+  assert.match(awo(ws, ["log", "list"]).stdout, /_intake\tsuccess/);
+  assert.match(awo(ws, ["log", "show", index.runId]).stdout, /Refined the requirement/);
+
+  // A supplied start time is honoured, and drives the runId.
+  const dated = awo(ws, [
+    "log", "add", "--agent", "tech-lead", "--summary", "planned",
+    "--started", "2026-01-02T03:04:05.000Z", "--duration", "60",
+  ]);
+  assert.match(dated.stdout, /2026-01-02T03-04-05Z_adhoc/);
+
+  const bad = awo(ws, ["log", "add", "--agent", "x", "--summary", "y", "--started", "not-a-date"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /must be an ISO timestamp/);
+
+  const badOutcome = awo(ws, ["log", "add", "--agent", "x", "--summary", "y", "--outcome", "great"]);
+  assert.equal(badOutcome.code, 1);
+  assert.match(badOutcome.stderr, /Unknown outcome "great"/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});

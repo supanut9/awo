@@ -17,7 +17,7 @@ import {
   runTaskStatus,
   runTaskVerify,
 } from "./commands/task.js";
-import { runLogList, runLogShow, runLogTail } from "./commands/log.js";
+import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 import { runGoalNew, runReqNew, runTaskNew } from "./commands/plan.js";
 import { runSync, syncHadProblems } from "./commands/sync.js";
@@ -479,6 +479,37 @@ log
         const dur = r.durationSec === null ? "—" : `${r.durationSec}s`;
         console.log(`${r.runId}\t${r.status}\t${dur}\t${r.reposChanged.join(",") || "no repos"}`);
       }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+log
+  .command("add")
+  .description(
+    "Record work that isn't a task run — intake, planning, an audit pass (§7.3 allows taskId: null)."
+  )
+  .requiredOption("--agent <agent>", "who did the work (agent name or model)")
+  .requiredOption("--summary <text>", "what was done")
+  .option("--label <label>", "short slug for the runId (default: adhoc)")
+  .option("--prompt <text>", "the request, verbatim")
+  .option("--interpreted <text>", "how it was understood")
+  .option("--note <text...>", "follow-ups, risks, open questions")
+  .option("--repo <name...>", "repos touched, if any")
+  .option("--model <model...>", "model(s) used")
+  .option("--outcome <outcome>", "success | failed | skipped (default: success)")
+  .option("--started <iso>", "when it began, if not now")
+  .option("--duration <sec>", "seconds it took", (v) => parseInt(v, 10))
+  .action(async (opts: Record<string, unknown>) => {
+    try {
+      const r = await runLogAdd({
+        ...(opts as { agent: string; summary: string }),
+        startedAt: opts.started as string | undefined,
+        durationSec: opts.duration as number | undefined,
+      });
+      console.log(`recorded ${r.runId}`);
+      console.log(`log: ${r.detail}`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
