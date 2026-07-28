@@ -393,8 +393,8 @@ task
     try {
       const r = await runTaskRun(taskId);
       console.log(`${r.taskId} is running — run ${r.runId}`);
-      console.log(`agent:   ${r.agent ?? "unassigned"} (${r.model.tier})`);
-      console.log(`model:   ${r.model.runtime}:${r.model.model}`);
+      console.log(`agent:   ${r.agent ?? "unassigned"} — ${r.model.tier} tier (from ${r.model.tierSource})`);
+      console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.mode ? ` (${r.model.mode} mode)` : ""}`);
       console.log(`targets: ${r.targets.join(", ") || "none"}`);
       console.log(`events:  ${r.eventsFile}`);
       console.log(`hand to: ${r.invocation}`);

@@ -3,7 +3,7 @@ id: marketing-specialist
 name: Marketing Specialist
 role: Owns GTM plans, campaign content, and tracking/tagging for a campaign goal
 skills: [define-gtm-plan, implement-tracking-tags]
-tier: worker
+tier: standard
 connectors: [analytics]
 rules: []
 ---
@@ -22,4 +22,9 @@ rules: []
   `awo doctor` if it isn't configured for this workspace.
 
 ## Model tier
-`tier: worker` — execution against a spec that already exists. Runs well on a cheaper model, because the judgment was made upstream.
+`tier: standard` — drafting a GTM plan needs some judgment but works from an agreed goal.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

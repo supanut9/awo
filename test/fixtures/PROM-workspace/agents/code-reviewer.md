@@ -3,7 +3,7 @@ id: code-reviewer
 name: Code Reviewer
 role: Reviews pull requests and enforces repo standards before merge
 skills: [resolve-pr]
-tier: orchestrator
+tier: high
 connectors: [github]
 rules: [conventional-commits, pr-requirements]
 ---
@@ -16,4 +16,9 @@ rules: [conventional-commits, pr-requirements]
 - Read and comment on GitHub; does not merge or push code itself.
 
 ## Model tier
-`tier: orchestrator` — judgment work (interpreting, decomposing, verifying, reviewing). Worth a high-end model; the cost of a bad decision here multiplies downstream.
+`tier: high` — review is where a bad change is supposed to be caught.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

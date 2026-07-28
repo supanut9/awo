@@ -3,7 +3,7 @@ id: software-engineer
 name: Software Engineer
 role: Writes the code for a task and verifies it before handing off to ship
 skills: [sync-repos, create-task-worktree, run-tests]
-tier: worker
+tier: low
 connectors: []
 rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]
 ---
@@ -26,4 +26,9 @@ rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]
   (rule: `tests-must-pass`).
 
 ## Model tier
-`tier: worker` — execution against a spec that already exists. Runs well on a cheaper model, because the judgment was made upstream.
+`tier: low` — implements a task that has already been specified — the thinking happened upstream, so a cheaper model saves tokens without losing much.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

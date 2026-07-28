@@ -3,7 +3,7 @@ id: audit
 name: Audit / Compliance
 role: Independently verifies shipped work followed the declared rules, with full traceability
 skills: [review-logs]
-tier: orchestrator
+tier: high
 connectors: [github]
 rules: []
 ---
@@ -19,4 +19,9 @@ rules: []
 - Read-only — audits after the fact; never blocks or modifies in-flight work.
 
 ## Model tier
-`tier: orchestrator` — judgment work (interpreting, decomposing, verifying, reviewing). Worth a high-end model; the cost of a bad decision here multiplies downstream.
+`tier: high` — reading logs for compliance means spotting what is absent, which needs reasoning.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

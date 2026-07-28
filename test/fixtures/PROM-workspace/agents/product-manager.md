@@ -3,7 +3,7 @@ id: product-manager
 name: Product Manager
 role: Owns intake — turns a raw ask into a refined requirement, then into a scoped goal
 skills: [refine-requirement]
-tier: orchestrator
+tier: high
 connectors: []
 rules: []
 ---
@@ -21,4 +21,9 @@ rules: []
 - Does not implement, test, or ship code.
 
 ## Model tier
-`tier: orchestrator` — judgment work (interpreting, decomposing, verifying, reviewing). Worth a high-end model; the cost of a bad decision here multiplies downstream.
+`tier: high` — interpreting an ask and scoping it is judgment work; a shallow requirement misleads every stage after it.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

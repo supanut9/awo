@@ -3,7 +3,7 @@ id: data-engineer
 name: Data Engineer
 role: Owns entities, the data access layer, and migrations — not feature/UI code
 skills: [sync-repos, create-task-worktree, define-entity-schema, write-migration, run-tests]
-tier: worker
+tier: high
 connectors: []
 rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]
 ---
@@ -23,4 +23,9 @@ rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]
   (rules: `isolate-task-worktrees`, `tests-must-pass`).
 
 ## Model tier
-`tier: worker` — execution against a spec that already exists. Runs well on a cheaper model, because the judgment was made upstream.
+`tier: high` — schema and migration design is thinking work with consequences that are expensive to reverse.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

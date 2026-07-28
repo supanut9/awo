@@ -375,7 +375,7 @@ test("log add records work that is not a task run, with taskId null", () => {
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test("task run resolves a model from the agent's tier, and the manifest can override it", () => {
+test("tier follows the work: agent default, manifest policy, and per-task override", () => {
   const ws = makeWorkspace();
   const manifestPath = path.join(ws, ".workspace", "manifest.json");
   const setModels = (models: unknown): void => {
@@ -383,49 +383,63 @@ test("task run resolves a model from the agent's tier, and the manifest can over
     m.models = models;
     fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
   };
+  const rerun = (id: string): RunResult => {
+    awo(ws, ["task", "complete", id, "--outcome", "success"]);
+    awo(ws, ["task", "status", id, "todo"]);
+    return awo(ws, ["task", "run", id]);
+  };
 
-  // TEST-T1 has `agent: software-engineer`, which the shipped agent file marks
-  // `tier: worker`. With no policy, the built-in fallback applies.
+  // TEST-T1 is `agent: software-engineer`, which ships as tier: low — writing
+  // code to an existing spec. No policy, so the built-in fallback applies.
   let out = awo(ws, ["task", "run", "TEST-T1"]);
   assert.equal(out.code, 0, out.stderr);
-  assert.match(out.stdout, /agent:\s+software-engineer \(worker\)/);
-  assert.match(out.stdout, /model:\s+claude:sonnet/);
-  assert.match(out.stdout, /hand to: claude --model sonnet/);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
-  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  assert.match(out.stdout, /agent:\s+software-engineer — low tier \(from agent\)/);
+  assert.match(out.stdout, /model:\s+claude:haiku/);
 
-  // A tier-level policy wins over the fallback.
-  setModels({ worker: { runtime: "codex", model: "gpt-5-codex" }, orchestrator: { runtime: "claude", model: "opus" } });
-  out = awo(ws, ["task", "run", "TEST-T1"]);
+  // A tiers policy maps the kind of work to a runtime+model.
+  setModels({
+    orchestrator: { runtime: "claude", model: "opus", mode: "plan" },
+    tiers: {
+      high: { runtime: "claude", model: "opus", mode: "plan" },
+      low: { runtime: "codex", model: "gpt-5-codex" },
+    },
+  });
+  out = rerun("TEST-T1");
   assert.match(out.stdout, /model:\s+codex:gpt-5-codex/);
   assert.match(out.stdout, /hand to: codex exec -m gpt-5-codex/);
-  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
-  awo(ws, ["task", "status", "TEST-T1", "todo"]);
 
-  // byRole is more specific than the tier default.
-  setModels({
-    worker: { runtime: "codex", model: "gpt-5-codex" },
-    byRole: { "software-engineer": { runtime: "claude", model: "opus" } },
-  });
-  out = awo(ws, ["task", "run", "TEST-T1"]);
-  assert.match(out.stdout, /model:\s+claude:opus/);
+  // A task whose WORK is thinking-heavy overrides the role's tier.
+  const goalDir = path.join(ws, "goals", "TEST-G1-demo");
+  fs.writeFileSync(
+    path.join(goalDir, "tasks", "TEST-T6-model.md"),
+    `---\nid: TEST-T6\ngoalId: TEST-G1\nname: Define the data model\ntargets: [api]\nagent: software-engineer\ntier: high\nstatus: todo\n---\n\nx\n`
+  );
+  out = awo(ws, ["task", "run", "TEST-T6"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /software-engineer — high tier \(from task\)/, "the task's tier must win");
+  assert.match(out.stdout, /model:\s+claude:opus \(plan mode\)/);
+  assert.match(out.stdout, /hand to: claude --model opus --permission-mode plan/);
 
-  // The tier and model land in the run.start event, so the log records what ran.
+  // byRole pins a role regardless of tier mapping.
+  setModels({ tiers: { low: { runtime: "codex", model: "gpt-5-codex" } }, byRole: { "software-engineer": { runtime: "claude", model: "sonnet" } } });
+  out = rerun("TEST-T1");
+  assert.match(out.stdout, /model:\s+claude:sonnet/);
+
+  // The run.start event records tier, where it came from, and the model.
   const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
   const events = fs
     .readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`), "utf8")
     .trim().split("\n").map((l) => JSON.parse(l));
-  assert.equal(events[0].kind, "run.start");
-  assert.equal(events[0].tier, "worker");
-  assert.equal(events[0].model, "claude:opus");
+  assert.equal(events[0].tier, "low");
+  assert.equal(events[0].tierFrom, "agent");
+  assert.equal(events[0].model, "claude:sonnet");
 
-  // An unassigned task falls back to the worker tier rather than erroring.
-  const goalDir = path.join(ws, "goals", "TEST-G1-demo");
+  // An unassigned task falls back to standard — the middle, not the cheapest.
   fs.writeFileSync(
     path.join(goalDir, "tasks", "TEST-T5-noagent.md"),
     `---\nid: TEST-T5\ngoalId: TEST-G1\nname: No agent\ntargets: [api]\nstatus: todo\n---\n\nx\n`
   );
   out = awo(ws, ["task", "run", "TEST-T5"]);
-  assert.match(out.stdout, /agent:\s+unassigned \(worker\)/);
+  assert.match(out.stdout, /unassigned — standard tier \(from default\)/);
   fs.rmSync(ws, { recursive: true, force: true });
 });

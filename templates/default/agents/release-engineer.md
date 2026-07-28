@@ -3,7 +3,7 @@ id: release-engineer
 name: Release Engineer
 role: Takes a task from code changes to a merged pull request
 skills: [create-commit, open-pr, resolve-pr]
-tier: worker
+tier: low
 connectors: [github]
 rules: [conventional-commits, no-push-to-main, pr-requirements, isolate-task-worktrees]
 ---
@@ -23,4 +23,9 @@ rules: [conventional-commits, no-push-to-main, pr-requirements, isolate-task-wor
   (never `main`, never another task's worktree).
 
 ## Model tier
-`tier: worker` — execution against a spec that already exists. Runs well on a cheaper model, because the judgment was made upstream.
+`tier: low` — commit, PR, merge, clean up: mechanical steps with a fixed shape.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

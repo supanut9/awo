@@ -925,6 +925,8 @@ Everything here is a design decision made on paper, not something that's been pr
     - **Fix: generate `git.scanRepositories`.** It takes an explicit list of paths rather than scanning, so `add`/`connect`/`remove` now write each repo's **real** location into `.vscode/settings.json` alongside regenerating the `.code-workspace`. Detection then works on a plain single-folder open, with no multi-root and no `CLAUDE.md` pollution. Template keys in that file are preserved through the merge. It does make `settings.json` diverge from the shipped template, so `awo upgrade` treats it as user-edited and leaves it alone (§11.2's third case) — correct, since it is workspace-specific derived state.
     - **Git Graph specifically may still need the multi-root file.** `git.scanRepositories` is a built-in Git extension setting; whether Git Graph honours VS Code's resulting repository list or only scans workspace folders is **not verified here**. If Git Graph still comes up empty, open the generated `<KEY>.code-workspace`, or use its "Add Repository" command.
 
+30. **"Orchestrator" was modelled as a tier, and that was wrong.** v0.0.11 shipped `tier: orchestrator | worker` and sorted roles into the two, which quietly asserted that the PM *is* a coordinator and that a worker is cheap. Neither holds. The orchestrator is the **intermediary between the human and the work** — the session you talk to, not an entry in `agents/`; and every role is a worker whose tier depends on **what the work is**, so `data-engineer` designing a schema is high-tier while `software-engineer` applying a spec is low-tier. Corrected in v0.0.12 to `high | standard | low` with the orchestrator configured separately, plus a per-task `tier:` override for when the same role does unusually thinking-heavy work. The lesson: **naming a dimension after one of its values collapses two ideas that need to stay separate** — a tier ladder cannot double as an org chart.
+
 29. **`runId` collided when the same task ran twice inside one second.** The ID was `<ISO-timestamp-to-seconds>_<taskId>`, so two runs in the same second shared it: they appended to one events file and wrote two index lines with the same key — breaking the uniqueness §7.3 depends on to link index ↔ detail ↔ `state.json`. Found by a test that ran one task three times in a row; unlikely in real use, where a run takes minutes, but trivially reachable and silently corrupting when reached. Fixed by keeping milliseconds. The lesson: **a timestamp is only an identifier at a precision finer than the fastest thing that can produce two of them.**
 
 28. **Two full agent stages produced ZERO log entries — the audit trail only covered task runs.** Driving Codex through intake and planning (11 min / 33k tokens, then 18 min / 60k tokens) left `logs/` containing nothing but `.gitkeep`. Cause: every log write lived in `task.ts`, so only `task run`/`task event`/`task complete` could produce one, and neither stage involves a task. §7.3 *already* permitted `taskId: null` "for an ad-hoc prompt not tied to a task" — the format anticipated this and no command delivered it. This is the second time the gap surfaced: §9 item 14's agent hand-wrote a `runs.jsonl` entry typed `manual-planning` for exactly this reason, and that improvisation was recorded as a curiosity rather than read as a missing command. Fixed with `awo log add`. The lesson: **when an agent invents a workaround, the workaround is a feature request** — and a spec allowing something is not the same as a command producing it.
@@ -1180,44 +1182,68 @@ The lock must therefore record the hash of **what this version of the template p
 
 ---
 
-## 12. Model tiering — orchestrator and worker
+## 12. Model tiering — one orchestrator, many workers
 
-**Goal:** spend a high-end model where judgment happens and a cheaper one where a spec is merely executed, without the workspace having to be re-taught which is which every session.
+**Goal:** spend a high-end model where thinking happens and a cheap one where a written spec is merely executed, without re-teaching the workspace which is which every session.
 
-**Declarative, not executive.** §9 item 2 settled that `task run` orchestrates and logs; it does not execute. This section does not change that. awo *resolves and records* which runtime+model should do a piece of work and tells whoever is driving; it does not spawn anything. Making awo an agent runtime is a separate, much larger decision — see §12.4.
+### 12.1 Orchestrator is not a role
 
-### 12.1 The two tiers
+Two things that must not be conflated:
 
-| Tier | Work | Default roles |
+- The **orchestrator** is the intermediary between the human and the work. It is the session you talk to. It is **not** one of the roles in `agents/`, it has no tier, and it is configured once in the manifest. Workers act only when it says so.
+- Every role in `agents/` is a **worker** — `product-manager` as much as `software-engineer`.
+
+An earlier draft of this section made `orchestrator` a *tier* and sorted roles into it. That was wrong twice over: it implied the PM was a coordinator rather than a worker, and it implied "worker" meant "cheap".
+
+### 12.2 Worker ≠ cheap. Tier follows the work
+
+A worker's tier is a property of **the kind of work**, not of seniority:
+
+| Tier | Kind of work | Default roles |
 |---|---|---|
-| `orchestrator` | Judgment: interpreting an ask, decomposing a goal, verifying a definition-of-done, reviewing a PR. A bad decision here multiplies downstream. | `product-manager`, `tech-lead`, `qa-engineer`, `code-reviewer`, `audit` |
-| `worker` | Execution against a spec that already exists. The judgment was made upstream. | `software-engineer`, `data-engineer`, `release-engineer`, `marketing-specialist` |
+| `high` | Thinking: interpreting an ask, decomposing a goal, designing a data model, judging a definition-of-done, reviewing a change. Often worth **plan mode** as well as a strong model. | `product-manager`, `tech-lead`, `data-engineer`, `qa-engineer`, `code-reviewer`, `audit` |
+| `standard` | Mixed — works from an agreed goal but still exercises some judgment. | `marketing-specialist` |
+| `low` | Mechanical: implement a task that is already specified, commit, open a PR. The thinking happened upstream, so a cheap model saves tokens without losing much. | `software-engineer`, `release-engineer` |
 
-Each agent file declares its own tier in frontmatter (`tier: orchestrator`), so the classification travels with the role rather than living in a lookup table someone has to maintain. A role absent from both the file and the built-in map defaults to `worker` — the cheaper, less-trusted option, which is the right way for a default to fail.
+`data-engineer` is `high` deliberately: schema and migration design has consequences that are expensive to reverse, which is thinking work regardless of the title. An unknown role defaults to `standard` — a wrong guess costs tokens at `high` and costs quality at `low`, so the middle is the safe failure.
 
-### 12.2 Policy lives in the manifest
+### 12.3 A task can override its role's tier
+
+The sharp version of "tier follows the work": the *same role* can do work of different tiers. `software-engineer` writing a one-line copy fix and `software-engineer` designing a caching layer are not the same. So a task may declare its own tier:
+
+```yaml
+# goals/<goal>/tasks/SHOP-T1-define-the-faq-data-model.md
+agent: software-engineer
+tier: high          # this particular work is thinking-heavy
+```
+
+### 12.4 Policy lives in the manifest
 
 ```jsonc
 "models": {
-  "orchestrator": { "runtime": "claude", "model": "opus" },
-  "worker":       { "runtime": "codex",  "model": "gpt-5-codex" },
+  "orchestrator": { "runtime": "claude", "model": "opus", "mode": "plan" },
+  "tiers": {
+    "high":     { "runtime": "claude", "model": "opus", "mode": "plan" },
+    "standard": { "runtime": "claude", "model": "sonnet" },
+    "low":      { "runtime": "codex",  "model": "gpt-5-codex" }
+  },
   "byRole": { "code-reviewer": { "runtime": "claude", "model": "opus" } }
 }
 ```
 
-Optional in full: a workspace with no `models` key resolves to built-in defaults (`claude:opus` / `claude:sonnet`), so nothing breaks and no migration is needed.
+Entirely optional: with no `models` key, built-in defaults apply (`opus` / `sonnet` / `haiku`), so no migration is needed.
 
-### 12.3 Resolution order
+**Cross-runtime is the point, and it already works.** Tier and model resolve *separately*: a task says its work is thinking-heavy, and the manifest decides what that means. Because the handoff between agents is **files, not shared context** (§3.7), the orchestrator and its workers need not be the same product — this plan's own dogfood had a Claude Opus session orchestrating `codex exec` workers. What is *not* portable is model names (`opus` exists only in Claude, `gpt-5-codex` only in Codex), which is why a choice is always a runtime+model pair.
 
-Most specific wins:
+### 12.5 Resolution order
 
-1. the agent file's own `model:` — pins a role regardless of tier
-2. `models.byRole[<agent>]`
-3. `models[<tier>]`
-4. the built-in fallback for that tier
+```
+tier:   task's `tier:`  >  agent's `tier:`  >  role default  >  standard
+model:  agent's `model:`  >  byRole[agent]  >  tiers[tier]  >  built-in fallback
+```
 
-`awo task run` prints the resolved pairing and a ready-to-paste invocation (`codex exec -m …`, `claude --model …`, `gemini -m …`), and writes `tier` and `model` into the run's `run.start` event. That last part is the payoff beyond convenience: the log can answer "do worker-tier runs fail more often than orchestrator-tier ones?" — which is the evidence needed before trusting a cheaper model with more.
+`awo task run` prints the resolved tier, where the tier came from, the runtime+model, and a paste-ready invocation (`codex exec -m …`, `claude --model … --permission-mode plan`, `gemini -m …`). It writes `tier`, `tierFrom` and `model` into the run's `run.start` event, so the log can later answer *"do low-tier runs fail more often?"* — the evidence needed before trusting a cheap model with more.
 
-### 12.4 What is deliberately NOT built
+### 12.6 What is deliberately NOT built
 
-`awo task dispatch` — actually spawning the worker, piping its output into `task event`, closing the run on exit. It is the obvious next step and was consciously deferred, because it makes awo an agent runtime that can let a runaway worker loose in linked repos. The declarative layer is a prerequisite for it either way, so nothing is wasted by waiting.
+`awo task dispatch` — actually spawning the worker, piping its output into `task event`, closing the run on exit. Deferred for two reasons: awo would become an agent runtime, and `isolate-task-worktrees` is still honour-system, so a spawned worker would edit the real checkouts. The declarative layer is a prerequisite either way, so nothing is wasted by waiting. See §9 items 30–31.

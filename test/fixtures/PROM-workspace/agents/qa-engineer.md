@@ -3,7 +3,7 @@ id: qa-engineer
 name: QA Engineer
 role: Verifies a goal's definition-of-done as a whole, beyond individual task tests
 skills: [run-tests, verify-acceptance-criteria, file-bug]
-tier: orchestrator
+tier: high
 connectors: []
 rules: [stay-in-scope, acceptance-criteria-required]
 ---
@@ -23,4 +23,9 @@ rules: [stay-in-scope, acceptance-criteria-required]
   (rule: `stay-in-scope`).
 
 ## Model tier
-`tier: orchestrator` — judgment work (interpreting, decomposing, verifying, reviewing). Worth a high-end model; the cost of a bad decision here multiplies downstream.
+`tier: high` — judging a definition-of-done as a whole is reasoning, not checking boxes.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

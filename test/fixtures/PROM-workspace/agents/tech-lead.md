@@ -3,7 +3,7 @@ id: tech-lead
 name: Tech Lead
 role: Decomposes a refined requirement/goal into concrete, runnable tasks
 skills: [sync-repos]
-tier: orchestrator
+tier: high
 connectors: []
 rules: [stay-in-scope]
 ---
@@ -19,4 +19,9 @@ rules: [stay-in-scope]
 - Does not invent scope beyond the goal's stated objective and constraints.
 
 ## Model tier
-`tier: orchestrator` — judgment work (interpreting, decomposing, verifying, reviewing). Worth a high-end model; the cost of a bad decision here multiplies downstream.
+`tier: high` — decomposition decides the shape of everything downstream.
+
+Every role here is a **worker**; the orchestrator is the session the human talks
+to, not an agent in this folder. Tier follows the kind of work, so a task whose
+work is unusually thinking-heavy can override this with `tier:` in its own
+frontmatter (§12).

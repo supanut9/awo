@@ -21,12 +21,18 @@ export type RepoEntry = GitRepoEntry | LocalRepoEntry;
 export interface ModelChoiceEntry {
   runtime?: string;
   model: string;
+  /** e.g. "plan" for Claude Code's plan mode. */
+  mode?: string;
 }
 
-/** §12 — which runtime+model should do which kind of work. Optional. */
+/**
+ * §12 — model policy. `orchestrator` is the intermediary the human talks to and
+ * is not a worker; `tiers` maps a kind of work (high/standard/low) to a
+ * runtime+model; `byRole` pins a specific agent. All optional.
+ */
 export interface ModelPolicyEntry {
   orchestrator?: ModelChoiceEntry;
-  worker?: ModelChoiceEntry;
+  tiers?: Partial<Record<"high" | "standard" | "low", ModelChoiceEntry>>;
   byRole?: Record<string, ModelChoiceEntry>;
 }
 

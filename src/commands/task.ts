@@ -218,7 +218,7 @@ export async function runTaskRun(
     s.tasks[task.id] = ts;
   });
 
-  const model = await resolveModel(workspaceRoot, task.agent);
+  const model = await resolveModel(workspaceRoot, task.agent, task.tier);
 
   await appendEvent(workspaceRoot, runId, "run.start", {
     taskId: task.id,
@@ -226,6 +226,7 @@ export async function runTaskRun(
     agent: task.agent,
     targets: task.targets,
     tier: model.tier,
+    tierFrom: model.tierSource,
     model: `${model.runtime}:${model.model}`,
   });
 

@@ -12,6 +12,12 @@ export interface TaskDefinition {
   agent: string | null;
   /** Frontmatter `status:` is the AUTHORED starting state only (§7.2). */
   authoredStatus: TaskStatus;
+  /**
+   * §12 — optional per-task override. Tier is a property of the WORK, not only
+   * of the role: "define the data model" is thinking-heavy even when the role
+   * that does it normally runs low.
+   */
+  tier: "high" | "standard" | "low" | null;
   file: string;
   body: string;
 }
@@ -80,6 +86,8 @@ export async function readTaskFile(file: string): Promise<TaskDefinition> {
     dependsOn: asArray(fm.dependsOn),
     agent: typeof fm.agent === "string" ? fm.agent : null,
     authoredStatus: authored as TaskStatus,
+    tier:
+      fm.tier === "high" || fm.tier === "standard" || fm.tier === "low" ? fm.tier : null,
     file,
     body: parsed.content.trim(),
   };
