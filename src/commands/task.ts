@@ -229,12 +229,14 @@ export async function runTaskRun(
     : await ensureTaskWorktrees(workspaceRoot, manifest, task.id, task.targets);
 
   const worktrees = worktreesForRun;
-  // A worker sandboxed to the workspace still needs write access to the repo that
-  // owns the worktree's .git, or it can edit but not commit (§9 item 40).
+  // A worker sandboxed to the workspace needs to write the worktree's git
+  // metadata to commit (§9 item 40) — but ONLY that. Granting the repo itself
+  // hands it the real checkout, and it edits that instead of the worktree
+  // (§9 item 42: the fix caused the violation it was meant to prevent).
   const usable = worktrees.filter((w) => !w.error);
   const workerContext = {
     cwd: usable[0] ? usable[0].path : undefined,
-    allow: [...new Set(usable.map((w) => w.gitOwnerPath))],
+    allow: [...new Set(usable.map((w) => w.gitDirPath))],
   };
 
   for (const wt of worktrees.filter((w) => w.created)) {

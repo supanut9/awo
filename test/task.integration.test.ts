@@ -461,7 +461,16 @@ test("task run creates the isolated worktree at the specced path", () => {
   // cannot commit unless it can also write the repo that owns the worktree's
   // .git (§9 item 40).
   assert.match(out.stdout, /hand to: .* -C repos\/\.worktrees\/api\/TEST-T1 --add-dir /);
-  assert.ok(out.stdout.includes(`--add-dir ${repoPath}`), "the git-owning repo must be granted");
+  // ONLY the git metadata dir — granting the repo itself would let the worker
+  // edit the real checkout instead of the worktree (§9 item 42).
+  assert.ok(
+    out.stdout.includes(`--add-dir ${path.join(repoPath, ".git")}`),
+    "the worktree's git dir must be granted"
+  );
+  assert.ok(
+    !new RegExp(`--add-dir ${repoPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`).test(out.stdout),
+    "the repo itself must NOT be granted"
+  );
 
   const wt = path.join(ws, "repos", ".worktrees", "api", "TEST-T1");
   assert.ok(fs.existsSync(wt), "the worktree directory must exist");
