@@ -143,6 +143,28 @@ test("an unmodified scaffolding file is replaced; a customized one is never over
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test("--dry-run writes nothing, even when the only change is the version number", () => {
+  const ws = makeWorkspace();
+  pretendOlder(ws, "0.0.6");
+  const manifestPath = path.join(ws, ".workspace", "manifest.json");
+  const lockPath = path.join(ws, ".workspace", "template.lock");
+  const before = {
+    manifest: fs.readFileSync(manifestPath, "utf8"),
+    lock: fs.readFileSync(lockPath, "utf8"),
+    mtime: fs.statSync(manifestPath).mtimeMs,
+  };
+
+  const out = awo(ws, ["upgrade", "--dry-run"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /\(dry run\)/);
+
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), before.manifest, "manifest must be byte-identical");
+  assert.equal(fs.readFileSync(lockPath, "utf8"), before.lock, "lock must be byte-identical");
+  assert.equal(fs.statSync(manifestPath).mtimeMs, before.mtime, "manifest must not even be rewritten");
+  assert.ok(!fs.existsSync(path.join(ws, ".workspace", "upgrade-backups")));
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 test("a file the user deleted stays deleted", () => {
   const ws = makeWorkspace();
   pretendOlder(ws, "0.0.1");
