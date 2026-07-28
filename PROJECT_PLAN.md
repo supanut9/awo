@@ -925,6 +925,8 @@ Everything here is a design decision made on paper, not something that's been pr
     - **Fix: generate `git.scanRepositories`.** It takes an explicit list of paths rather than scanning, so `add`/`connect`/`remove` now write each repo's **real** location into `.vscode/settings.json` alongside regenerating the `.code-workspace`. Detection then works on a plain single-folder open, with no multi-root and no `CLAUDE.md` pollution. Template keys in that file are preserved through the merge. It does make `settings.json` diverge from the shipped template, so `awo upgrade` treats it as user-edited and leaves it alone (§11.2's third case) — correct, since it is workspace-specific derived state.
     - **Git Graph specifically may still need the multi-root file.** `git.scanRepositories` is a built-in Git extension setting; whether Git Graph honours VS Code's resulting repository list or only scans workspace folders is **not verified here**. If Git Graph still comes up empty, open the generated `<KEY>.code-workspace`, or use its "Add Repository" command.
 
+31. **The orchestrator was defaulted to plan mode, which would have broken it.** Following on from item 30, v0.0.12 set `mode: "plan"` on the orchestrator because "thinking work → plan mode" sounded right. It is incoherent: plan mode is read-only-until-approved, so an orchestrator in plan mode cannot run `task run`, write state, or spawn a worker — the actions that make it an orchestrator. It is equally wrong for a spawned worker: planning workers must *write* (`req new`, `task new`, `goal.md`), and a non-interactive worker in plan mode would emit a plan, wait for an approval that never arrives, and leave its run open — the abandoned-run state `doctor` already flags. Corrected to unset by default. Two lessons: **plan mode is a human-approval mechanism for an interactive session, not a property of a work tier**; and what thinking-heavy work actually wants is *reasoning budget*, which is a different axis and deliberately not modelled yet (§12.7).
+
 30. **"Orchestrator" was modelled as a tier, and that was wrong.** v0.0.11 shipped `tier: orchestrator | worker` and sorted roles into the two, which quietly asserted that the PM *is* a coordinator and that a worker is cheap. Neither holds. The orchestrator is the **intermediary between the human and the work** — the session you talk to, not an entry in `agents/`; and every role is a worker whose tier depends on **what the work is**, so `data-engineer` designing a schema is high-tier while `software-engineer` applying a spec is low-tier. Corrected in v0.0.12 to `high | standard | low` with the orchestrator configured separately, plus a per-task `tier:` override for when the same role does unusually thinking-heavy work. The lesson: **naming a dimension after one of its values collapses two ideas that need to stay separate** — a tier ladder cannot double as an org chart.
 
 29. **`runId` collided when the same task ran twice inside one second.** The ID was `<ISO-timestamp-to-seconds>_<taskId>`, so two runs in the same second shared it: they appended to one events file and wrote two index lines with the same key — breaking the uniqueness §7.3 depends on to link index ↔ detail ↔ `state.json`. Found by a test that ran one task three times in a row; unlikely in real use, where a run takes minutes, but trivially reachable and silently corrupting when reached. Fixed by keeping milliseconds. The lesson: **a timestamp is only an identifier at a precision finer than the fastest thing that can produce two of them.**
@@ -1201,7 +1203,7 @@ A worker's tier is a property of **the kind of work**, not of seniority:
 
 | Tier | Kind of work | Default roles |
 |---|---|---|
-| `high` | Thinking: interpreting an ask, decomposing a goal, designing a data model, judging a definition-of-done, reviewing a change. Often worth **plan mode** as well as a strong model. | `product-manager`, `tech-lead`, `data-engineer`, `qa-engineer`, `code-reviewer`, `audit` |
+| `high` | Thinking: interpreting an ask, decomposing a goal, designing a data model, judging a definition-of-done, reviewing a change. Worth a strong model — and more *thinking budget*, which is a different knob from permission mode (see §12.7). | `product-manager`, `tech-lead`, `data-engineer`, `qa-engineer`, `code-reviewer`, `audit` |
 | `standard` | Mixed — works from an agreed goal but still exercises some judgment. | `marketing-specialist` |
 | `low` | Mechanical: implement a task that is already specified, commit, open a PR. The thinking happened upstream, so a cheap model saves tokens without losing much. | `software-engineer`, `release-engineer` |
 
@@ -1221,9 +1223,9 @@ tier: high          # this particular work is thinking-heavy
 
 ```jsonc
 "models": {
-  "orchestrator": { "runtime": "claude", "model": "opus", "mode": "plan" },
+  "orchestrator": { "runtime": "claude", "model": "opus" },
   "tiers": {
-    "high":     { "runtime": "claude", "model": "opus", "mode": "plan" },
+    "high":     { "runtime": "claude", "model": "opus" },
     "standard": { "runtime": "claude", "model": "sonnet" },
     "low":      { "runtime": "codex",  "model": "gpt-5-codex" }
   },
@@ -1243,6 +1245,15 @@ model:  agent's `model:`  >  byRole[agent]  >  tiers[tier]  >  built-in fallback
 ```
 
 `awo task run` prints the resolved tier, where the tier came from, the runtime+model, and a paste-ready invocation (`codex exec -m …`, `claude --model … --permission-mode plan`, `gemini -m …`). It writes `tier`, `tierFrom` and `model` into the run's `run.start` event, so the log can later answer *"do low-tier runs fail more often?"* — the evidence needed before trusting a cheap model with more.
+
+### 12.7 Plan mode is not a tier setting
+
+`mode` exists as an optional pass-through, but **nothing sets it by default — including the orchestrator.** An earlier draft defaulted the orchestrator to plan mode, which was incoherent:
+
+- Plan mode is read-only-until-approved. An orchestrator in plan mode could not run `task run`, write state, or spawn a worker — precisely the actions that make it an orchestrator.
+- It is no better for a spawned worker: a planning worker must *write* (`awo req new`, `awo task new`, `goal.md`), and a non-interactive worker in plan mode would emit a plan, wait for an approval that never comes, and leave its run open forever — the abandoned-run state `doctor` warns about.
+
+Plan mode is a **human-approval mechanism for an interactive session**, not a property of a work tier. What thinking-heavy work actually wants is *more reasoning budget* — extended thinking, or a runtime's reasoning-effort setting. That is a separate axis from permission mode and is not modelled yet; if it proves worth having, it belongs as `effort:` alongside `model:`, not folded into `mode:`.
 
 ### 12.6 What is deliberately NOT built
 

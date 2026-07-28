@@ -14,9 +14,10 @@ import { readManifest } from "./manifest.js";
  *
  * 2. Every role in `agents/` is a **worker**. Worker does not mean cheap: a
  *    worker's tier follows the *kind of work* it does. Planning, decomposition,
- *    data modelling and review need thinking, so they run high (often in plan
- *    mode). Mechanical code changes run low to save tokens, because the thinking
- *    already happened upstream.
+ *    data modelling and review need thinking, so they run high. Mechanical code
+ *    changes run low to save tokens, because the thinking already happened
+ *    upstream. (Thinking budget is a separate axis from permission mode — see
+ *    the note on `mode` below, and §12.7.)
  *
  * awo resolves and records which runtime+model should do a piece of work; it does
  * not spawn anything (§9 item 2, §12.4).
@@ -27,7 +28,17 @@ export type Tier = (typeof TIERS)[number];
 export interface ModelChoice {
   runtime: string;
   model: string;
-  /** e.g. Claude Code's plan mode — useful for thinking-heavy work. */
+  /**
+   * Optional permission/interaction mode passed through to the runtime.
+   *
+   * Deliberately UNSET by default, including for the orchestrator. Plan mode is
+   * read-only-until-approved: an orchestrator in plan mode could not run
+   * `task run`, write state, or spawn a worker — the actions that are its whole
+   * job — and a *spawned* worker in plan mode would produce a plan, wait for an
+   * approval that never arrives, and never close its run. Plan mode is a
+   * human-approval tool for an interactive session, not a tier setting. Left
+   * available for anyone who genuinely wants it on a specific role.
+   */
   mode?: string;
 }
 
@@ -54,7 +65,6 @@ const FALLBACK: Record<Tier, ModelChoice> = {
 export const DEFAULT_ORCHESTRATOR: ModelChoice = {
   runtime: "claude",
   model: "opus",
-  mode: "plan",
 };
 
 /**
