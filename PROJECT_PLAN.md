@@ -935,6 +935,8 @@ Everything here is a design decision made on paper, not something that's been pr
 
 37. **The worktree fix advertised isolation that had failed — found minutes after shipping it.** git allows a branch to be checked out in exactly one worktree. For a resumed task whose branch was already held by an earlier (stray) worktree, `worktree add` failed, the error was swallowed, and `task run` still printed `work in: repos/.worktrees/…` — a directory that did not exist. A worker told to work there would have either failed or, worse, fallen back to the shared checkout. Fixed by looking up which worktree currently holds the branch and **reusing that path** (which is also where the prior work lives, so a resumed task recovers it), and by printing `WARNING: no isolation for <repo>` when creation genuinely fails. Lesson: **a guard that reports success on failure is worse than no guard** — the previous honour-system version at least did not lie. Also: `catch {}` that swallows an error is how a safety feature becomes a decoration.
 
+39. **The effort mapping was a guess, and the log could not even measure it.** `high`→high effort and `low`→low effort was written from plausible reasoning — judgment needs thinking, mechanical work does not — with no evidence, and the plausible-sounding claim "low effort saves tokens" can invert once retries are counted. Worse, `run.start` recorded tier and model but **not** effort, and the index recorded neither, so the hypothesis was unfalsifiable in its own logs. Fixed by recording `tier`, `model`, `effort` and `attempts` in the run index and adding `--tier` / `--effort` filters. Lesson: **when a design decision is a guess, the first job is not to defend it but to make it measurable** — and a knob whose effect is never recorded will be carried forever on the strength of the sentence that introduced it.
+
 38. **`gpt-5-codex` is not available on a ChatGPT-account Codex, which made model-based tiering impossible.** The whole tier ladder assumed several models to choose between; this account has one (`gpt-5.4-mini`). The way out was already in the user's own `~/.codex/config.toml`: `model_reasoning_effort`. Tiering by **reasoning budget on a single model** — `effort: high|medium|low` — is now supported and emitted as `-c model_reasoning_effort=<effort>`, which is exactly the axis §12.7 had described as "not modelled yet". Lesson: **tiering is not inherently about model identity**; when the model set is fixed, effort is the knob, and a policy that can only express "which model" cannot serve a single-model account.
 
 36. **`prepublishOnly` did not run the tests, and a shell `&&` chain hid a failure.** v0.0.14 was published while one test was failing: the publish command was `npm test … && npm publish`, and the chain gated on `grep` finding output rather than on the suite passing, so a red run still shipped. Two clean re-runs afterwards showed 52/52 and the failure did not reproduce — most likely disk pressure, since the machine was at 85% and a jest run had already hit a transient `ENOSPC`. Fixed by making `prepublishOnly` run `npm test`, so npm itself refuses to publish a red tree regardless of how the command was typed. Lesson: **a release gate belongs in the tool that releases, not in the sentence you happen to type** — and a flaky failure is still a failure until it is explained.
@@ -1261,6 +1263,18 @@ model:  agent's `model:`  >  byRole[agent]  >  tiers[tier]  >  built-in fallback
 ```
 
 `awo task run` prints the resolved tier, where the tier came from, the runtime+model, and a paste-ready invocation (`codex exec -m …`, `claude --model … --permission-mode plan`, `gemini -m …`). It writes `tier`, `tierFrom` and `model` into the run's `run.start` event, so the log can later answer *"do low-tier runs fail more often?"* — the evidence needed before trusting a cheap model with more.
+
+### 12.9 How do we know which effort is right? We don't yet — so the log measures it
+
+The tier→effort mapping shipped here (`high`→high, `low`→low) is **a hypothesis, not a finding**. The reasoning is that judgment work benefits from more thinking while mechanical work executes a spec that already contains it. That may be wrong in an expensive direction: low effort on a code-writing task can produce work that needs two or three retries, costing more tokens than one high-effort run would have.
+
+So the index records what actually ran — `tier`, `model`, `effort`, and `attempts` — and `awo log list --tier low --status failed` / `--effort high` can slice it. That makes the question answerable with the workspace's own history:
+
+- do low-effort runs fail more often than high-effort ones?
+- do they need more `attempts` to reach `done`?
+- is `durationSec × attempts` actually lower at low effort?
+
+Until enough runs exist to answer that, **the policy is a default to be measured, not a recommendation**. Anyone is free to set every tier to the same effort and let the log tell them whether the distinction earns its keep. This is the payoff of §7.3 being an append-only index rather than a pile of prose: a design guess becomes a query.
 
 ### 12.8 Quota fallback
 

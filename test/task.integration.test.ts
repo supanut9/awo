@@ -600,3 +600,53 @@ test("task run reuses the worktree already holding the branch, and never fakes i
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(repoPath, { recursive: true, force: true });
 });
+
+test("the index records tier, model, effort and attempts, and log list can filter by them", () => {
+  const ws = makeWorkspace();
+  const manifestPath = path.join(ws, ".workspace", "manifest.json");
+  const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  m.models = {
+    tiers: {
+      low: { runtime: "codex", model: "gpt-5.4-mini", effort: "low" },
+      high: { runtime: "codex", model: "gpt-5.4-mini", effort: "high" },
+    },
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+
+  // A low-tier run that fails, is retried, and then succeeds — the shape the
+  // "is low effort actually cheaper?" question needs in order to be answerable.
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "failed"]);
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+
+  const lines = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.length, 2);
+  for (const l of lines) {
+    assert.equal(l.tier, "low");
+    assert.equal(l.effort, "low");
+    assert.equal(l.model, "codex:gpt-5.4-mini");
+  }
+  assert.equal(lines[0].attempts, 1);
+  assert.equal(lines[1].attempts, 2, "the retry is visible, which is what makes cost comparable");
+
+  // A high-tier task records its own effort, so the two are comparable.
+  const goalDir = path.join(ws, "goals", "TEST-G1-demo");
+  fs.writeFileSync(
+    path.join(goalDir, "tasks", "TEST-T7-think.md"),
+    `---\nid: TEST-T7\ngoalId: TEST-G1\nname: Think hard\ntargets: [api]\nagent: software-engineer\ntier: high\nstatus: todo\n---\n\nx\n`
+  );
+  awo(ws, ["task", "run", "TEST-T7", "--no-worktree"]);
+  awo(ws, ["task", "complete", "TEST-T7", "--outcome", "success"]);
+
+  const listed = awo(ws, ["log", "list"]);
+  assert.match(listed.stdout, /low effort=low/);
+  assert.match(listed.stdout, /high effort=high/);
+  assert.match(listed.stdout, /try#2/);
+
+  assert.equal(awo(ws, ["log", "list", "--effort", "high"]).stdout.trim().split("\n").length, 1);
+  assert.equal(awo(ws, ["log", "list", "--tier", "low"]).stdout.trim().split("\n").length, 2);
+  assert.match(awo(ws, ["log", "list", "--tier", "low", "--status", "failed"]).stdout, /failed/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});

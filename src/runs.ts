@@ -85,6 +85,16 @@ export interface RunIndexEntry {
   runId: string;
   taskId: string | null;
   agent: string | null;
+  /**
+   * §12 — what actually ran, so the log can answer "do low-effort runs fail or
+   * retry more often?". Without these the tier/effort mapping stays a guess:
+   * the policy is a hypothesis and the index is the only place the evidence can
+   * accumulate.
+   */
+  tier?: string;
+  model?: string;
+  effort?: string;
+  attempts?: number;
   status: "running" | RunOutcome;
   startedAt: string;
   finishedAt: string | null;

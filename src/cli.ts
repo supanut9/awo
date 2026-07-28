@@ -483,7 +483,9 @@ log
   .option("--agent <agent>", "only runs by this agent")
   .option("--repo <repo>", "only runs that touched this repo")
   .option("--status <status>", "only runs with this outcome")
-  .action(async (opts: { task?: string; agent?: string; repo?: string; status?: string }) => {
+  .option("--tier <tier>", "only runs resolved to this tier (high|standard|low)")
+  .option("--effort <effort>", "only runs at this reasoning effort")
+  .action(async (opts: { task?: string; agent?: string; repo?: string; status?: string; tier?: string; effort?: string }) => {
     try {
       const runs = await runLogList(opts);
       if (runs.length === 0) {
@@ -492,7 +494,12 @@ log
       }
       for (const r of runs) {
         const dur = r.durationSec === null ? "—" : `${r.durationSec}s`;
-        console.log(`${r.runId}\t${r.status}\t${dur}\t${r.reposChanged.join(",") || "no repos"}`);
+        const how = [r.tier, r.effort ? `effort=${r.effort}` : null, r.attempts && r.attempts > 1 ? `try#${r.attempts}` : null]
+          .filter(Boolean)
+          .join(" ");
+        console.log(
+          `${r.runId}\t${r.status}\t${dur}\t${how || "—"}\t${r.reposChanged.join(",") || "no repos"}`
+        );
       }
     } catch (err) {
       console.error((err as Error).message);

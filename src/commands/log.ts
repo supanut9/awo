@@ -19,6 +19,8 @@ export interface LogListFilter {
   agent?: string;
   repo?: string;
   status?: string;
+  tier?: string;
+  effort?: string;
 }
 
 export async function runLogList(filter: LogListFilter = {}): Promise<RunIndexEntry[]> {
@@ -29,6 +31,8 @@ export async function runLogList(filter: LogListFilter = {}): Promise<RunIndexEn
   if (filter.agent) runs = runs.filter((r) => r.agent === filter.agent);
   if (filter.repo) runs = runs.filter((r) => r.reposChanged.includes(filter.repo!));
   if (filter.status) runs = runs.filter((r) => r.status === filter.status);
+  if (filter.tier) runs = runs.filter((r) => r.tier === filter.tier);
+  if (filter.effort) runs = runs.filter((r) => r.effort === filter.effort);
 
   // runIds are timestamp-prefixed, so lexical sort is chronological (§7.3).
   return runs.sort((a, b) => b.runId.localeCompare(a.runId));

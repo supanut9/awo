@@ -243,6 +243,7 @@ export async function runTaskRun(
     tier: model.tier,
     tierFrom: model.tierSource,
     model: `${model.runtime}:${model.model}`,
+    ...(model.effort ? { effort: model.effort } : {}),
   });
 
   return {
@@ -374,10 +375,17 @@ export async function runTaskComplete(
     }
   );
 
+  // Carry what was resolved at run.start into the index, so a query can group
+  // outcomes by tier/model/effort without re-reading every event stream.
+  const start = events.find((e) => e.kind === "run.start");
   await appendIndex(workspaceRoot, {
     runId,
     taskId: task.id,
     agent: task.agent,
+    ...(typeof start?.tier === "string" ? { tier: start.tier } : {}),
+    ...(typeof start?.model === "string" ? { model: start.model } : {}),
+    ...(typeof start?.effort === "string" ? { effort: start.effort } : {}),
+    attempts: ts.attempts,
     status: outcome,
     startedAt: ts.startedAt ?? finishedAt,
     finishedAt,
