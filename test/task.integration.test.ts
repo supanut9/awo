@@ -538,3 +538,31 @@ test("agent add installs from the catalog and refuses unknown or duplicate names
   assert.match(awo(ws, ["skill", "list"]).stdout, /available: .*write-migration/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+test("a tier can declare a fallback for when the primary is out of quota", () => {
+  const ws = makeWorkspace();
+  const manifestPath = path.join(ws, ".workspace", "manifest.json");
+  const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  m.models = {
+    orchestrator: { runtime: "claude", model: "opus", fallback: { runtime: "codex", model: "gpt-5-codex" } },
+    tiers: {
+      low: { runtime: "claude", model: "haiku", fallback: { runtime: "codex", model: "gpt-5.4-mini" } },
+    },
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+
+  const out = awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /hand to: claude --model haiku/);
+  assert.match(out.stdout, /if quota: codex exec -m gpt-5\.4-mini/);
+
+  // A tier with no fallback simply doesn't offer one.
+  const m2 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  m2.models = { tiers: { low: { runtime: "claude", model: "haiku" } } };
+  fs.writeFileSync(manifestPath, JSON.stringify(m2, null, 2));
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "failed"]);
+  awo(ws, ["task", "status", "TEST-T1", "todo"]);
+  const noFb = awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  assert.ok(!/if quota:/.test(noFb.stdout), "no fallback declared means none suggested");
+  fs.rmSync(ws, { recursive: true, force: true });
+});

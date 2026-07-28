@@ -29,6 +29,13 @@ export interface ModelChoice {
   runtime: string;
   model: string;
   /**
+   * Where to go when the primary is unavailable — quota exhausted, rate limited,
+   * or the CLI not installed. Declared rather than guessed, because the right
+   * substitute is a judgment call: a cheaper model on the same runtime may be
+   * worse than the same class of model on another.
+   */
+  fallback?: { runtime: string; model: string };
+  /**
    * Optional permission/interaction mode passed through to the runtime.
    *
    * Deliberately UNSET by default, including for the orchestrator. Plan mode is
@@ -102,10 +109,21 @@ function parseChoice(value: unknown): ModelChoice | null {
   if (value && typeof value === "object") {
     const v = value as { runtime?: unknown; model?: unknown; mode?: unknown };
     if (typeof v.model === "string") {
+      const fb = (v as { fallback?: unknown }).fallback;
+      const parsedFb =
+        fb && typeof fb === "object" && typeof (fb as { model?: unknown }).model === "string"
+          ? {
+              runtime: String((fb as { runtime?: unknown }).runtime ?? ""),
+              model: String((fb as { model?: unknown }).model),
+            }
+          : typeof fb === "string" && fb.includes(":")
+            ? { runtime: fb.split(":")[0], model: fb.split(":")[1] }
+            : undefined;
       return {
         runtime: typeof v.runtime === "string" ? v.runtime : "",
         model: v.model,
         ...(typeof v.mode === "string" ? { mode: v.mode } : {}),
+        ...(parsedFb ? { fallback: parsedFb } : {}),
       };
     }
   }
@@ -171,6 +189,7 @@ export async function resolveModel(
     ...c,
     runtime: c.runtime || tierChoice.runtime || FALLBACK[tier].runtime,
     mode: c.mode ?? tierChoice.mode,
+    fallback: c.fallback ?? tierChoice.fallback,
   });
 
   if (agent?.model) return { ...fill(agent.model), tier, tierSource, source: "agent-model" };
@@ -188,6 +207,22 @@ export async function resolveModel(
 
 /** The command the orchestrator would run to hand this task to a worker. */
 export function invocationHint(choice: ModelChoice, taskId: string): string {
+  return invocationFor(choice.runtime, choice.model, choice.mode, taskId);
+}
+
+/** The same command for the declared fallback, if any. */
+export function fallbackHint(choice: ModelChoice, taskId: string): string | null {
+  if (!choice.fallback) return null;
+  return invocationFor(choice.fallback.runtime, choice.fallback.model, undefined, taskId);
+}
+
+function invocationFor(
+  runtime: string,
+  model: string,
+  mode: string | undefined,
+  taskId: string
+): string {
+  const choice = { runtime, model, mode } as ModelChoice;
   const prompt = `Follow instructions/ship-a-change.md for ${taskId}.`;
   switch (choice.runtime) {
     case "codex":

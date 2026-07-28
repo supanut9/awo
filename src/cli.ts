@@ -404,6 +404,7 @@ task
       }
       if (r.worktrees.length === 0) console.log(`work in: shared checkout — NO worktree isolation`);
       console.log(`hand to: ${r.invocation}`);
+      if (r.fallbackInvocation) console.log(`if quota: ${r.fallbackInvocation}`);
       if (r.body) console.log(`\n${r.body}`);
       console.log(
         `\nRecord progress with \`awo task event ${r.taskId} <kind> --label "…"\`, then close with \`awo task complete ${r.taskId} --outcome success\`.`

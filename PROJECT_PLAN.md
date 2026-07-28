@@ -933,6 +933,8 @@ Everything here is a design decision made on paper, not something that's been pr
 
 34. **Worktree isolation was honour-system, and an agent invented its own path.** `isolate-task-worktrees` is a rule and a skill, but nothing created the worktree, so a worker placed it at `<workspace>/.worktrees/…` instead of §4's `repos/.worktrees/…` — outside the gitignored path, so its contents could have been committed into the workspace. Isolation itself held (the shared checkout was untouched), but by luck of instruction rather than construction. `task run` now creates the worktrees, announces them in the event stream, and prints where to work; `--no-worktree` opts out loudly. Lesson: **for anything a rule requires, ask what creates it** — an unenforced convention is a coin flip that happens to have landed well.
 
+36. **`prepublishOnly` did not run the tests, and a shell `&&` chain hid a failure.** v0.0.14 was published while one test was failing: the publish command was `npm test … && npm publish`, and the chain gated on `grep` finding output rather than on the suite passing, so a red run still shipped. Two clean re-runs afterwards showed 52/52 and the failure did not reproduce — most likely disk pressure, since the machine was at 85% and a jest run had already hit a transient `ENOSPC`. Fixed by making `prepublishOnly` run `npm test`, so npm itself refuses to publish a red tree regardless of how the command was typed. Lesson: **a release gate belongs in the tool that releases, not in the sentence you happen to type** — and a flaky failure is still a failure until it is explained.
+
 35. **A one-shot orchestrator cannot wait for its workers.** The orchestrator ended its turn with "I'll continue automatically when T2's worker reports back" — but `claude -p` exits when the turn ends, killing the child process. `SHOP-T2` was left `running` with an open run and ~8 files of uncommitted work stranded in its worktree; `doctor` correctly flagged the abandoned run. Nothing in awo can fix this — it is a property of how the orchestrator is invoked — so it belongs in the orchestrator's brief: **block synchronously on each worker; never defer to a future turn that will not exist.**
 
 31. **The orchestrator was defaulted to plan mode, which would have broken it.** Following on from item 30, v0.0.12 set `mode: "plan"` on the orchestrator because "thinking work → plan mode" sounded right. It is incoherent: plan mode is read-only-until-approved, so an orchestrator in plan mode cannot run `task run`, write state, or spawn a worker — the actions that make it an orchestrator. It is equally wrong for a spawned worker: planning workers must *write* (`req new`, `task new`, `goal.md`), and a non-interactive worker in plan mode would emit a plan, wait for an approval that never arrives, and leave its run open — the abandoned-run state `doctor` already flags. Corrected to unset by default. Two lessons: **plan mode is a human-approval mechanism for an interactive session, not a property of a work tier**; and what thinking-heavy work actually wants is *reasoning budget*, which is a different axis and deliberately not modelled yet (§12.7).
@@ -1255,6 +1257,32 @@ model:  agent's `model:`  >  byRole[agent]  >  tiers[tier]  >  built-in fallback
 ```
 
 `awo task run` prints the resolved tier, where the tier came from, the runtime+model, and a paste-ready invocation (`codex exec -m …`, `claude --model … --permission-mode plan`, `gemini -m …`). It writes `tier`, `tierFrom` and `model` into the run's `run.start` event, so the log can later answer *"do low-tier runs fail more often?"* — the evidence needed before trusting a cheap model with more.
+
+### 12.8 Quota fallback
+
+A run can die because the primary model is *unavailable*, not because the work was
+wrong: a plan hit its limit, a rate limit bit, or the CLI is not installed. Any
+choice may therefore declare where to go instead:
+
+```jsonc
+"tiers": {
+  "high": {
+    "runtime": "claude", "model": "opus",
+    "fallback": { "runtime": "codex", "model": "gpt-5-codex" }
+  }
+}
+```
+
+`awo task run` prints both — the primary as `hand to:` and the substitute as
+`if quota:` — and `models.orchestrator` may declare one too, so a session that
+runs dry knows what to become.
+
+**Declared, not guessed.** awo does not detect exhaustion (it never spawns the
+model — §12.6) and it deliberately does not invent a substitute: "the same class of
+model on another runtime" and "a cheaper model on the same runtime" are very
+different trades, and only the person paying can say which is acceptable. When
+dispatch is eventually built, this is the field it consults on a quota error; until
+then it is instruction for whoever is orchestrating.
 
 ### 12.7 Plan mode is not a tier setting
 

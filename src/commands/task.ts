@@ -14,7 +14,7 @@ import {
   type RunOutcome,
   type TaskStatus,
 } from "../state.js";
-import { invocationHint, resolveModel, type ResolvedModel } from "../models.js";
+import { fallbackHint, invocationHint, resolveModel, type ResolvedModel } from "../models.js";
 import { ensureTaskWorktrees, type Worktree } from "../worktrees.js";
 import {
   appendEvent,
@@ -133,6 +133,8 @@ export interface TaskRunResult {
   /** §12 — who should do this work, and how to hand it to them. */
   model: ResolvedModel;
   invocation: string;
+  /** Where to go if the primary is out of quota (§12.8). */
+  fallbackInvocation: string | null;
   /** §7.1 — isolation, created rather than merely required. */
   worktrees: Worktree[];
 }
@@ -247,6 +249,7 @@ export async function runTaskRun(
     model,
     worktrees,
     invocation: invocationHint(model, task.id),
+    fallbackInvocation: fallbackHint(model, task.id),
     taskId: task.id,
     runId,
     eventsFile: path.relative(workspaceRoot, eventsFilePath(workspaceRoot, runId)),
