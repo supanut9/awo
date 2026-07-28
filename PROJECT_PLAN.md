@@ -937,6 +937,8 @@ Everything here is a design decision made on paper, not something that's been pr
 
 40. **Worktree isolation and sandboxed workers are incompatible unless the invocation says otherwise — the worker could edit but not commit.** A worktree's `.git` is not a directory but a pointer: `gitdir: <repo>/.git/worktrees/<name>`, which lives **outside** the workspace. A worker launched with `codex exec -s workspace-write` could therefore write source files and run the whole suite (67 suites / 1664 tests green) and then fail to create the commit, because git had to write that external gitdir. The work survived only as 9 uncommitted files. Fixed by making the printed invocation *actually runnable*: `task run` now emits `-C <worktree> --add-dir <repo-holding-.git>`. Two lessons: **isolation that the sandbox does not know about is not isolation, it is a trap**; and if a tool prints a command, the command must work as printed — a "hint" that fails is worse than no hint, because it looks authoritative.
 
+43. **Validation ran after the side effect, so a config typo left an abandoned run.** An unsupported effort in the models policy threw from `resolveModel` — which was called *after* `task run` had already moved the task to `running` and written `state.json`. A pure config mistake therefore produced an open run that `doctor` then reported as abandoned, and the task could not be re-run until someone closed it. Model resolution now happens before any state is touched, matching how `targets` validation already worked. Lesson: **order every check before the first side effect**, not merely somewhere in the function — and the tell was that a test could not perform its *second* assertion because the first failure had corrupted the state it needed. Related: reading tier entries straight from JSON skipped the parser entirely, so the effort was never validated at all; validation you can bypass by reading a field directly is not validation.
+
 42. **The fix for item 40 caused the exact violation the rails existed to prevent.** Granting the worker `--add-dir <repo>` so it could commit handed it the whole real checkout. The next worker promptly edited `develop` directly — 5 files in a repo that had been clean — instead of the worktree it was pointed at. The rails had held all session under honour-system instructions, and were broken by a *safety feature*. Corrected to grant only `<repo>/.git`: enough to write refs and commit, not enough to touch source. Lessons, in order of importance: **a permission granted for one purpose will be used for every purpose it permits** — scope it to the narrowest path that satisfies the need; and **a fix to a safety mechanism deserves the same adversarial check as the original**, because it arrives wearing the credibility of a fix. Recovery: the agent's changes were saved as a patch before `git checkout --` restored the five files, so nothing was lost and the repo returned byte-identical to its pre-test state.
 
 41. **Codex cannot spawn Codex, so orchestrator and worker must differ in runtime.** With `codex exec` as the orchestrator, every attempt to launch a `codex exec` worker failed to initialise its app-server client, and the orchestrator — to its credit — reported the deviation and did the work itself rather than pretending. The earlier Claude-orchestrator run had no such problem delegating to Codex. So a same-runtime chain is not currently viable on this setup, which is a constraint on multi-agent topology rather than on awo: **pick an orchestrator runtime different from the workers', or expect the orchestrator to silently become the worker.** Worth noting the failure mode is exactly the one §12 exists to prevent: the expensive coordinator quietly doing cheap work.
@@ -1270,6 +1272,35 @@ model:  agent's `model:`  >  byRole[agent]  >  tiers[tier]  >  built-in fallback
 
 `awo task run` prints the resolved tier, where the tier came from, the runtime+model, and a paste-ready invocation (`codex exec -m …`, `claude --model … --permission-mode plan`, `gemini -m …`). It writes `tier`, `tierFrom` and `model` into the run's `run.start` event, so the log can later answer *"do low-tier runs fail more often?"* — the evidence needed before trusting a cheap model with more.
 
+### 12.10 Choosing effort — the rule agents follow
+
+Effort is **how long the model should think**, not a different level of intelligence.
+Lower effort answers faster on fewer reasoning tokens; higher effort improves
+completeness and accuracy on hard problems at the cost of latency and tokens.
+
+**Only `low`, `medium`, `high` are selectable.** Runtimes expose more (xhigh, max),
+and they are deliberately not offered: they are quality-first settings whose benefit
+has to be *measured* before it justifies the cost, and merely listing them invites
+reaching for them by default. `medium` is the balanced default; tiers supply
+`high`/`medium`/`low` respectively when a policy names only a model.
+
+| Effort | Use for |
+|---|---|
+| `low` | Transforming information you already have — commit messages, JSON→types, explaining a small function, repetitive CRUD from a clear pattern |
+| `medium` | Normal professional work — design an endpoint, implement a service, review a PR, compare two reasonable architectures |
+| `high` | Interacting constraints or hidden failure cases — auth and token rotation, concurrency and caching bugs, migration planning, decisions expensive to reverse |
+
+The decision test, shipped as the `pick-reasoning-effort` rule:
+
+1. Would a wrong answer be easy to spot? → `low`/`medium` suffices.
+2. Are there many interacting constraints? → move toward `high`.
+3. Could an error cause security, financial, production or migration damage? → `high`.
+
+**Length is not difficulty.** A long but verbose prompt stays `medium`; a short
+question about token revocation is `high`. And an invalid effort is now a hard error
+raised *before* the run opens, so a config mistake cannot leave an abandoned run
+behind (§9 item 43).
+
 ### 12.9 How do we know which effort is right? We don't yet — so the log measures it
 
 The tier→effort mapping shipped here (`high`→high, `low`→low) is **a hypothesis, not a finding**. The reasoning is that judgment work benefits from more thinking while mechanical work executes a spec that already contains it. That may be wrong in an expensive direction: low effort on a code-writing task can produce work that needs two or three retries, costing more tokens than one high-effort run would have.
@@ -1329,3 +1360,39 @@ This turned out to be necessary rather than ornamental: a ChatGPT-account Codex 
 ### 12.6 What is deliberately NOT built
 
 `awo task dispatch` — actually spawning the worker, piping its output into `task event`, closing the run on exit. Deferred for two reasons: awo would become an agent runtime, and `isolate-task-worktrees` is still honour-system, so a spawned worker would edit the real checkouts. The declarative layer is a prerequisite either way, so nothing is wasted by waiting. See §9 items 30–31.
+
+---
+
+## 13. Session orientation — `awo context`
+
+**The problem:** a fresh session knows nothing. Left to itself it globs the tree,
+reads AGENTS.md, several instructions, every goal folder, `state.json` and some of
+`logs/` — spending tokens to reconstruct facts the workspace already knows, and
+often getting them subtly wrong (a requirement still in intake is invisible on the
+board; a task can be `running` with an abandoned run).
+
+**`awo context`** prints that orientation in ~20 lines: project and version skew,
+the orchestrator's model, linked repos and any that are missing, each goal with its
+progress, tasks by status with blocked/running ones explained, requirements still in
+intake, the last three runs with tier/effort/attempts, the success rate, and — the
+most useful line — **what to do next**. `--json` gives the same data to a machine.
+
+`AGENTS.md` now tells agents to run it first and *not* to scan.
+
+### 13.1 Derived, never stored
+
+A `CONTEXT.md` or `MEMORY.md` that agents maintain was the obvious alternative and
+is the wrong shape here. It would be a second source of truth for state that already
+lives in the manifest, `state.json` and the run index — and it would rot exactly
+like a stale comment, with nothing to reveal that it had. §3.1's rule (derived
+artifacts, one source of truth) applies to summaries as much as to `repos/`.
+
+The token saving is real but comes from **not scanning**, not from caching: one
+command reads the handful of files that matter. A cache would save less and cost
+correctness.
+
+What genuinely *is* durable memory already exists and is already append-only: the
+run log (§7.3). "What did we try, what happened, what was deferred" is answered by
+`awo log list` / `awo log show`, not by a summary someone has to remember to update.
+The one thing neither covers is *why* a decision was made — that belongs in the
+requirement's Clarifications or the goal's Scope, next to the work it constrains.

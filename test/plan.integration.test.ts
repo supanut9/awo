@@ -256,3 +256,81 @@ test("sync reports a local repo whose source has disappeared, and exits non-zero
   assert.match(awo(dir, ["doctor"]).stdout, /source path no longer exists/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("context orients a new session and says what to do next", () => {
+  const ws = makeWorkspace();
+
+  // Empty workspace: the next step is intake, not a scan.
+  let out = awo(ws, ["context"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /^PL · PL · awo /m);
+  assert.match(out.stdout, /repos {9}1 linked, 1 present/);
+  assert.match(out.stdout, /goals {9}none yet/);
+  assert.match(out.stdout, /NEXT.*awo req new/);
+
+  // A requirement in intake is surfaced — it is invisible on the board otherwise.
+  awo(ws, ["req", "new", "--title", "Thing"]);
+  out = awo(ws, ["context"]);
+  assert.match(out.stdout, /in intake {5}PL-R1 \(not yet a goal\)/);
+  assert.match(out.stdout, /NEXT.*awo goal new --from PL-R1/);
+
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Work", "--targets", "api"]);
+  out = awo(ws, ["context"]);
+  assert.match(out.stdout, /goal {10}PL-G1 planning — 0\/1 done/);
+  assert.match(out.stdout, /NEXT.*awo task run PL-T1/);
+
+  // An open run is the most urgent thing, and a blocked task explains itself.
+  awo(ws, ["task", "run", "PL-T1", "--no-worktree"]);
+  assert.match(awo(ws, ["context"]).stdout, /NEXT.*PL-T1 is running/);
+
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "failed", "--summary", "tests red"]);
+  out = awo(ws, ["context"]);
+  assert.match(out.stdout, /PL-T1 blocked — tests red/);
+  assert.match(out.stdout, /NEXT.*unblock PL-T1/);
+  assert.match(out.stdout, /history {7}1 runs · 0% success/);
+
+  // --json is the same data for a machine.
+  const j = JSON.parse(awo(ws, ["context", "--json"]).stdout);
+  assert.equal(j.snapshot.project.projectKey, "PL");
+  assert.match(j.next, /unblock PL-T1/);
+  assert.equal(j.recent.length, 1);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("only low, medium and high effort are selectable", () => {
+  const ws = makeWorkspace();
+  const manifestPath = path.join(ws, ".workspace", "manifest.json");
+  const set = (effort: string): void => {
+    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    m.models = { tiers: { low: { runtime: "codex", model: "gpt-5.4-mini", effort } } };
+    fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+  };
+  awo(ws, ["req", "new", "--title", "T"]);
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "W", "--targets", "api", "--agent", "software-engineer"]);
+
+  set("high");
+  assert.equal(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).code, 0);
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "failed"]);
+  awo(ws, ["task", "status", "PL-T1", "todo"]);
+
+  // xhigh/max exist on some runtimes but are not offered: their gain must be
+  // measured, and offering them invites reaching for them by default.
+  set("xhigh");
+  const bad = awo(ws, ["task", "run", "PL-T1", "--no-worktree"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /Invalid effort "xhigh"/);
+  assert.match(bad.stderr, /Only low, medium, high are selectable/);
+
+  // A config error must not have opened a run — the task is still runnable.
+  assert.match(awo(ws, ["task", "show", "PL-T1"]).stdout, /status: {3}todo/);
+
+  // With no effort declared, the tier supplies one rather than leaving it to the
+  // runtime default.
+  const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  m.models = { tiers: { low: { runtime: "codex", model: "gpt-5.4-mini" } } };
+  fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=low/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});

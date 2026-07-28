@@ -417,7 +417,7 @@ test("tier follows the work: agent default, manifest policy, and per-task overri
   out = awo(ws, ["task", "run", "TEST-T6"]);
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /software-engineer — high tier \(from task\)/, "the task's tier must win");
-  assert.match(out.stdout, /model:\s+claude:opus \(plan mode\)/);
+  assert.match(out.stdout, /model:\s+claude:opus effort=high \(plan mode\)/);
   assert.match(out.stdout, /hand to: claude --model opus --permission-mode plan/);
 
   // byRole pins a role regardless of tier mapping.

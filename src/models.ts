@@ -25,6 +25,23 @@ import { readManifest } from "./manifest.js";
 export const TIERS = ["high", "standard", "low"] as const;
 export type Tier = (typeof TIERS)[number];
 
+/**
+ * §12.10 — reasoning effort is "how long the model should think", not a different
+ * intelligence level. Restricted to three on purpose: xhigh/max exist on some
+ * runtimes but are quality-first settings whose gain has to be *measured* before
+ * it is worth the latency and cost, and offering them invites reaching for them
+ * by default. `medium` is the balanced starting point.
+ */
+export const EFFORTS = ["low", "medium", "high"] as const;
+export type Effort = (typeof EFFORTS)[number];
+
+/** Effort that matches each tier's kind of work — see §12.10's decision test. */
+const EFFORT_BY_TIER: Record<Tier, Effort> = {
+  high: "high",
+  standard: "medium",
+  low: "low",
+};
+
 export interface ModelChoice {
   runtime: string;
   model: string;
@@ -130,12 +147,23 @@ function parseChoice(value: unknown): ModelChoice | null {
         runtime: typeof v.runtime === "string" ? v.runtime : "",
         model: v.model,
         ...(typeof v.mode === "string" ? { mode: v.mode } : {}),
-        ...(typeof v.effort === "string" ? { effort: v.effort } : {}),
+        ...(v.effort !== undefined ? { effort: parseEffort(v.effort, "the models policy") ?? undefined } : {}),
         ...(parsedFb ? { fallback: parsedFb } : {}),
       };
     }
   }
   return null;
+}
+
+function parseEffort(value: unknown, where: string): Effort | null {
+  if (typeof value !== "string") return null;
+  if (!EFFORTS.includes(value as Effort)) {
+    throw new Error(
+      `Invalid effort "${value}" in ${where}. Only ${EFFORTS.join(", ")} are selectable — ` +
+        `higher settings are quality-first and should be proven to help before being used.`
+    );
+  }
+  return value as Effort;
 }
 
 function parseTier(value: unknown): Tier | null {
@@ -192,7 +220,13 @@ export async function resolveModel(
     tierSource = "default";
   }
 
-  const tierChoice = policy.tiers?.[tier] ?? FALLBACK[tier];
+  // Parse the tier entry rather than trusting it: reading it straight from JSON
+  // skipped effort validation, so an unsupported effort was silently accepted.
+  // Effort also defaults from the tier, so a policy naming only a model still gets
+  // a sensible thinking budget instead of the runtime's default.
+  const declaredTier = policy.tiers?.[tier] ? parseChoice(policy.tiers[tier]) : null;
+  const base = declaredTier ?? FALLBACK[tier];
+  const tierChoice: ModelChoice = { ...base, effort: base.effort ?? EFFORT_BY_TIER[tier] };
   const fill = (c: ModelChoice): ModelChoice => ({
     ...c,
     runtime: c.runtime || tierChoice.runtime || FALLBACK[tier].runtime,

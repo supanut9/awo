@@ -24,6 +24,7 @@ import { runSync, syncHadProblems } from "./commands/sync.js";
 import { doctorExitCode, runDoctor } from "./commands/doctor.js";
 import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
+import { formatContext, runContext } from "./commands/context.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -112,6 +113,22 @@ program
       for (const r of results) {
         console.log(`${r.name}\t${r.type}\t${r.status}`);
       }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("context")
+  .description(
+    "Print a compact orientation digest — where the project stands and what to do next. Run this first in a new session instead of scanning the tree (§13)."
+  )
+  .option("--json", "machine-readable output")
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const c = await runContext();
+      console.log(opts.json ? JSON.stringify(c, null, 2) : formatContext(c));
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

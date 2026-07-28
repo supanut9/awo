@@ -203,6 +203,11 @@ export async function runTaskRun(
     );
   }
 
+  // Resolve the model before touching state. An unsupported effort or a malformed
+  // policy is a config error; throwing after the task is already `running` left an
+  // open run that `doctor` then reported as abandoned.
+  const model = await resolveModel(workspaceRoot, task.agent, task.tier);
+
   const runId = newRunId(task.id);
   const startedAt = new Date().toISOString();
 
@@ -223,7 +228,6 @@ export async function runTaskRun(
     s.tasks[task.id] = ts;
   });
 
-  const model = await resolveModel(workspaceRoot, task.agent, task.tier);
   const worktreesForRun = options.noWorktree
     ? []
     : await ensureTaskWorktrees(workspaceRoot, manifest, task.id, task.targets);

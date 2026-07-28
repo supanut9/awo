@@ -7,6 +7,16 @@
 - **Key:** `PROM`
 - **Type:** AWO orchestration workspace (multi-repo)
 
+## Start here in a new session
+Run **`awo context`** first. It prints, in ~20 lines: the project and its linked
+repos, every goal with its progress, which tasks are blocked or running and why,
+requirements still in intake, the last few runs, and **what to do next**.
+
+Do not scan the tree to work this out — that costs tokens and gets it wrong. The
+digest is derived fresh from the manifest, `state.json` and the run index every
+time, so it cannot be stale. For the full history use `awo log list`; for one run
+use `awo log show <runId>`.
+
 ## How work is organized
 Work flows down a hierarchy: **Requirement → Goal → Tasks**. Each level is a
 markdown file with YAML frontmatter under `goals/`. IDs are project-key
@@ -31,6 +41,7 @@ prefixed: `PROM-R#` (requirement), `PROM-G#` (goal), `PROM-T#` (task).
 - `tests-must-pass` — a task/PR can't proceed with failing or unverified tests.
 - `acceptance-criteria-required` — a goal needs QA sign-off, not just passing tasks, before `done`.
 - `record-every-run` — every piece of work leaves a log entry; non-task work uses `awo log add`.
+- `pick-reasoning-effort` — match thinking budget to the work; `medium` is the default.
 
 ## Choosing a role — you usually don't need to be told
 Every artifact already says who owns the work. Adopt the role yourself, in this
