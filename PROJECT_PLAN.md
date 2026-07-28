@@ -933,6 +933,10 @@ Everything here is a design decision made on paper, not something that's been pr
 
 34. **Worktree isolation was honour-system, and an agent invented its own path.** `isolate-task-worktrees` is a rule and a skill, but nothing created the worktree, so a worker placed it at `<workspace>/.worktrees/…` instead of §4's `repos/.worktrees/…` — outside the gitignored path, so its contents could have been committed into the workspace. Isolation itself held (the shared checkout was untouched), but by luck of instruction rather than construction. `task run` now creates the worktrees, announces them in the event stream, and prints where to work; `--no-worktree` opts out loudly. Lesson: **for anything a rule requires, ask what creates it** — an unenforced convention is a coin flip that happens to have landed well.
 
+37. **The worktree fix advertised isolation that had failed — found minutes after shipping it.** git allows a branch to be checked out in exactly one worktree. For a resumed task whose branch was already held by an earlier (stray) worktree, `worktree add` failed, the error was swallowed, and `task run` still printed `work in: repos/.worktrees/…` — a directory that did not exist. A worker told to work there would have either failed or, worse, fallen back to the shared checkout. Fixed by looking up which worktree currently holds the branch and **reusing that path** (which is also where the prior work lives, so a resumed task recovers it), and by printing `WARNING: no isolation for <repo>` when creation genuinely fails. Lesson: **a guard that reports success on failure is worse than no guard** — the previous honour-system version at least did not lie. Also: `catch {}` that swallows an error is how a safety feature becomes a decoration.
+
+38. **`gpt-5-codex` is not available on a ChatGPT-account Codex, which made model-based tiering impossible.** The whole tier ladder assumed several models to choose between; this account has one (`gpt-5.4-mini`). The way out was already in the user's own `~/.codex/config.toml`: `model_reasoning_effort`. Tiering by **reasoning budget on a single model** — `effort: high|medium|low` — is now supported and emitted as `-c model_reasoning_effort=<effort>`, which is exactly the axis §12.7 had described as "not modelled yet". Lesson: **tiering is not inherently about model identity**; when the model set is fixed, effort is the knob, and a policy that can only express "which model" cannot serve a single-model account.
+
 36. **`prepublishOnly` did not run the tests, and a shell `&&` chain hid a failure.** v0.0.14 was published while one test was failing: the publish command was `npm test … && npm publish`, and the chain gated on `grep` finding output rather than on the suite passing, so a red run still shipped. Two clean re-runs afterwards showed 52/52 and the failure did not reproduce — most likely disk pressure, since the machine was at 85% and a jest run had already hit a transient `ENOSPC`. Fixed by making `prepublishOnly` run `npm test`, so npm itself refuses to publish a red tree regardless of how the command was typed. Lesson: **a release gate belongs in the tool that releases, not in the sentence you happen to type** — and a flaky failure is still a failure until it is explained.
 
 35. **A one-shot orchestrator cannot wait for its workers.** The orchestrator ended its turn with "I'll continue automatically when T2's worker reports back" — but `claude -p` exits when the turn ends, killing the child process. `SHOP-T2` was left `running` with an open run and ~8 files of uncommitted work stranded in its worktree; `doctor` correctly flagged the abandoned run. Nothing in awo can fix this — it is a property of how the orchestrator is invoked — so it belongs in the orchestrator's brief: **block synchronously on each worker; never defer to a future turn that will not exist.**
@@ -1291,7 +1295,16 @@ then it is instruction for whoever is orchestrating.
 - Plan mode is read-only-until-approved. An orchestrator in plan mode could not run `task run`, write state, or spawn a worker — precisely the actions that make it an orchestrator.
 - It is no better for a spawned worker: a planning worker must *write* (`awo req new`, `awo task new`, `goal.md`), and a non-interactive worker in plan mode would emit a plan, wait for an approval that never comes, and leave its run open forever — the abandoned-run state `doctor` warns about.
 
-Plan mode is a **human-approval mechanism for an interactive session**, not a property of a work tier. What thinking-heavy work actually wants is *more reasoning budget* — extended thinking, or a runtime's reasoning-effort setting. That is a separate axis from permission mode and is not modelled yet; if it proves worth having, it belongs as `effort:` alongside `model:`, not folded into `mode:`.
+Plan mode is a **human-approval mechanism for an interactive session**, not a property of a work tier. What thinking-heavy work actually wants is *more reasoning budget*. That is a separate axis from permission mode, and it **is** now modelled as `effort:` alongside `model:` — never folded into `mode:`.
+
+```jsonc
+"tiers": {
+  "high": { "runtime": "codex", "model": "gpt-5.4-mini", "effort": "high" },
+  "low":  { "runtime": "codex", "model": "gpt-5.4-mini", "effort": "low"  }
+}
+```
+
+This turned out to be necessary rather than ornamental: a ChatGPT-account Codex exposes only `gpt-5.4-mini`, so there is no second model to tier *with*. Effort makes tiering work on a single model — same model, more thinking — and is emitted as `-c model_reasoning_effort=<effort>` (§9 item 38).
 
 ### 12.6 What is deliberately NOT built
 

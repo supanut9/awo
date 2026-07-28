@@ -396,11 +396,17 @@ task
       const r = await runTaskRun(taskId, { noWorktree: opts.worktree === false });
       console.log(`${r.taskId} is running — run ${r.runId}`);
       console.log(`agent:   ${r.agent ?? "unassigned"} — ${r.model.tier} tier (from ${r.model.tierSource})`);
-      console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.mode ? ` (${r.model.mode} mode)` : ""}`);
+      console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}${r.model.mode ? ` (${r.model.mode} mode)` : ""}`);
       console.log(`targets: ${r.targets.join(", ") || "none"}`);
       console.log(`events:  ${r.eventsFile}`);
       for (const wt of r.worktrees) {
-        console.log(`work in: ${wt.path}  (${wt.repo} on ${wt.branch})`);
+        if (wt.error) {
+          console.log(`WARNING: no isolation for ${wt.repo} — ${wt.error}`);
+          continue;
+        }
+        console.log(
+          `work in: ${wt.path}  (${wt.repo} on ${wt.branch}${wt.reused ? ", reused" : ""})`
+        );
       }
       if (r.worktrees.length === 0) console.log(`work in: shared checkout — NO worktree isolation`);
       console.log(`hand to: ${r.invocation}`);

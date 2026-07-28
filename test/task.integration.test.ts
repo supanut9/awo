@@ -566,3 +566,37 @@ test("a tier can declare a fallback for when the primary is out of quota", () =>
   assert.ok(!/if quota:/.test(noFb.stdout), "no fallback declared means none suggested");
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+test("task run reuses the worktree already holding the branch, and never fakes isolation", () => {
+  const ws = makeWorkspace();
+  const repoPath = JSON.parse(
+    fs.readFileSync(path.join(ws, ".workspace", "manifest.json"), "utf8")
+  ).repos[0].path as string;
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repoPath });
+  execFileSync("git", ["add", "-A"], { cwd: repoPath });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repoPath });
+
+  // Someone (or an earlier attempt) already put feature/TEST-T1 in a worktree
+  // somewhere else. git allows a branch in only ONE worktree, so creating the
+  // canonical one would fail — reuse the existing path instead of advertising a
+  // directory git refused to make.
+  const stray = path.join(ws, ".worktrees", "api", "TEST-T1");
+  fs.mkdirSync(path.dirname(stray), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-b", "feature/TEST-T1", stray], { cwd: repoPath, stdio: "pipe" });
+  fs.writeFileSync(path.join(stray, "prior-work.txt"), "work from the orphaned attempt\n");
+
+  const out = awo(ws, ["task", "run", "TEST-T1"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /work in: \.worktrees\/api\/TEST-T1  \(api on feature\/TEST-T1, reused\)/);
+  assert.ok(!/WARNING: no isolation/.test(out.stdout));
+
+  // The canonical path must NOT be advertised, because it does not exist.
+  assert.ok(!out.stdout.includes("repos/.worktrees/api/TEST-T1"));
+  assert.ok(!fs.existsSync(path.join(ws, "repos", ".worktrees", "api", "TEST-T1")));
+
+  // And the prior work is still reachable at the reused path.
+  assert.ok(fs.existsSync(path.join(stray, "prior-work.txt")));
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});

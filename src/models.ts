@@ -29,6 +29,13 @@ export interface ModelChoice {
   runtime: string;
   model: string;
   /**
+   * Reasoning budget, not permission mode (§12.7). This is what thinking-heavy
+   * work actually wants, and it is the only way to tier when an account has just
+   * one model available: same model, more thinking. Codex takes it as
+   * `-c model_reasoning_effort=<effort>`.
+   */
+  effort?: string;
+  /**
    * Where to go when the primary is unavailable — quota exhausted, rate limited,
    * or the CLI not installed. Declared rather than guessed, because the right
    * substitute is a judgment call: a cheaper model on the same runtime may be
@@ -107,7 +114,7 @@ function parseChoice(value: unknown): ModelChoice | null {
     return b ? { runtime: a, model: b } : { runtime: "", model: a };
   }
   if (value && typeof value === "object") {
-    const v = value as { runtime?: unknown; model?: unknown; mode?: unknown };
+    const v = value as { runtime?: unknown; model?: unknown; mode?: unknown; effort?: unknown };
     if (typeof v.model === "string") {
       const fb = (v as { fallback?: unknown }).fallback;
       const parsedFb =
@@ -123,6 +130,7 @@ function parseChoice(value: unknown): ModelChoice | null {
         runtime: typeof v.runtime === "string" ? v.runtime : "",
         model: v.model,
         ...(typeof v.mode === "string" ? { mode: v.mode } : {}),
+        ...(typeof v.effort === "string" ? { effort: v.effort } : {}),
         ...(parsedFb ? { fallback: parsedFb } : {}),
       };
     }
@@ -189,6 +197,7 @@ export async function resolveModel(
     ...c,
     runtime: c.runtime || tierChoice.runtime || FALLBACK[tier].runtime,
     mode: c.mode ?? tierChoice.mode,
+    effort: c.effort ?? tierChoice.effort,
     fallback: c.fallback ?? tierChoice.fallback,
   });
 
@@ -207,7 +216,7 @@ export async function resolveModel(
 
 /** The command the orchestrator would run to hand this task to a worker. */
 export function invocationHint(choice: ModelChoice, taskId: string): string {
-  return invocationFor(choice.runtime, choice.model, choice.mode, taskId);
+  return invocationFor(choice.runtime, choice.model, choice.mode, taskId, choice.effort);
 }
 
 /** The same command for the declared fallback, if any. */
@@ -220,13 +229,16 @@ function invocationFor(
   runtime: string,
   model: string,
   mode: string | undefined,
-  taskId: string
+  taskId: string,
+  effort?: string
 ): string {
   const choice = { runtime, model, mode } as ModelChoice;
   const prompt = `Follow instructions/ship-a-change.md for ${taskId}.`;
   switch (choice.runtime) {
-    case "codex":
-      return `codex exec -m ${choice.model} "${prompt}"`;
+    case "codex": {
+      const eff = effort ? ` -c model_reasoning_effort=${effort}` : "";
+      return `codex exec -m ${choice.model}${eff} "${prompt}"`;
+    }
     case "gemini":
       return `gemini -m ${choice.model} -p "${prompt}"`;
     default: {

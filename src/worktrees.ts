@@ -5,10 +5,14 @@ import { type Manifest } from "./manifest.js";
 
 export interface Worktree {
   repo: string;
-  /** Workspace-relative, as §4 specifies: repos/.worktrees/<repo>/<taskId>. */
+  /** Workspace-relative where possible: repos/.worktrees/<repo>/<taskId>. */
   path: string;
   branch: string;
   created: boolean;
+  /** True when git already had a worktree on this branch and we reused it. */
+  reused: boolean;
+  /** Set when isolation could NOT be established — never advertise a path then. */
+  error: string | null;
 }
 
 /**
@@ -44,26 +48,64 @@ export async function ensureTaskWorktrees(
     const branch = `feature/${taskId}`;
 
     if (await fs.pathExists(abs)) {
-      out.push({ repo: name, path: rel, branch, created: false });
+      out.push({ repo: name, path: rel, branch, created: false, reused: true, error: null });
+      continue;
+    }
+
+    // git allows a branch to be checked out in only ONE worktree. If a previous
+    // attempt (or a hand-made worktree) already holds this branch, reuse THAT
+    // path — it is where the prior work lives, and creating a second one simply
+    // fails. Without this, a resumed task advertised a directory git had refused
+    // to create, so "isolation" pointed at nothing (§9 item 37).
+    const existing = await worktreeForBranch(git, branch);
+    if (existing) {
+      const insideWorkspace = existing.startsWith(workspaceRoot + path.sep);
+      out.push({
+        repo: name,
+        path: insideWorkspace ? path.relative(workspaceRoot, existing) : existing,
+        branch,
+        created: false,
+        reused: true,
+        error: null,
+      });
       continue;
     }
 
     await fs.ensureDir(path.dirname(abs));
     const branches = await git.branchLocal();
     try {
-      // Reuse the branch if a previous attempt made it, so a retried task does
-      // not lose the work already committed on it.
       await git.raw(
         branches.all.includes(branch)
           ? ["worktree", "add", abs, branch]
           : ["worktree", "add", "-b", branch, abs]
       );
-      out.push({ repo: name, path: rel, branch, created: true });
-    } catch {
-      // A worktree that cannot be created must not silently look like isolation.
-      out.push({ repo: name, path: rel, branch, created: false });
+      out.push({ repo: name, path: rel, branch, created: true, reused: false, error: null });
+    } catch (err) {
+      // A worktree that cannot be created must not look like isolation.
+      out.push({
+        repo: name,
+        path: rel,
+        branch,
+        created: false,
+        reused: false,
+        error: (err as Error).message.split("\n")[0],
+      });
     }
   }
 
   return out;
+}
+
+/** The worktree path currently holding `branch`, if any. */
+async function worktreeForBranch(
+  git: ReturnType<typeof simpleGit>,
+  branch: string
+): Promise<string | null> {
+  const raw = await git.raw(["worktree", "list", "--porcelain"]).catch(() => "");
+  let current: string | null = null;
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length).trim();
+    if (line.trim() === `branch refs/heads/${branch}` && current) return current;
+  }
+  return null;
 }
