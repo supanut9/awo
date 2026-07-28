@@ -2,6 +2,7 @@
 id: capture-requirement
 name: Capture a requirement
 description: Sequence for turning a raw ask into a scoped, plannable goal
+owner: product-manager
 appliesTo: [{{PROJECT_KEY}}-R]
 ---
 

@@ -2,6 +2,7 @@
 id: ship-a-change
 name: Ship a change
 description: End-to-end workflow from code to merged PR for one task
+owner: software-engineer
 appliesTo: [{{PROJECT_KEY}}-T]
 ---
 

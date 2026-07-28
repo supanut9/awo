@@ -2,6 +2,7 @@
 id: plan-a-goal
 name: Plan a goal
 description: Sequence for turning a refined requirement into planned tasks
+owner: tech-lead
 appliesTo: [PROM-G]
 ---
 

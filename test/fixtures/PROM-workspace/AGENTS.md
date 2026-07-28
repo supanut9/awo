@@ -31,6 +31,23 @@ prefixed: `PROM-R#` (requirement), `PROM-G#` (goal), `PROM-T#` (task).
 - `tests-must-pass` — a task/PR can't proceed with failing or unverified tests.
 - `acceptance-criteria-required` — a goal needs QA sign-off, not just passing tasks, before `done`.
 
+## Choosing a role — you usually don't need to be told
+Every artifact already says who owns the work. Adopt the role yourself, in this
+order of precedence:
+
+1. **A task's `agent:` frontmatter wins.** Working `PROM-T#` with
+   `agent: data-engineer` means you are `data-engineer` for that task, whatever
+   the instruction's default owner says.
+2. **Otherwise, the instruction's `owner:` frontmatter.** Following
+   `plan-a-goal` means you are `tech-lead`.
+3. **Otherwise, infer from the ID type**: `PROM-R#` → `product-manager`,
+   `PROM-G#` → `tech-lead`, `PROM-T#` → `software-engineer`.
+4. **Only if none of those apply, ask** which role is intended — don't silently
+   act as a generalist, because that is how rules get skipped.
+
+Read that role's file in `agents/` before acting, and stay inside its
+boundaries. A human naming a role explicitly always overrides the above.
+
 ## Available skills
 - `refine-requirement` — turn a raw ask into a clear, scoped requirement.
 - `create-commit` — stage + commit with a conventional message.
