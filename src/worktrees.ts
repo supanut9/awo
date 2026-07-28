@@ -16,6 +16,17 @@ export interface Worktree {
    * will edit that instead of the worktree (§9 item 42).
    */
   gitDirPath: string;
+  /**
+   * Paths outside the worktree that a sandboxed worker must be able to WRITE.
+   * Beyond the git dir this includes linked `node_modules`: build tools write
+   * caches there (`.vite-temp`, `.cache`), and a read-only link makes the test
+   * suite fail with a permission error rather than a test failure (§9 item 46).
+   * These are caches and dependencies, never source — see §9 item 42 for why the
+   * distinction matters.
+   */
+  writablePaths: string[];
+  /** The dependency branch this one was cut from, when there was one. */
+  basedOn?: string | null;
   /** True when git already had a worktree on this branch and we reused it. */
   reused: boolean;
   /** Set when isolation could NOT be established — never advertise a path then. */
@@ -36,7 +47,14 @@ export async function ensureTaskWorktrees(
   workspaceRoot: string,
   manifest: Manifest,
   taskId: string,
-  targets: string[]
+  targets: string[],
+  /**
+   * Tasks this one depends on, most-recent-first. A dependent task must build ON
+   * its dependency's work: branching every task from the repo's current HEAD gave
+   * each one an isolated branch that lacked its predecessor's commits, so the
+   * chain silently broke (§9 item 44).
+   */
+  dependsOn: string[] = []
 ): Promise<Worktree[]> {
   const out: Worktree[] = [];
 
@@ -55,7 +73,16 @@ export async function ensureTaskWorktrees(
     const branch = `feature/${taskId}`;
 
     if (await fs.pathExists(abs)) {
-      out.push({ repo: name, path: rel, branch, created: false, reused: true, error: null, gitDirPath: path.join(repoPath, ".git") });
+      out.push({
+        repo: name,
+        path: rel,
+        branch,
+        created: false,
+        reused: true,
+        error: null,
+        gitDirPath: path.join(repoPath, ".git"),
+        writablePaths: await writableFor(repoPath, abs),
+      });
       continue;
     }
 
@@ -75,19 +102,46 @@ export async function ensureTaskWorktrees(
         reused: true,
         error: null,
         gitDirPath: path.join(repoPath, ".git"),
+        writablePaths: await writableFor(repoPath, existing),
       });
       continue;
     }
 
     await fs.ensureDir(path.dirname(abs));
     const branches = await git.branchLocal();
+
+    // Base the new branch on the nearest dependency that actually has a branch
+    // here, so the dependent task starts from its predecessor's commits.
+    const base = dependsOn
+      .map((dep) => `feature/${dep}`)
+      .find((candidate) => branches.all.includes(candidate));
+
     try {
       await git.raw(
         branches.all.includes(branch)
           ? ["worktree", "add", abs, branch]
-          : ["worktree", "add", "-b", branch, abs]
+          : base
+            ? ["worktree", "add", "-b", branch, abs, base]
+            : ["worktree", "add", "-b", branch, abs]
       );
-      out.push({ repo: name, path: rel, branch, created: true, reused: false, error: null, gitDirPath: path.join(repoPath, ".git") });
+      // A fresh worktree has no node_modules (gitignored), so `run-tests` cannot
+      // run and `tests-must-pass` becomes unsatisfiable — the worker reports
+      // "jest not found" and calls it unverified (§9 item 45). Link the repo's
+      // installed dependencies rather than re-installing: instant, no disk cost,
+      // and node resolves through the symlink.
+      const linked = await linkDependencies(repoPath, abs);
+
+      out.push({
+        repo: name,
+        path: rel,
+        branch,
+        created: true,
+        reused: false,
+        error: null,
+        gitDirPath: path.join(repoPath, ".git"),
+        writablePaths: [path.join(repoPath, ".git"), ...linked],
+        basedOn: base ?? null,
+      });
     } catch (err) {
       // A worktree that cannot be created must not look like isolation.
       out.push({
@@ -98,6 +152,7 @@ export async function ensureTaskWorktrees(
         reused: false,
         error: (err as Error).message.split("\n")[0],
         gitDirPath: path.join(repoPath, ".git"),
+        writablePaths: [],
       });
     }
   }
@@ -117,4 +172,32 @@ async function worktreeForBranch(
     if (line.trim() === `branch refs/heads/${branch}` && current) return current;
   }
   return null;
+}
+
+/**
+ * Point a fresh worktree at the repo's already-installed dependencies, and report
+ * which external paths the worker will therefore need to write.
+ */
+async function linkDependencies(repoPath: string, worktreePath: string): Promise<string[]> {
+  const linked: string[] = [];
+  for (const dir of ["node_modules"]) {
+    const source = path.join(repoPath, dir);
+    const target = path.join(worktreePath, dir);
+    if (!(await fs.pathExists(source))) continue;
+    if (await fs.pathExists(target)) {
+      linked.push(source);
+      continue;
+    }
+    // Best effort: a failed link leaves the worktree usable, just untestable.
+    await fs.symlink(source, target, "dir").then(() => linked.push(source)).catch(() => undefined);
+  }
+  return linked;
+}
+
+/** Paths an existing/reused worktree needs written, recomputed on each run. */
+async function writableFor(repoPath: string, worktreePath: string): Promise<string[]> {
+  const out = [path.join(repoPath, ".git")];
+  const nm = path.join(repoPath, "node_modules");
+  if (await fs.pathExists(path.join(worktreePath, "node_modules"))) out.push(nm);
+  return out;
 }

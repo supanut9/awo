@@ -422,7 +422,7 @@ task
           continue;
         }
         console.log(
-          `work in: ${wt.path}  (${wt.repo} on ${wt.branch}${wt.reused ? ", reused" : ""})`
+          `work in: ${wt.path}  (${wt.repo} on ${wt.branch}${wt.basedOn ? ` from ${wt.basedOn}` : ""}${wt.reused ? ", reused" : ""})`
         );
       }
       if (r.worktrees.length === 0) console.log(`work in: shared checkout — NO worktree isolation`);

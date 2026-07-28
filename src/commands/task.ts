@@ -230,7 +230,7 @@ export async function runTaskRun(
 
   const worktreesForRun = options.noWorktree
     ? []
-    : await ensureTaskWorktrees(workspaceRoot, manifest, task.id, task.targets);
+    : await ensureTaskWorktrees(workspaceRoot, manifest, task.id, task.targets, [...task.dependsOn].reverse());
 
   const worktrees = worktreesForRun;
   // A worker sandboxed to the workspace needs to write the worktree's git
@@ -240,7 +240,7 @@ export async function runTaskRun(
   const usable = worktrees.filter((w) => !w.error);
   const workerContext = {
     cwd: usable[0] ? usable[0].path : undefined,
-    allow: [...new Set(usable.map((w) => w.gitDirPath))],
+    allow: [...new Set(usable.flatMap((w) => w.writablePaths))],
   };
 
   for (const wt of worktrees.filter((w) => w.created)) {
