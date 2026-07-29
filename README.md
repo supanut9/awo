@@ -143,9 +143,34 @@ build failed.
 dependency so a dependent task builds on its predecessor's commits, with the repo's
 `node_modules` linked so tests can actually run.
 
-**Evidence.** A task cannot close as `success` without a `test` event in its run —
-or `--untested "<why>"`, which is recorded in the log. This exists because six
-tasks once each "passed" and composed into a broken feature.
+**Evidence.** A task cannot close as `success` on a claim. `awo` runs the command
+itself and records what happened:
+
+```sh
+awo task event SHOP-T3 test --run "npm test" --baseline
+```
+
+Exit code, duration and pass/fail counts go in the log; `--baseline` runs it again
+at the branch point. Only a *measured* pass satisfies the gate — a `test` event you
+typed is refused, with `--untested "<why>"` as the honest escape hatch.
+
+This matters more than it sounds: published analysis of agent-authored test patches
+found **~80% carry weak or no assertions** (existence checks, mock verification,
+snapshots). "Tests passed" as prose is the weakest signal in the workflow.
+
+**Attribution.** A failing test means the code is wrong *or* the test is wrong, and
+`--baseline` decides which:
+
+| baseline | now | diagnosis |
+|---|---|---|
+| fails | fails, no worse | `pre-existing` — not this task's defect |
+| passes | fails | `regression` — this change broke it |
+| — | fails, new tests added | `new-contract` — the acceptance criteria decide |
+| passes | passes, but a test and its own code changed together | `test-and-code-changed` — **inconclusive** |
+
+The last row cannot be settled by reading either file, so awo flags it and refuses
+to let the task reach `done` without review. The tiebreak is the artefact that
+predates both: the goal's acceptance criteria.
 
 ## Model tiering
 

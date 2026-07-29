@@ -590,10 +590,37 @@ task
   .option("--label <label>", "human label for the step")
   .option("--message <message>", "free-text message (note events)")
   .option("--data <json>", "extra JSON fields, e.g. '{\"repo\":\"api\",\"files\":3}'")
-  .action(async (taskId: string, kind: string, opts: { label?: string; message?: string; data?: string }) => {
+  .option(
+    "--run <command>",
+    "run this command and record what happened — the only form `complete --gate` accepts"
+  )
+  .option("--baseline", "also run it at the branch point, so a failure can be attributed")
+  .option("--repo <name>", "which target repo to run in (default: the task's first target)")
+  .option("--timeout <minutes>", "kill the command after this long (default 30)", (v) => parseInt(v, 10))
+  .action(
+    async (
+      taskId: string,
+      kind: string,
+      opts: {
+        label?: string;
+        message?: string;
+        data?: string;
+        run?: string;
+        baseline?: boolean;
+        repo?: string;
+        timeout?: number;
+      }
+    ) => {
     try {
-      await runTaskEvent(taskId, kind, opts);
-      console.log(`recorded ${kind} for ${taskId}.`);
+      const r = await runTaskEvent(taskId, kind, { ...opts, timeoutMinutes: opts.timeout });
+      if (!r.measured) {
+        console.log(`recorded ${kind} for ${taskId}.`);
+      } else {
+        console.log(`recorded ${kind} for ${taskId} — ${r.diagnosis}`);
+        if (r.needsHuman) {
+          console.log("  this one needs a human: `awo log tail` for the explanation");
+        }
+      }
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

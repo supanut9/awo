@@ -378,7 +378,8 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
 
   // One task with evidence, one excused — the gate must be able to tell them apart.
   awo(ws, ["task", "run", "PL-T1"]);
-  awo(ws, ["task", "event", "PL-T1", "test", "--data", '{"repo":"api","pass":3}']);
+  // Measured, because an unmeasured claim no longer satisfies the gate.
+  awo(ws, ["task", "event", "PL-T1", "test", "--run", "true"]);
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--gate"]);
   awo(ws, ["task", "run", "PL-T2"]);
   awo(ws, ["task", "complete", "PL-T2", "--outcome", "success", "--gate", "--untested", "no db"]);

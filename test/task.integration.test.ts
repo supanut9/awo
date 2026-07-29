@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -712,8 +712,15 @@ test("a task cannot close as success without test evidence", () => {
   assert.match(bare.stderr, /rule: tests-must-pass/);
   assert.match(awo(ws, ["task", "show", "TEST-T1"]).stdout, /status: {3}running/, "still open");
 
-  // Recording what ran satisfies it.
+  // Typing a test event is no longer enough: it is a claim, and a claim cannot be
+  // checked. Nothing about the workspace changes until something is measured.
   awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":12,"fail":0}']);
+  const claimed = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  assert.equal(claimed.code, 1);
+  assert.match(claimed.stderr, /awo did not run/);
+
+  // Having awo run it does satisfy the gate.
+  awo(ws, ["task", "event", "TEST-T1", "test", "--run", "true"]);
   assert.equal(awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]).code, 0);
   assert.match(awo(ws, ["task", "show", "TEST-T1"]).stdout, /status: {3}done/);
 
@@ -769,4 +776,131 @@ test("dispatch spawns the worker, blocks, and fails loudly when the runtime is m
   assert.ok(events.some((e) => String(e.label ?? "").includes("dispatching to codex")));
   assert.ok(events.some((e) => e.kind === "step.end" && e.ok === false));
   fs.rmSync(ws, { recursive: true, force: true });
+});
+
+/** A repo whose suite is a script we can make pass or fail deterministically. */
+function makeEvidenceWorkspace(
+  opts: { brokenAtBase?: boolean } = {}
+): { ws: string; repo: string; worktree: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "awo-ev-"));
+  const ws = path.join(root, "ws");
+  const repo = path.join(root, "api");
+  fs.mkdirSync(ws, { recursive: true });
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  const git = (args: string) => execSync(`git ${args}`, { cwd: repo, stdio: "ignore" });
+  git("init -q .");
+  git("config user.email a@b.c");
+  git("config user.name t");
+  fs.writeFileSync(
+    path.join(repo, "src", "pricing.ts"),
+    opts.brokenAtBase ? "export const rate = 0.1; // BREAK\n" : "export const rate = 0.1;\n"
+  );
+  fs.writeFileSync(path.join(repo, "src", "pricing.spec.ts"), "expect(rate).toBe(0.1)\n");
+  fs.writeFileSync(
+    path.join(repo, "t.sh"),
+    '#!/bin/sh\ngrep -q BREAK src/pricing.ts && { echo "1 failed"; exit 1; }\necho "2 passed"\n'
+  );
+  fs.chmodSync(path.join(repo, "t.sh"), 0o755);
+  git("add -A");
+  git("commit -qm base");
+
+  execFileSync(process.execPath, [CLI, "init", "--key", "EV"], { cwd: ws });
+  execFileSync(process.execPath, [CLI, "connect", repo], { cwd: ws });
+  execFileSync(process.execPath, [CLI, "req", "new", "--title", "thing"], { cwd: ws });
+  execFileSync(process.execPath, [CLI, "goal", "new", "--from", "EV-R1"], { cwd: ws });
+  execFileSync(process.execPath, [CLI, "task", "new", "--goal", "EV-G1", "--name", "Do", "--targets", "api"], { cwd: ws });
+  execFileSync(process.execPath, [CLI, "task", "run", "EV-T1"], { cwd: ws });
+  return { ws, repo, worktree: path.join(ws, "repos", ".worktrees", "api", "EV-T1") };
+}
+
+function lastTestEvent(ws: string): Record<string, unknown> {
+  const day = fs.readdirSync(path.join(ws, "logs")).filter((d) => /^\d{4}-/.test(d))[0];
+  return fs
+    .readFileSync(path.join(ws, "logs", day, "runs.jsonl"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.kind === "test")
+    .at(-1)!;
+}
+
+test("a test event with --run is measured, not claimed", () => {
+  const { ws } = makeEvidenceWorkspace();
+  execFileSync(process.execPath, [CLI, "task", "event", "EV-T1", "test", "--run", "./t.sh"], { cwd: ws });
+
+  const e = lastTestEvent(ws);
+  assert.equal(e.verified, true, "awo ran it");
+  assert.equal(e.exitCode, 0);
+  assert.equal(e.command, "./t.sh");
+  assert.equal(e.passed, 2, "counts are parsed from the runner's output");
+  assert.equal(e.diagnosis, "pass");
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("a failure is attributed against the branch point, not guessed", () => {
+  const { ws, worktree } = makeEvidenceWorkspace();
+  // The branch breaks a suite that passed where it started.
+  fs.writeFileSync(path.join(worktree, "src", "pricing.ts"), "export const rate = 0.1; // BREAK\n");
+  execSync("git commit -aqm break", { cwd: worktree, stdio: "ignore" });
+
+  execFileSync(
+    process.execPath,
+    [CLI, "task", "event", "EV-T1", "test", "--run", "./t.sh", "--baseline"],
+    { cwd: ws }
+  );
+  const e = lastTestEvent(ws);
+  assert.equal(e.exitCode, 1);
+  assert.equal(e.baselineExitCode, 0, "the baseline actually ran");
+  assert.equal(e.diagnosis, "regression");
+  assert.equal(e.needsHuman, false, "a regression is decided, not escalated");
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("a suite already failing at the branch point is not blamed on the task", () => {
+  // Broken before the task's branch ever existed, so the branch point fails too.
+  const { ws, worktree } = makeEvidenceWorkspace({ brokenAtBase: true });
+  fs.writeFileSync(path.join(worktree, "src", "pricing.ts"), "export const rate = 0.2; // BREAK\n");
+  execSync("git commit -aqm unrelated-change", { cwd: worktree, stdio: "ignore" });
+
+  execFileSync(
+    process.execPath,
+    [CLI, "task", "event", "EV-T1", "test", "--run", "./t.sh", "--baseline"],
+    { cwd: ws }
+  );
+  assert.equal(lastTestEvent(ws).diagnosis, "pre-existing");
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("a test edited alongside the code it covers is inconclusive, even passing", () => {
+  const { ws, worktree } = makeEvidenceWorkspace();
+  fs.writeFileSync(path.join(worktree, "src", "pricing.ts"), "export const rate = 0.25;\n");
+  fs.writeFileSync(path.join(worktree, "src", "pricing.spec.ts"), "expect(rate).toBe(0.25)\n");
+  execSync("git commit -aqm both", { cwd: worktree, stdio: "ignore" });
+
+  execFileSync(process.execPath, [CLI, "task", "event", "EV-T1", "test", "--run", "./t.sh"], { cwd: ws });
+  const e = lastTestEvent(ws);
+  assert.equal(e.exitCode, 0, "it passes");
+  assert.equal(e.diagnosis, "test-and-code-changed");
+  assert.equal(e.needsHuman, true, "a test edited into agreement proves nothing");
+
+  // ...and passing is not enough to reach done directly.
+  const straight = awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--summary", "x"]);
+  assert.equal(straight.code, 1);
+  assert.match(straight.stderr, /needs a human, so it cannot go straight to done/);
+
+  const gated = awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--gate", "--summary", "x"]);
+  assert.equal(gated.code, 0, gated.stderr);
+  assert.match(gated.stdout, /in-review/);
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("the gate refuses a test event awo did not run", () => {
+  const { ws } = makeEvidenceWorkspace();
+  execFileSync(process.execPath, [CLI, "task", "event", "EV-T1", "test", "--label", "suite green"], { cwd: ws });
+
+  const out = awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--gate", "--summary", "x"]);
+  assert.equal(out.code, 1);
+  assert.match(out.stderr, /cannot close as success on a test event awo did not run/);
+  assert.match(out.stderr, /--run/, "it must say how to fix it");
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
 });

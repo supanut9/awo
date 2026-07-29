@@ -1715,3 +1715,69 @@ and what actually happened.
     `workspaceId` backfill along with it. Only the test that asserted that
     migration *by name* caught it — which is the argument for naming what you
     assert rather than counting it.
+
+
+## 16. Where the human belongs
+
+The motivating question: if a human must validate everything, the agent saved
+nothing. The research consensus for 2026 is that **the bottleneck moved from
+generation to verification** — AI-authored PRs wait 4.6× longer for a reviewer, and
+main-branch throughput fell ~7% year over year even as feature-branch throughput
+rose. Reviewing every diff at human reading speed consumes the entire speedup.
+
+The way out is not reviewing less but **reviewing a different artefact**. Defects
+concentrate at specification-implementation mismatches and integration boundaries,
+not inside isolated functions — which is exactly what the SHOP-G1 dogfood produced.
+So human attention is spent, in order of leverage:
+
+1. **The requirement and its definition of done** (10–20 min). Short text, highest
+   consequence, and the only artefact where the human's judgment is irreplaceable.
+   Given-When-Then is the shape of a test, so writing it well converts human review
+   into machine checks.
+2. **The seams between tasks** — `dependsOn` and the interfaces. No worker can see
+   the seam it is on one side of.
+3. **What counts as evidence** — once per repo, not per task.
+4. **The gate verdict** — judging a curated argument with citations, not 2,000 lines
+   of diff.
+5. **Irreversible actions** — migrations, deploys, deletions. The trigger is
+   reversibility and blast radius, not code quality.
+
+Line-by-line reading belongs on a short list of surfaces (auth, money, migrations,
+public API, data deletion), not on everything.
+
+### 16.1 Why the evidence gate had to change first
+
+Until 0.0.36 the gate accepted any `test` event, so it was satisfied by an agent
+typing "full jest suite green". The dogfood produced 5 such events across 24 runs,
+all prose, and two tasks reached `done` with a commit and no test event at all.
+Every downstream gate was therefore inheriting an agent's word for it.
+
+This is not a discipline problem. Analysis of agent-authored test patches finds
+~80% carry weak or no oracle signals, and ~18% strong oracles for Codex
+specifically — which is what the dogfood's workers were. A workflow that accepts
+"tests passed" as a string inherits all of it.
+
+So `awo task event <id> test --run "<cmd>"` executes the command and records exit
+code, duration and parsed counts. Only that satisfies `complete --gate`.
+
+### 16.2 Deciding whether the code or the test is wrong
+
+`--baseline` runs the same command at the branch point, in a throwaway worktree so
+the agent's uncommitted work is never touched. Four cases, three of them decided
+mechanically (§16 table in README). The undecidable one — a test edited alongside
+the code it covers — is flagged `test-and-code-changed` and blocked from reaching
+`done`, because a test edited into agreement with the code proves nothing and
+*neither file can be the tiebreak*. The acceptance criteria are, and if they do not
+settle it the task belongs in `blocked` with the question.
+
+### 16.3 Findings
+
+65. **A gate that accepts a string is not a gate.** `tests-must-pass` looked
+    enforced for four versions and was enforcing the presence of a sentence.
+66. **A bare `catch` hid the baseline failing entirely.** `measureBaseline`
+    returned `null` on error, so every failure came back `unknown` — the exact
+    answer the mechanism exists to avoid. Second time this session that a silent
+    catch hid a broken rail (§9 item 33 was the first).
+67. **`.git` inside a worktree is a file, not a directory.** The baseline worktree
+    was created under `<repo>/.git/`, which cannot exist in a worktree. Anything
+    building paths under `.git` has to ask git where the real one is.

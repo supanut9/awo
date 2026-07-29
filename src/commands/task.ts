@@ -1,5 +1,15 @@
+import fs from "fs-extra";
 import path from "path";
+import { simpleGit } from "simple-git";
 import { findWorkspaceRoot } from "../workspace.js";
+import {
+  branchPoint,
+  changedFiles,
+  diagnose,
+  measure,
+  measureBaseline,
+  type Measurement,
+} from "../evidence.js";
 import { readManifest } from "../manifest.js";
 import { findAllTasks, locateTask, type TaskDefinition } from "../tasks.js";
 import {
@@ -278,8 +288,19 @@ export async function runTaskRun(
 export async function runTaskEvent(
   taskId: string,
   kind: string,
-  options: { cwd?: string; label?: string; message?: string; data?: string } = {}
-): Promise<void> {
+  options: {
+    cwd?: string;
+    label?: string;
+    message?: string;
+    data?: string;
+    /** Command for awo to RUN and measure, instead of a claim about one. */
+    run?: string;
+    /** Also run it at the branch point, so a failure can be attributed. */
+    baseline?: boolean;
+    repo?: string;
+    timeoutMinutes?: number;
+  } = {}
+): Promise<{ measured: boolean; diagnosis?: string; needsHuman?: boolean }> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { task, goal } = await locateTask(workspaceRoot, taskId);
   const ts = effectiveState(await readState(goal.dir, goal.id), task);
@@ -300,7 +321,83 @@ export async function runTaskEvent(
       throw new Error(`--data must be valid JSON; got: ${options.data}`);
     }
   }
-  await appendEvent(workspaceRoot, ts.lastRunId, kind as EventKind, fields);
+  if (!options.run) {
+    await appendEvent(workspaceRoot, ts.lastRunId, kind as EventKind, fields);
+    return { measured: false };
+  }
+
+  // --run makes this event a measurement: awo executes the command in the task's
+  // worktree and records what actually happened. A `test` event carrying `verified`
+  // is the only thing `task complete --gate` will accept.
+  const manifest = await readManifest(workspaceRoot);
+  const repoName = options.repo ?? task.targets[0];
+  if (!repoName) {
+    throw new Error(
+      `${task.id} has no targets, so there is no repo to run "${options.run}" in. Pass --repo <name>.`
+    );
+  }
+  const worktree = path.join(workspaceRoot, "repos", ".worktrees", repoName, task.id);
+  const repoDir = (await fs.pathExists(worktree))
+    ? worktree
+    : path.join(workspaceRoot, "repos", repoName);
+  if (!(await fs.pathExists(repoDir))) {
+    throw new Error(`no repo at ${path.relative(workspaceRoot, repoDir)} to run "${options.run}" in.`);
+  }
+
+  // A cloned repo has a declared ref; a symlinked local checkout does not, so the
+  // base is whatever branch that checkout is on — which is what its task worktrees
+  // were branched from.
+  const entry = manifest.repos.find((r) => r.name === repoName);
+  const baseRef =
+    entry && entry.type === "git"
+      ? entry.ref
+      : (await simpleGit(path.join(workspaceRoot, "repos", repoName))
+          .revparse(["--abbrev-ref", "HEAD"])
+          .catch(() => "HEAD")).trim();
+  const measured = await measure(options.run, repoDir, options.timeoutMinutes);
+  const changed = await changedFiles(repoDir, baseRef);
+
+  let base: Measurement | null = null;
+  let baselineError: string | undefined;
+  if (options.baseline) {
+    const point = await branchPoint(repoDir, baseRef);
+    if (!point) {
+      baselineError = `no merge-base between HEAD and ${baseRef}`;
+    } else {
+      const scratch = path.join(workspaceRoot, "repos", ".worktrees", ".baseline", repoName);
+      const attempt = await measureBaseline(
+        repoDir,
+        point,
+        options.run,
+        scratch,
+        options.timeoutMinutes
+      );
+      base = attempt.measurement;
+      baselineError = attempt.error;
+    }
+  }
+
+  const verdict = diagnose(measured, base, changed);
+
+  await appendEvent(workspaceRoot, ts.lastRunId, kind as EventKind, {
+    ...fields,
+    repo: repoName,
+    verified: true,
+    command: measured.command,
+    exitCode: measured.exitCode,
+    durationSec: measured.durationSec,
+    ...(measured.passed !== undefined ? { passed: measured.passed } : {}),
+    ...(measured.failed !== undefined ? { failed: measured.failed } : {}),
+    ...(measured.timedOut ? { timedOut: true } : {}),
+    ...(base ? { baselineExitCode: base.exitCode, baselineFailed: base.failed } : {}),
+    ...(baselineError ? { baselineError } : {}),
+    diagnosis: verdict.diagnosis,
+    needsHuman: verdict.needsHuman,
+    explanation: verdict.explanation,
+    ...(measured.exitCode === 0 ? {} : { tail: measured.tail }),
+  });
+
+  return { measured: true, diagnosis: verdict.diagnosis, needsHuman: verdict.needsHuman };
 }
 
 export interface TaskCompleteResult {
@@ -351,6 +448,35 @@ export async function runTaskComplete(
   // say out loud why it cannot.
   if (outcome === "success" && !options.untested) {
     const priorEvents = await readEvents(workspaceRoot, runId);
+    const measuredPasses = priorEvents.filter(
+      (e) => e.kind === "test" && e.verified === true && e.exitCode === 0
+    );
+    const claims = priorEvents.filter((e) => e.kind === "test" && e.verified !== true);
+
+    if (measuredPasses.length === 0 && claims.length > 0) {
+      throw new Error(
+        `${task.id} cannot close as success on a test event awo did not run.\n` +
+          `  ${claims.length} test event(s) recorded, none measured.\n` +
+          `  Re-record it as a measurement:\n` +
+          `    awo task event ${task.id} test --run "<the command>" --baseline\n` +
+          `  (rule: tests-must-pass — a claim is not evidence. Published analysis of\n` +
+          `   agent-authored tests found ~80% carry weak or no assertions, so "tests\n` +
+          `   passed" as a string is the weakest signal in the workflow.)`
+      );
+    }
+    // A measurement can pass and still be inconclusive — a test edited alongside the
+    // code it covers, or new tests asserting a contract nobody has checked against
+    // the acceptance criteria. Those may close, but only into review.
+    const inconclusive = measuredPasses.filter((e) => e.needsHuman === true);
+    if (inconclusive.length > 0 && !options.gate) {
+      throw new Error(
+        `${task.id} has evidence that needs a human, so it cannot go straight to done.\n` +
+          inconclusive.map((e) => `  ${e.diagnosis}: ${e.explanation}`).join("\n") +
+          `\n  Close it into review instead:\n` +
+          `    awo task complete ${task.id} --outcome success --gate --summary "…"`
+      );
+    }
+
     if (!priorEvents.some((e) => e.kind === "test")) {
       throw new Error(
         `${task.id} cannot close as success with no test evidence (rule: tests-must-pass).\n` +
