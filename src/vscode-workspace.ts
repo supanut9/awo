@@ -26,12 +26,39 @@ export async function regenerateCodeWorkspace(workspaceRoot: string): Promise<vo
     })),
   ];
 
-  const file = path.join(workspaceRoot, `${manifest.projectKey}.code-workspace`);
-  await fs.writeJson(file, { folders, settings: {} }, { spaces: 2 });
-
-  await updateScanRepositories(workspaceRoot, manifest.repos.map((r) =>
+  const repoPaths = manifest.repos.map((r) =>
     r.type === "local" ? r.path : path.join(workspaceRoot, "repos", r.name)
-  ));
+  );
+
+  // The git settings go in the WORKSPACE FILE, not only .vscode/settings.json.
+  //
+  // VS Code's docs are explicit: "only resource (file, folder) settings are applied
+  // when using a multi-root workspace. Settings that affect the entire editor are
+  // ignored." `git.scanRepositories`, `git.autoRepositoryDetection` and Git Graph's
+  // search depth are all window-scoped, so every one of them was silently dropped
+  // the moment the generated .code-workspace was opened — which is the only way this
+  // workspace is meant to be opened. The settings looked correct in
+  // .vscode/settings.json and did nothing (§9 item 69).
+  const file = path.join(workspaceRoot, `${manifest.projectKey}.code-workspace`);
+  const previous = (await fs.readJson(file).catch(() => ({}))) as { settings?: Record<string, unknown> };
+  await fs.writeJson(
+    file,
+    {
+      folders,
+      settings: {
+        ...(previous.settings ?? {}),
+        "git.autoRepositoryDetection": "subFolders",
+        "git.scanRepositories": repoPaths,
+        // Git Graph looks one level down by default; linked repos are two.
+        "git-graph.maxDepthOfRepoSearch": 2,
+      },
+    },
+    { spaces: 2 }
+  );
+
+  // Still written for a plain folder open, where .vscode/settings.json IS the
+  // workspace scope and the same keys do take effect.
+  await updateScanRepositories(workspaceRoot, repoPaths);
 }
 
 /**

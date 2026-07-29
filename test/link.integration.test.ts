@@ -189,3 +189,36 @@ test("connect/add/remove keep git.scanRepositories pointing at real repo paths",
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(repo, { recursive: true, force: true });
 });
+
+test("the generated workspace file carries the git settings, because folder settings cannot", () => {
+  const ws = makeWorkspace();
+  // realpath because macOS resolves /var -> /private/var, and connect stores the
+  // resolved path.
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "awo-vsrepo-")));
+  fs.writeFileSync(path.join(repo, "README.md"), "# x\n");
+  execFileSync(process.execPath, [CLI, "connect", repo, "--name", "api"], { cwd: ws });
+
+  const file = path.join(ws, "TEST.code-workspace");
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8")) as {
+    folders: { name: string; path: string }[];
+    settings: Record<string, unknown>;
+  };
+
+  // VS Code ignores window-scoped settings from a folder's .vscode/settings.json in a
+  // multi-root workspace, and multi-root is the only way this file is opened — so the
+  // settings have to live here or they do nothing at all.
+  assert.deepEqual(cfg.settings["git.scanRepositories"], [repo]);
+  assert.equal(cfg.settings["git.autoRepositoryDetection"], "subFolders");
+  assert.equal(cfg.settings["git-graph.maxDepthOfRepoSearch"], 2);
+
+  // The folder entry points at the real path, never the symlink under repos/.
+  assert.ok(cfg.folders.some((f) => f.name === "api" && f.path === repo));
+
+  // Regenerating must not drop a setting the user added by hand.
+  cfg.settings["editor.tabSize"] = 4;
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+  execFileSync(process.execPath, [CLI, "connect", repo, "--name", "api2"], { cwd: ws });
+  const after = JSON.parse(fs.readFileSync(file, "utf8")) as { settings: Record<string, unknown> };
+  assert.equal(after.settings["editor.tabSize"], 4, "hand-added settings survive regeneration");
+  fs.rmSync(ws, { recursive: true, force: true });
+});

@@ -1830,3 +1830,13 @@ before anything spawns.
     signal it is real.** Adding the approval gate turned 14 passing tests red — all
     of them planning from a bare skeleton. If it had broken nothing it would not
     have been enforcing anything.
+
+69. **A setting in the wrong file is indistinguishable from a setting nobody wrote.**
+    `git.scanRepositories`, `git.autoRepositoryDetection` and Git Graph's search
+    depth were generated into `.vscode/settings.json` and looked right for months.
+    VS Code's docs: *"only resource (file, folder) settings are applied when using a
+    multi-order workspace. Settings that affect the entire editor are ignored."* All
+    three are window-scoped, and the generated `.code-workspace` — the only way this
+    workspace is meant to be opened — carried `"settings": {}`. So Git Graph saw
+    nothing, the config was correct, and nothing pointed at the mismatch. Generated
+    config needs a test asserting *where* it landed, not just what it says.
