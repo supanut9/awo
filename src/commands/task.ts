@@ -189,7 +189,17 @@ export interface TaskRunResult {
  */
 export async function runTaskRun(
   taskId: string,
-  options: { cwd?: string; noWorktree?: boolean; instruction?: string } = {}
+  options: {
+    cwd?: string;
+    noWorktree?: boolean;
+    instruction?: string;
+    /**
+     * Skip the dependsOn gate. Only `recheck` sets this: it verifies work that is
+     * already committed, so refusing because a *predecessor* is unverified blocks
+     * the very act of verifying anything downstream of it.
+     */
+    ignoreDependencies?: boolean;
+  } = {}
 ): Promise<TaskRunResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const manifest = await readManifest(workspaceRoot);
@@ -231,7 +241,7 @@ export async function runTaskRun(
     if (depState.status !== "done") unmet.push(`${depId} (${depState.status})`);
   }
 
-  if (unmet.length > 0) {
+  if (unmet.length > 0 && !options.ignoreDependencies) {
     await mutateState(goal.dir, goal.id, (s) => {
       const ts = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
       if (ts.status === "todo") ts.status = "queued";
@@ -702,7 +712,13 @@ export async function runTaskRecheck(
     reason: "re-opened to attach missing test evidence",
   });
 
-  await runTaskRun(task.id, { cwd: workspaceRoot });
+  await runTaskRun(task.id, {
+    cwd: workspaceRoot,
+    // The work already exists and is committed; the point is to measure it. Refusing
+    // because a predecessor is itself unverified would make an unverified chain
+    // permanently unverifiable, which is the opposite of the intent.
+    ignoreDependencies: true,
+  });
   const measured = await runTaskEvent(task.id, "test", {
     cwd: workspaceRoot,
     run: command,
