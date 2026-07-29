@@ -341,3 +341,71 @@ test("only medium and high effort are selectable; low is normalized", () => {
   assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=medium/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
+  const ws = makeWorkspace();
+  const repoPath = JSON.parse(
+    fs.readFileSync(path.join(ws, ".workspace", "manifest.json"), "utf8")
+  ).repos[0].path as string;
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repoPath });
+  execFileSync("git", ["add", "-A"], { cwd: repoPath });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repoPath });
+
+  awo(ws, ["req", "new", "--title", "Feature"]);
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Tested bit", "--targets", "api"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Untested bit", "--targets", "api"]);
+
+  // One task with evidence, one excused — the gate must be able to tell them apart.
+  awo(ws, ["task", "run", "PL-T1"]);
+  awo(ws, ["task", "event", "PL-T1", "test", "--data", '{"repo":"api","pass":3}']);
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--gate"]);
+  awo(ws, ["task", "run", "PL-T2"]);
+  awo(ws, ["task", "complete", "PL-T2", "--outcome", "success", "--gate", "--untested", "no db"]);
+
+  const v = awo(ws, ["goal", "verify", "PL-G1"]);
+  assert.equal(v.code, 0, v.stderr);
+  // The gate is judgment work, so it always resolves the HIGH tier.
+  assert.match(v.stdout, /high tier — the gate is judgment work/);
+  assert.match(v.stdout, /PL-T1 in-review — repos\/\.worktrees\/api\/PL-T1/);
+  assert.match(v.stdout, /PL-T2 in-review UNTESTED/, "an excused task must be flagged for the reviewer");
+  // Read-only in whichever form the runtime offers: codex `-s read-only`, claude
+  // plan mode. A reviewer that can edit fixes instead of reporting.
+  assert.match(
+    v.stdout,
+    /-s read-only|--permission-mode plan/,
+    "the gate invocation must deny writes"
+  );
+  assert.ok(!/--add-dir/.test(v.stdout), "a read-only run needs no write grants");
+
+  const brief = fs.readFileSync(path.join(ws, "logs", "verify-PL-G1.md"), "utf8");
+  assert.match(brief, /Judge the goal AS A WHOLE/);
+  assert.match(brief, /CONTRACTS BETWEEN them/);
+  assert.match(brief, /feature\/PL-T1/);
+  assert.match(brief, /closed WITHOUT test evidence/);
+
+  // GAP files a requirement rather than fixing silently, and leaves tasks alone.
+  const gap = awo(ws, ["goal", "verdict", "PL-G1", "--gap", "--summary", "contracts disagree", "--note", "unwrap the response"]);
+  assert.equal(gap.code, 0, gap.stderr);
+  assert.match(gap.stdout, /GAP recorded/);
+  assert.match(gap.stdout, /filed: {4}PL-R2/);
+  assert.match(awo(ws, ["task", "list"]).stdout, /PL-T1\tin-review/, "a gap must not close tasks");
+
+  // PASS verifies the in-review tasks, which rolls the goal up to done.
+  const pass = awo(ws, ["goal", "verdict", "PL-G1", "--pass", "--summary", "meets DoD", "--model", "gpt-5.6-sol"]);
+  assert.equal(pass.code, 0, pass.stderr);
+  assert.match(pass.stdout, /verified: PL-T1, PL-T2/);
+  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t2\/2 done/);
+
+  // Both verdicts are in the log, attributed to qa-engineer.
+  const runs = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const gates = runs.filter((r) => r.runId.includes("qa-gate-PL-G1"));
+  assert.equal(gates.length, 2);
+  assert.deepEqual(gates.map((g) => g.status).sort(), ["failed", "success"]);
+
+  const both = awo(ws, ["goal", "verdict", "PL-G1", "--pass", "--gap", "--summary", "x"]);
+  assert.equal(both.code, 1);
+  assert.match(both.stderr, /exactly one of --pass or --gap/);
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});

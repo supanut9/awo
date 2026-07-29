@@ -25,6 +25,7 @@ import { doctorExitCode, runDoctor } from "./commands/doctor.js";
 import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
 import { formatContext, runContext } from "./commands/context.js";
+import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -289,6 +290,57 @@ goal
       const g = await runGoalNew(opts);
       console.log(`${g.id} created at ${g.dir}/ (from ${g.requirementId})`);
       console.log(`Then add tasks: awo task new --goal ${g.id} --name "…" --targets <repo>`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("verify <goalId>")
+  .description(
+    "Assemble the goal-level QA gate: the definition-of-done, every task's branch and diff, and the high-tier invocation to review it read-only (§7.1)."
+  )
+  .action(async (goalId: string) => {
+    try {
+      const r = await runGoalVerify(goalId);
+      console.log(`brief:   ${r.briefPath}`);
+      console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}  (high tier — the gate is judgment work)`);
+      for (const t of r.tasks) {
+        console.log(
+          `  ${t.id} ${t.status}${t.untested ? " UNTESTED" : ""} — ${t.worktree ?? "no worktree found"}${t.commits[0] ? ` — ${t.commits[0]}` : ""}`
+        );
+      }
+      if (r.unfinished.length > 0) {
+        console.log(`\nNOT READY: ${r.unfinished.join(", ")} — the gate judges finished work.`);
+      }
+      console.log(`\nreview with: ${r.invocation}`);
+      console.log(`then record: awo goal verdict ${goalId} --pass|--gap --summary "…"`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("verdict <goalId>")
+  .description("Record the QA gate's outcome: --pass verifies the in-review tasks, --gap files a new requirement.")
+  .option("--pass", "the goal meets its definition of done")
+  .option("--gap", "it does not — file the finding as a requirement")
+  .requiredOption("--summary <text>", "the verdict, in one or two sentences")
+  .option("--note <text...>", "the prioritised changes, risks, follow-ups")
+  .option("--model <model>", "which model produced the verdict")
+  .action(async (goalId: string, opts: { pass?: boolean; gap?: boolean; summary: string; note?: string[]; model?: string }) => {
+    try {
+      if (opts.pass === Boolean(opts.gap)) {
+        throw new Error("Pass exactly one of --pass or --gap.");
+      }
+      const r = await runGoalVerdict(goalId, { ...opts, pass: Boolean(opts.pass) });
+      console.log(`${goalId}: ${r.pass ? "PASS" : "GAP"} recorded.`);
+      if (r.verifiedTasks.length > 0) console.log(`verified: ${r.verifiedTasks.join(", ")}`);
+      if (r.filedRequirement) {
+        console.log(`filed:    ${r.filedRequirement} — turn it into a goal with \`awo goal new --from ${r.filedRequirement}\``);
+      }
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

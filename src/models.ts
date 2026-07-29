@@ -277,6 +277,14 @@ export interface WorkerContext {
   cwd?: string;
   /** Extra paths the worker must be able to write — e.g. the repo holding .git. */
   allow?: string[];
+  /**
+   * Deny writes entirely. Used for the QA gate: a reviewer that can edit is a
+   * reviewer that fixes instead of reporting, and the fix then arrives without a
+   * requirement, a task, or a log entry.
+   */
+  readOnly?: boolean;
+  /** Replace the default task prompt — the gate supplies its own brief. */
+  prompt?: string;
 }
 
 /** The command the orchestrator would run to hand this task to a worker. */
@@ -313,19 +321,25 @@ function invocationFor(
   effort?: string,
   context: WorkerContext = {}
 ): string {
-  const prompt = `Follow instructions/ship-a-change.md for ${taskId}.`;
+  const prompt = context.prompt ?? `Follow instructions/ship-a-change.md for ${taskId}.`;
   const cwd = context.cwd ? ` -C ${context.cwd}` : "";
-  const allow = (context.allow ?? []).map((p) => ` --add-dir ${p}`).join("");
+  // A read-only run needs no write grants; passing them would contradict the intent.
+  const allow = context.readOnly
+    ? ""
+    : (context.allow ?? []).map((p) => ` --add-dir ${p}`).join("");
 
   switch (runtime) {
     case "codex": {
       const eff = effort ? ` -c model_reasoning_effort=${effort}` : "";
-      return `codex exec -m ${model}${eff} -s workspace-write${cwd}${allow} "${prompt}"`;
+      const sandbox = context.readOnly ? " -s read-only" : " -s workspace-write";
+      return `codex exec -m ${model}${eff}${sandbox}${cwd}${allow} "${prompt}"`;
     }
     case "gemini":
       return `gemini -m ${model} -p "${prompt}"`;
     default: {
-      const m = mode === "plan" ? " --permission-mode plan" : "";
+      // Claude has no read-only sandbox flag; plan mode is the nearest equivalent
+      // and is exactly right here — a reviewer should propose, not act (§12.7).
+      const m = context.readOnly || mode === "plan" ? " --permission-mode plan" : "";
       return `claude --model ${model}${m}${cwd}${allow} "${prompt}"`;
     }
   }
