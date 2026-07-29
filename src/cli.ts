@@ -17,7 +17,7 @@ import { runRuleNew } from "./commands/catalog.js";
 import { runInit } from "./commands/init.js";
 import { runAdd } from "./commands/add.js";
 import { runConnect } from "./commands/connect.js";
-import { runList } from "./commands/list.js";
+import { runList, runSetTestCommand } from "./commands/list.js";
 import { runRemove } from "./commands/remove.js";
 import {
   runTaskComplete,
@@ -454,6 +454,23 @@ for (const [name, flag] of [
       }
     });
 }
+
+program
+  .command("test-command <repo> [command]")
+  .description("Declare how a repo verifies itself. With no command, prints the current one.")
+  .action(async (repo: string, command: string | undefined) => {
+    try {
+      const r = await runSetTestCommand(repo, command);
+      console.log(
+        r.testCommand
+          ? `${r.name}: ${r.testCommand}`
+          : `${r.name}: no test command declared — \`task event --run\` will need one each time.`
+      );
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
 
 program
   .command("resolve [file]")

@@ -12,9 +12,26 @@ skills, workflow instructions — and links to one or more working repos where t
 real code lives. The workspace holds **how agents work on your code**, never the
 code itself.
 
+**New here? Read [GUIDE.md](GUIDE.md)** — the manual: the sequence you actually
+follow, what each gate is for, and what to do when something goes wrong. Its last
+section, [before you use this on something that
+matters](GUIDE.md#15-before-you-use-this-on-something-that-matters), is the honest
+list of gaps.
+
 > **Package name:** published as **`@supanut9/awo`** — the unscoped `awo` was taken
 > on npm by an unrelated 2022 placeholder. The installed **command is `awo`**, so
 > only the install string differs.
+
+## The three things it will not let an agent do
+
+1. **Claim a test passed.** `awo` runs the command itself and records the exit code,
+   duration and counts. A `test` event you typed is refused at the gate — because
+   published analysis of agent-authored test patches finds ~80% carry weak or no
+   assertions, so "tests passed" as prose is the weakest signal there is.
+2. **Start work from an unapproved requirement.** Planning needs a human to accept the
+   acceptance criteria. That is the one gate that cannot be delegated, and it is on the
+   shortest artefact in the workflow rather than on 2,000 lines of diff.
+3. **Grade its own work.** `awo run` stops before the QA verdict, `--yolo` included.
 
 ## Why
 
@@ -43,9 +60,11 @@ awo req approve SHOP-R1                  # THE human gate — planning needs thi
 awo goal new --from SHOP-R1              # requirement -> goal
 awo task new --goal SHOP-G1 --name "Read endpoint" --targets my-api --agent software-engineer
 
-awo task run SHOP-T1                     # opens the run, creates the worktree,
-                                          # prints which model should do it
-awo task event SHOP-T1 test --data '{"repo":"my-api","pass":42}'
+awo test-command my-api "npm test"       # declare how the repo verifies itself, once
+
+awo task run SHOP-T1 --instruction "…"   # opens the run, creates the worktree,
+                                          # resolves the model, records the brief
+awo task event SHOP-T1 test --run "npm test" --baseline   # awo RUNS it and records
 awo task complete SHOP-T1 --outcome success --gate
 awo task evidence SHOP-T1 --criterion 1 --kind test --ref "npm test"
 awo goal trace SHOP-G1
@@ -132,6 +151,7 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | `awo add <url> [--ref]` | Clone and register a git repo. |
 | `awo connect <path>` | Symlink an existing local checkout. |
 | `awo list` | Linked repos and their status (present / missing / dirty). |
+| `awo test-command <repo> [cmd]` | Declare how a repo verifies itself. Set it once; the evidence gate uses it. |
 | `awo sync` | Reconcile `repos/` with the manifest — clones what's missing, fast-forwards clean checkouts, never touches dirty ones. |
 | `awo remove <name>` | Unlink. |
 
@@ -332,6 +352,15 @@ git push --follow-tags
 npm publish              # prepublishOnly builds, runs the suite, verifies the tarball
 ```
 
+## Documentation
+
+| file | what it is |
+|---|---|
+| **[GUIDE.md](GUIDE.md)** | The manual. Start here: setup, intake, evidence, gates, troubleshooting, and the pre-flight list. |
+| `README.md` | This file: overview and command reference. |
+| `PROJECT_PLAN.md` | The design and its history — locked decisions, and 78 recorded findings. |
+| `AGENTS.md` (in a workspace) | What agents read. Canonical; `CLAUDE.md`/`GEMINI.md` point at it. |
+
 ## Design
 
 `PROJECT_PLAN.md` is the full design: locked architecture decisions (§3), workspace
@@ -339,6 +368,11 @@ anatomy (§4), the work hierarchy (§7.2), logs (§7.3), the status model (§7.4
 local UI (§7.5), publishing (§7.6), versioning and upgrade (§11), model tiering
 (§12), and session orientation (§13).
 
-§9 is worth reading on its own: **50+ recorded findings** from actually using the
-tool, each with what broke and what it taught. Most of the enforcement above exists
-because something went wrong first.
+§9 is worth reading on its own: **78 recorded findings** from actually using the
+tool, each with what broke and what it taught. Nearly every rail above exists because
+something went wrong first — a worker editing a repo outside its targets, six tasks
+each passing and composing into a broken feature, a gate that turned out to be
+checking for the presence of a sentence.
+
+§16 covers where the human belongs and why reviewing every diff cannot work; §17
+covers customising a workspace without fighting the upgrade.

@@ -50,6 +50,21 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
   };
   await scanConflicts(root);
 
+  // ---- repos with no declared verification ----
+  // Without one, every measurement carries an inline command, so each agent invents
+  // its own — and an agent choosing the verification is the same failure as an agent
+  // asserting the result.
+  for (const repo of manifest.repos) {
+    if (!repo.testCommand) {
+      add({
+        severity: "info",
+        area: "repos",
+        message: `${repo.name} has no testCommand, so agents must invent one per run`,
+        fix: `awo test-command ${repo.name} "<how this repo runs its tests>"`,
+      });
+    }
+  }
+
   // ---- rules that AGENTS.md never mentions ----
   // Rules are ambient: an agent finds them because AGENTS.md lists them. A rule file
   // added without that line is a rule that exists and is never read — which is how
