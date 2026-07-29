@@ -1,7 +1,7 @@
 ---
 id: pm-to-pr
 name: PM requirement to human-approved PR
-description: The operating playbook for turning a PM request into a validated PR without AI self-approval or merge
+description: The operating playbook for turning a PM request into a validated PR with configured merge authority
 owner: product-manager
 appliesTo: [{{PROJECT_KEY}}-R]
 ---
@@ -30,10 +30,11 @@ expected outcome is a review-ready pull request.
 5. **Open and maintain the PR** — `release-engineer` commits, pushes the task
    branch, opens a PR with evidence, then repeatedly addresses actionable
    comments and failing checks. Re-request review after every meaningful push.
-6. **Stop at the human boundary** — when required checks pass and all
-   actionable threads are resolved, request a human review and mark the PR
-   ready for human approval. Do not approve, merge, enable auto-merge, or enter
-   a merge queue (rule: `human-approval-required`).
+6. **Finish at the configured boundary** — when required checks pass and all
+   actionable threads are resolved, follow `pullRequests.mergePolicy`. The
+   default is **ready for human approval**. An authorised maintainer may merge
+   only after confirming GitHub's required checks and reviews; AI never
+   approves, enables auto-merge, or enters a merge queue.
 
 ## Definition of ready for human approval
 
@@ -42,12 +43,13 @@ expected outcome is a review-ready pull request.
 - Goal-level acceptance criteria passed, or any accepted gap is explicitly
   documented and owned by a follow-up requirement.
 - Every actionable review comment is addressed or has a documented resolution.
-- A human reviewer has been requested. The AI does not count as an approver.
+- All repository-required reviews are satisfied. The AI never counts as an
+  approver.
 
 ## Repository enforcement baseline
 
-The workspace policy is not a substitute for repository permissions. On every
-target repository, require at least one approving review, disable bypass for
-the AI credential, and ensure an AI-authored PR cannot satisfy that review
-requirement itself. Keep merge authority with humans or a separately governed
-release system.
+The workspace policy is not a substitute for repository permissions. Set
+`pullRequests.mergePolicy` to `human-only` for company repositories that need a
+colleague/release owner to merge. Set it to `authorized-maintainer` only for an
+account that is intentionally allowed to merge after GitHub's required checks
+and reviews pass. Never rely on an AI approval.

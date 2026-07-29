@@ -58,14 +58,15 @@ awo ui                                    # local dashboard on 127.0.0.1
 ## PM requirement to human-approved PR
 
 `awo` is designed for the practical AI-era engineering loop: a PM supplies the
-outcome; agents turn it into scoped, testable work; and a human keeps the final
-repository authority. The end state is a validated pull request **ready for
-human approval**, never an AI-approved or AI-merged change.
+outcome; agents turn it into scoped, testable work; and GitHub branch rules
+remain the final authority. The default end state is a validated pull request
+**ready for human approval**. An explicitly authorised maintainer account may
+merge after every repository-required check and review is satisfied.
 
 ```text
 PM request -> requirement -> goal and task plan -> isolated implementation
            -> measured tests and QA -> open PR -> fix checks and review feedback
-           -> ready for human approval -> human approves and merges
+           -> ready for human approval -> human or authorised maintainer merges
 ```
 
 Start a request like this:
@@ -88,15 +89,15 @@ awo goal verify SHOP-G1
 
 For the complete generated-workspace procedure, use
 `instructions/pm-to-pr.md`. `release-engineer` may open a PR and repeatedly
-fix actionable comments or failed checks. It must stop after requesting human
-review; `human-approval-required` prohibits AI approval, merge, auto-merge, and
-merge-queue actions.
+fix actionable comments or failed checks. It never submits an approval. By
+default it stops after requesting human review; set
+`pullRequests.mergePolicy` to `authorized-maintainer` only when that account is
+intentionally permitted to merge after GitHub-required checks and reviews pass.
 
-To make that boundary technical as well as procedural, configure each target
-repository to require a human approving review, deny bypass to the AI
-credential, and reserve merge authority for humans or a separately governed
-release system. AWO cannot revoke capabilities from an arbitrary GitHub token
-that an external agent runtime already holds.
+Configure branch protection/rulesets to match your team. In a company repo,
+require colleague approval and keep `human-only`. In a solo/maintainer repo,
+GitHub can permit the authorised account to merge after its configured checks.
+AWO cannot grant or revoke capabilities from an external GitHub credential.
 
 ## Commands
 

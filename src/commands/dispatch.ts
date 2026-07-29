@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import fs from "fs-extra";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
+import { readManifest, resolvePullRequestMergePolicy } from "../manifest.js";
 import { appendEvent, workerLogFile } from "../runs.js";
 import { runTaskComplete, runTaskRun, type TaskRunResult } from "./task.js";
 
@@ -72,6 +73,7 @@ export async function runDispatch(
 
   const opened: TaskRunResult = await runTaskRun(taskId, { cwd: root });
   const runId = opened.runId;
+  const mergePolicy = resolvePullRequestMergePolicy(await readManifest(root));
 
   const usable = opened.worktrees.filter((w) => !w.error);
   const cwd = usable[0] ? path.join(root, usable[0].path) : root;
@@ -83,7 +85,9 @@ export async function runDispatch(
       ? `You are in an isolated git worktree on ${usable[0].branch}. Work ONLY here — never in repos/<name> directly.`
       : `WARNING: no worktree isolation was established. Be conservative.`,
     `Record what you ran, then commit on this branch. Do not push and do not open a PR.`,
-    `Non-negotiable boundary: do not approve, merge, enable auto-merge, or queue any pull request. AI work ends at a PR ready for authenticated human approval.`,
+    mergePolicy === "authorized-maintainer"
+      ? `Non-negotiable boundary: never approve a pull request. An authorised maintainer may merge only after GitHub confirms every repository-required check and review is satisfied; do not enable auto-merge or a merge queue.`
+      : `Non-negotiable boundary: do not approve, merge, enable auto-merge, or queue any pull request. AI work ends at a PR ready for authenticated human approval.`,
     options.instruction ?? "",
     "",
     opened.body,

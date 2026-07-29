@@ -21,7 +21,8 @@ Sequence for delivering a task (`{{PROJECT_KEY}}-T#`):
    (rule: `pr-requirements`) — release-engineer.
 7. **resolve-pr** — iterate until required checks pass and actionable feedback
    is resolved — release-engineer / code-reviewer.
-8. Request human review and stop at **ready for human approval**. An AI worker
-   must not approve or merge; human/release authority owns that final action
-   (rule: `human-approval-required`). The run is captured under `logs/` with
-   the task ID.
+8. Follow `pullRequests.mergePolicy`: `human-only` stops at **ready for human
+   approval**; `authorized-maintainer` may merge after verifying GitHub's
+   required checks and reviews. An AI worker never approves, enables
+   auto-merge, or queues a PR (rule: `human-approval-required`). The run is
+   captured under `logs/` with the task ID.

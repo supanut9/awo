@@ -1840,3 +1840,15 @@ before anything spawns.
     workspace is meant to be opened — carried `"settings": {}`. So Git Graph saw
     nothing, the config was correct, and nothing pointed at the mismatch. Generated
     config needs a test asserting *where* it landed, not just what it says.
+
+70. **`regenerateCodeWorkspace` wrote `settings: {}` — it did not just miss the git
+    settings, it deleted them.** Every `add`, `connect`, `remove` and `sync`
+    overwrote the file with an empty settings block, so anything Git Graph or the
+    user put there vanished on the next repo operation. That is why the graph
+    "kept disappearing" rather than simply never working: it was being reset,
+    repeatedly, by ordinary commands. Generated files must merge what they do not
+    own.
+71. **A rule file nobody lists is a rule nobody reads.** `evidence-not-claims`
+    shipped in 0.0.36 as a required rule and was absent from `AGENTS.md`'s always-on
+    list for four versions — present on disk, ambient in name only. `doctor` now
+    reports any `rules/*.md` that `AGENTS.md` never mentions.

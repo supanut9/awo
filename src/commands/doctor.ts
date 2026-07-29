@@ -49,6 +49,27 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
     }
   };
   await scanConflicts(root);
+
+  // ---- rules that AGENTS.md never mentions ----
+  // Rules are ambient: an agent finds them because AGENTS.md lists them. A rule file
+  // added without that line is a rule that exists and is never read — which is how
+  // `evidence-not-claims` shipped in 0.0.36 and went unmentioned for four versions.
+  const agentsFile = path.join(root, "AGENTS.md");
+  const agentsText = await fs.readFile(agentsFile, "utf8").catch(() => "");
+  if (agentsText) {
+    for (const file of await fs.readdir(path.join(root, "rules")).catch(() => [])) {
+      if (!file.endsWith(".md")) continue;
+      const id = file.replace(/\.md$/, "");
+      if (!agentsText.includes(id)) {
+        add({
+          severity: "warn",
+          area: "workspace",
+          message: `rule "${id}" exists but AGENTS.md never mentions it, so agents will not apply it`,
+          fix: `add a line for it under "## Always-on rules" in AGENTS.md`,
+        });
+      }
+    }
+  }
   for (const rel of conflicts) {
     add({
       severity: "warn",

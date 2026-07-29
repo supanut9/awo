@@ -36,6 +36,17 @@ export interface ModelPolicyEntry {
   byRole?: Record<string, ModelChoiceEntry>;
 }
 
+/**
+ * Who may perform the final merge. Approval is never delegated to an AI worker;
+ * `authorized-maintainer` only permits an existing maintainer credential to merge
+ * after the repository's own required checks and reviews are satisfied.
+ */
+export type PullRequestMergePolicy = "human-only" | "authorized-maintainer";
+
+export interface PullRequestPolicy {
+  mergePolicy?: PullRequestMergePolicy;
+}
+
 export interface Manifest {
   libraryVersion: string;
   /**
@@ -50,6 +61,8 @@ export interface Manifest {
   createdAt: string;
   /** §12 — model tiering policy. Absent means built-in defaults apply. */
   models?: ModelPolicyEntry;
+  /** PR authority. Absent preserves the safe human-only default. */
+  pullRequests?: PullRequestPolicy;
   /**
    * §7.6 — optional publishing of a projection to MongoDB. Absent means no
    * publishing and no network calls; the connection string never lives here, only
@@ -89,4 +102,14 @@ export async function readManifest(workspaceRoot: string): Promise<Manifest> {
 
 export async function writeManifest(workspaceRoot: string, manifest: Manifest): Promise<void> {
   await fs.writeJson(manifestPath(workspaceRoot), manifest, { spaces: 2 });
+}
+
+export function resolvePullRequestMergePolicy(manifest: Manifest): PullRequestMergePolicy {
+  const policy = manifest.pullRequests?.mergePolicy ?? "human-only";
+  if (policy !== "human-only" && policy !== "authorized-maintainer") {
+    throw new Error(
+      `Invalid pullRequests.mergePolicy "${String(policy)}". Valid: human-only, authorized-maintainer.`
+    );
+  }
+  return policy;
 }

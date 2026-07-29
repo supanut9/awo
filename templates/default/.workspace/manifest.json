@@ -4,5 +4,8 @@
   "projectKey": "{{PROJECT_KEY}}",
   "projectName": "{{PROJECT_KEY}}",
   "createdAt": "{{CREATED_AT}}",
+  "pullRequests": {
+    "mergePolicy": "human-only"
+  },
   "repos": []
 }

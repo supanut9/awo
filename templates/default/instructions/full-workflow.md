@@ -33,10 +33,11 @@ alternatives to it. Use this file when asked "what's our normal workflow."
      originating goal/task. Re-enters at **Intake**, triaged by
      `product-manager` like any other ask. The goal itself is not blocked
      indefinitely by this — scope the fix as new/follow-up work.
-5. **Human approval and merge** — owner: an authenticated human reviewer or
-   separately governed release process. AI may keep fixing the PR until all
-   required checks and actionable threads are resolved, then it stops at
-   **ready for human approval**. It never approves or merges (rule:
+5. **Merge authority** — owner: the party configured by
+   `pullRequests.mergePolicy`. AI may keep fixing the PR until all required
+   checks and actionable threads are resolved. `human-only` stops at **ready
+   for human approval**; `authorized-maintainer` may merge after verifying
+   GitHub's required checks and reviews. AI never approves (rule:
    `human-approval-required`).
 
 ## Not part of this flow (run alongside, not as a gate)

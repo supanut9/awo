@@ -127,9 +127,12 @@ test("awo init installs a human-only PR approval boundary", () => {
 
   const rule = fs.readFileSync(path.join(tmpDir, "rules", "human-approval-required.md"), "utf8");
   const workflow = fs.readFileSync(path.join(tmpDir, "instructions", "pm-to-pr.md"), "utf8");
-  assert.match(rule, /MUST NOT:[\s\S]*submit an approving review/);
-  assert.match(rule, /MUST NOT:[\s\S]*merge, auto-merge, queue/);
-  assert.match(workflow, /ready for human approval/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(tmpDir, ".workspace", "manifest.json"), "utf8"));
+  assert.match(rule, /MUST NOT[\s\S]*submit an approving review/);
+  assert.match(rule, /human-only[\s\S]*ready for human approval/);
+  assert.match(rule, /authorized-maintainer[\s\S]*may merge/);
+  assert.match(workflow, /pullRequests\.mergePolicy/);
+  assert.equal(manifest.pullRequests.mergePolicy, "human-only");
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

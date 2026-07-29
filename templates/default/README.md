@@ -49,7 +49,9 @@ next, so you don't spend tokens scanning the tree.
 - **Work happens in the task's worktree**, never in `repos/<name>` directly. `awo task run`
   creates it and tells you the path.
 - **AI stops at a review-ready PR.** It may open and fix a PR, but a human must
-  approve and merge it (`rules/human-approval-required.md`).
+  approve it. An authorised maintainer may merge only when
+  `pullRequests.mergePolicy` permits it and GitHub's requirements pass
+  (`rules/human-approval-required.md`).
 
 Nothing here reads or writes outside this directory. Connector credentials are the one
 exception and live in `.workspace/credentials/` (gitignored, per-machine).
