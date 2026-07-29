@@ -17,8 +17,9 @@ alternatives to it. Use this file when asked "what's our normal workflow."
    Goal → tasks (`{{PROJECT_KEY}}-T#`), each with `targets` and `dependsOn`. Tasks wait
    `todo` for human approval before running (draft → approve gate).
    Goal moves to `status: in-progress`.
-3. **Build & ship** — owners: `software-engineer` / `data-engineer` (build),
-   `release-engineer` (ship), `code-reviewer` (approve). Instruction:
+3. **Build & open PR** — owners: `software-engineer` / `data-engineer` (build),
+   `release-engineer` (PR maintenance), `code-reviewer` (technical assessment).
+   Instruction:
    `ship-a-change`. Runs **once per task**, and tasks on different repos can
    run in parallel; tasks on the same repo get isolated worktrees
    (rule: `isolate-task-worktrees`).
@@ -32,6 +33,11 @@ alternatives to it. Use this file when asked "what's our normal workflow."
      originating goal/task. Re-enters at **Intake**, triaged by
      `product-manager` like any other ask. The goal itself is not blocked
      indefinitely by this — scope the fix as new/follow-up work.
+5. **Human approval and merge** — owner: an authenticated human reviewer or
+   separately governed release process. AI may keep fixing the PR until all
+   required checks and actionable threads are resolved, then it stops at
+   **ready for human approval**. It never approves or merges (rule:
+   `human-approval-required`).
 
 ## Not part of this flow (run alongside, not as a gate)
 - **`audit`** — reviews `logs/` for compliance periodically or on request.

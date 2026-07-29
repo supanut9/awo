@@ -121,6 +121,19 @@ test("awo init --key PROM matches the PROM-workspace reference", () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+test("awo init installs a human-only PR approval boundary", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "awo-init-human-approval-"));
+  execFileSync(process.execPath, [CLI, "init", "--key", "PROM"], { cwd: tmpDir });
+
+  const rule = fs.readFileSync(path.join(tmpDir, "rules", "human-approval-required.md"), "utf8");
+  const workflow = fs.readFileSync(path.join(tmpDir, "instructions", "pm-to-pr.md"), "utf8");
+  assert.match(rule, /MUST NOT:[\s\S]*submit an approving review/);
+  assert.match(rule, /MUST NOT:[\s\S]*merge, auto-merge, queue/);
+  assert.match(workflow, /ready for human approval/);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
 test("awo init rejects a non-empty target directory", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "awo-init-nonempty-"));
   fs.writeFileSync(path.join(tmpDir, "existing.txt"), "hello");

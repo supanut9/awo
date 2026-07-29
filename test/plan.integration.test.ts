@@ -53,6 +53,28 @@ function dayRows(ws: string): Record<string, unknown>[] {
     .filter((l) => l.type === "run");
 }
 
+/**
+ * Walk a requirement through intake so a test can get to planning.
+ *
+ * Every one of these call sites used to be `goal new --from` on a bare skeleton.
+ * The approval gate (§16) makes that an error on purpose, so the helper does what a
+ * PM agent and a human would: write checkable criteria, propose, approve.
+ */
+function approveRequirement(ws: string, id: string): void {
+  const file = path.join(ws, "requirements", `${id}.md`);
+  const text = fs.readFileSync(file, "utf8");
+  // Idempotent: a test that already walked the gate itself must not walk it twice.
+  if (/^status:\s*approved\s*$/m.test(text)) return;
+  if (!/Given /.test(text)) {
+    fs.writeFileSync(
+      file,
+      text.replace("- _…_", "- Given a precondition, when the action happens, then the outcome holds")
+    );
+  }
+  execFileSync(process.execPath, [CLI, "req", "propose", id], { cwd: ws, stdio: "ignore" });
+  execFileSync(process.execPath, [CLI, "req", "approve", id], { cwd: ws, stdio: "ignore" });
+}
+
 test("req -> goal -> task walks the whole pipeline and allocates IDs in order", () => {
   const ws = makeWorkspace();
 
@@ -65,6 +87,7 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
   assert.match(reqBody, /status: draft/);
   assert.match(reqBody, /source: 'stakeholder: Priya'|source: "stakeholder: Priya"|source: stakeholder/);
   assert.match(reqBody, /## Raw requirement/);
+  approveRequirement(ws, "PL-R1");
 
   // A second requirement takes the next number, not R1 again.
   assert.match(awo(ws, ["req", "new", "--title", "Second ask"]).stdout, /PL-R2/);
@@ -120,6 +143,7 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
 test("a requirement id is never reissued after it moves into a goal folder", () => {
   const ws = makeWorkspace();
   awo(ws, ["req", "new", "--title", "First ask"]);
+  approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
 
   // PL-R1 now lives at goals/PL-G1/requirement.md, invisible in the
@@ -131,6 +155,7 @@ test("a requirement id is never reissued after it moves into a goal folder", () 
   assert.ok(!fs.existsSync(path.join(ws, "requirements", "PL-R1.md")));
 
   // Same for goal ids after a goal exists.
+  approveRequirement(ws, "PL-R2");
   awo(ws, ["goal", "new", "--from", "PL-R2"]);
   assert.match(
     fs.readdirSync(path.join(ws, "goals")).join(" "),
@@ -156,6 +181,7 @@ test("goal new rejects an unknown requirement and names what exists", () => {
 test("task new validates goal, targets and dependsOn before writing anything", () => {
   const ws = makeWorkspace();
   awo(ws, ["req", "new", "--title", "Thing"]);
+  approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
   const goalDir = path.join(ws, "goals", "PL-G1");
 
@@ -182,6 +208,7 @@ test("task new validates goal, targets and dependsOn before writing anything", (
 test("ID allocation skips numbers already used by hand-authored files", () => {
   const ws = makeWorkspace();
   awo(ws, ["req", "new", "--title", "One"]);
+  approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
 
   // Someone hand-authors PL-T1 and PL-T2; the next allocation must be T3.
@@ -201,6 +228,7 @@ test("ID allocation skips numbers already used by hand-authored files", () => {
 test("doctor reports a clean workspace, and finds broken targets, deps and links", () => {
   const ws = makeWorkspace();
   awo(ws, ["req", "new", "--title", "Thing"]);
+  approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Work", "--targets", "api"]);
 
@@ -234,6 +262,7 @@ test("doctor reports a clean workspace, and finds broken targets, deps and links
 test("doctor flags a run that was opened but never closed", () => {
   const ws = makeWorkspace();
   awo(ws, ["req", "new", "--title", "Thing"]);
+  approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Work", "--targets", "api"]);
   awo(ws, ["task", "run", "PL-T1"]);
@@ -292,6 +321,11 @@ test("context orients a new session and says what to do next", () => {
   awo(ws, ["req", "new", "--title", "Thing"]);
   out = awo(ws, ["context"]);
   assert.match(out.stdout, /in intake {5}PL-R1 \(not yet a goal\)/);
+  assert.match(out.stdout, /NEXT.*awo req refine PL-R1/);
+
+  approveRequirement(ws, "PL-R1");
+
+  out = awo(ws, ["context"]);
   assert.match(out.stdout, /NEXT.*awo goal new --from PL-R1/);
 
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
@@ -327,6 +361,7 @@ test("only medium and high effort are selectable; low is normalized", () => {
     fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
   };
   awo(ws, ["req", "new", "--title", "T"]);
+  approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "W", "--targets", "api", "--agent", "software-engineer"]);
 
@@ -372,6 +407,7 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repoPath });
 
   awo(ws, ["req", "new", "--title", "Feature"]);
+  approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Tested bit", "--targets", "api"]);
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Untested bit", "--targets", "api"]);
@@ -433,4 +469,115 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   assert.match(both.stderr, /exactly one of --pass or --gap/);
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("intake gates planning on a human decision, and refuses placeholder criteria", () => {
+  const ws = makeWorkspace();
+
+  awo(ws, ["req", "new", "--title", "FAQ on the PDP"]);
+  assert.match(awo(ws, ["req", "list"]).stdout, /PL-R1\tdraft\t0 criteria/);
+
+  // A wish cannot be planned from.
+  const early = awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  assert.equal(early.code, 1);
+  assert.match(early.stderr, /is draft, not approved/);
+  assert.match(early.stderr, /awo req refine PL-R1/);
+
+  // Nor proposed while the criteria are still the scaffold's placeholder.
+  const placeholder = awo(ws, ["req", "propose", "PL-R1"]);
+  assert.equal(placeholder.code, 1);
+  assert.match(placeholder.stderr, /no acceptance criteria/);
+
+  // Real criteria, in the shape of a test.
+  const file = path.join(ws, "requirements", "PL-R1.md");
+  fs.writeFileSync(
+    file,
+    fs
+      .readFileSync(file, "utf8")
+      .replace(
+        "## Draft acceptance criteria\n- _…_",
+        "## Draft acceptance criteria\n" +
+          "- Given 3 published FAQs, when the PDP loads, then all 3 render in order\n" +
+          "- Given an unpublished FAQ, when the PDP loads, then it is absent"
+      )
+  );
+  const proposed = awo(ws, ["req", "propose", "PL-R1"]);
+  assert.equal(proposed.code, 0, proposed.stderr);
+  assert.match(proposed.stdout, /proposed with 2 acceptance criteria/);
+
+  // Proposed is still not approved: only a person accepts the terms.
+  const waiting = awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  assert.equal(waiting.code, 1);
+  assert.match(waiting.stderr, /is proposed, not approved/);
+  assert.match(waiting.stderr, /2 acceptance criteria to read/);
+
+  // Rejection needs a reason, because one without is unactionable.
+  const noReason = awo(ws, ["req", "reject", "PL-R1"]);
+  assert.equal(noReason.code, 1);
+  assert.match(noReason.stderr, /--reject needs --why/);
+
+  const approved = awo(ws, ["req", "approve", "PL-R1", "--who", "supanut"]);
+  assert.equal(approved.code, 0, approved.stderr);
+  assert.match(approved.stdout, /approved/);
+  assert.match(approved.stdout, /recorded as \d{4}-/, "the decision is in the audit trail");
+
+  assert.equal(awo(ws, ["goal", "new", "--from", "PL-R1"]).code, 0);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("a requirement a human PM already specified skips refinement but not approval", () => {
+  const ws = makeWorkspace();
+  const ticket = path.join(ws, "ticket.md");
+  fs.writeFileSync(
+    ticket,
+    "## Raw requirement\nFrom JIRA SHOP-123.\n\n## Draft acceptance criteria\n- Given a cart, when checkout, then tax is applied\n"
+  );
+
+  const created = awo(ws, [
+    "req", "new", "--title", "Tax at checkout",
+    "--source", "jira:SHOP-123", "--body-file", ticket, "--proposed",
+  ]);
+  assert.equal(created.code, 0, created.stderr);
+  assert.match(created.stdout, /awo req approve PL-R1/, "it goes straight to the human");
+  assert.match(awo(ws, ["req", "list"]).stdout, /PL-R1\tproposed\t1 criteria/);
+
+  // Still gated.
+  assert.equal(awo(ws, ["goal", "new", "--from", "PL-R1"]).code, 1);
+  awo(ws, ["req", "approve", "PL-R1"]);
+  assert.equal(awo(ws, ["goal", "new", "--from", "PL-R1"]).code, 0);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("awo run plans in dependency order and never owns the verdict", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "thing", "--proposed"]);
+  const file = path.join(ws, "requirements", "PL-R1.md");
+  fs.writeFileSync(
+    file,
+    fs.readFileSync(file, "utf8").replace("- _…_", "- Given x, when y, then z")
+  );
+  awo(ws, ["req", "approve", "PL-R1"]);
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  // Declared out of order on purpose: T1 depends on T2.
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Second", "--targets", "api"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "First", "--targets", "api"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Third", "--targets", "api", "--depends-on", "PL-T1"]);
+
+  const plan = awo(ws, ["run", "--goal", "PL-G1", "--dry-run"]);
+  assert.equal(plan.code, 0, plan.stderr);
+  assert.match(plan.stdout, /3 task\(s\), in dependency order/);
+  assert.ok(
+    plan.stdout.indexOf("PL-T1") < plan.stdout.indexOf("PL-T3"),
+    "a dependency must be planned before what depends on it"
+  );
+  assert.match(plan.stdout, /evidence needs a human — always, --yolo included/);
+  assert.match(plan.stdout, /Never: the QA verdict/);
+
+  const scoped = awo(ws, ["run", "--goal", "PL-G1", "--until", "PL-T2", "--dry-run"]);
+  assert.match(scoped.stdout, /2 task\(s\)/);
+
+  const bad = awo(ws, ["run", "--goal", "PL-G1", "--until", "PL-T9", "--dry-run"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /not a task of PL-G1/);
+  fs.rmSync(ws, { recursive: true, force: true });
 });

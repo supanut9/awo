@@ -83,6 +83,7 @@ export async function runDispatch(
       ? `You are in an isolated git worktree on ${usable[0].branch}. Work ONLY here — never in repos/<name> directly.`
       : `WARNING: no worktree isolation was established. Be conservative.`,
     `Record what you ran, then commit on this branch. Do not push and do not open a PR.`,
+    `Non-negotiable boundary: do not approve, merge, enable auto-merge, or queue any pull request. AI work ends at a PR ready for authenticated human approval.`,
     options.instruction ?? "",
     "",
     opened.body,

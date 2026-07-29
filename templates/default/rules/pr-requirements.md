@@ -10,5 +10,9 @@ Every pull request MUST include:
 - A **Testing** section describing how the change was verified.
 - A linked task (`{{PROJECT_KEY}}-T#`) and any related requirement/goal.
 - Passing status checks before merge.
+- At least one approval from an authenticated human reviewer. AI workers may
+  request review and resolve feedback but cannot approve or merge (rule:
+  `human-approval-required`).
 
-Merge strategy: **squash-merge only**, keeping the conventional commit subject.
+After human approval, the repository's authorised human/release process chooses
+the merge strategy. AWO workers stop at a review-ready PR.

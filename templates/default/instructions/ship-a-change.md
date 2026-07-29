@@ -1,7 +1,7 @@
 ---
 id: ship-a-change
 name: Ship a change
-description: End-to-end workflow from code to merged PR for one task
+description: End-to-end workflow from code to a PR ready for human approval for one task
 owner: software-engineer
 appliesTo: [{{PROJECT_KEY}}-T]
 ---
@@ -19,6 +19,9 @@ Sequence for delivering a task (`{{PROJECT_KEY}}-T#`):
    release-engineer.
 6. **open-pr** — open the PR from the task's worktree/branch
    (rule: `pr-requirements`) — release-engineer.
-7. **resolve-pr** — iterate until approved — release-engineer / code-reviewer.
-8. Squash-merge, then remove the task's worktree. The run is captured under
-   `logs/` with the task ID.
+7. **resolve-pr** — iterate until required checks pass and actionable feedback
+   is resolved — release-engineer / code-reviewer.
+8. Request human review and stop at **ready for human approval**. An AI worker
+   must not approve or merge; human/release authority owns that final action
+   (rule: `human-approval-required`). The run is captured under `logs/` with
+   the task ID.

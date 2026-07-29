@@ -58,6 +58,28 @@ function pretendOlder(ws: string, version: string): void {
   setManifest(ws, { libraryVersion: version });
 }
 
+/**
+ * Walk a requirement through intake so a test can get to planning.
+ *
+ * Every one of these call sites used to be `goal new --from` on a bare skeleton.
+ * The approval gate (§16) makes that an error on purpose, so the helper does what a
+ * PM agent and a human would: write checkable criteria, propose, approve.
+ */
+function approveRequirement(ws: string, id: string): void {
+  const file = path.join(ws, "requirements", `${id}.md`);
+  const text = fs.readFileSync(file, "utf8");
+  // Idempotent: a test that already walked the gate itself must not walk it twice.
+  if (/^status:\s*approved\s*$/m.test(text)) return;
+  if (!/Given /.test(text)) {
+    fs.writeFileSync(
+      file,
+      text.replace("- _…_", "- Given a precondition, when the action happens, then the outcome holds")
+    );
+  }
+  execFileSync(process.execPath, [CLI, "req", "propose", id], { cwd: ws, stdio: "ignore" });
+  execFileSync(process.execPath, [CLI, "req", "approve", id], { cwd: ws, stdio: "ignore" });
+}
+
 test("a freshly-initialized workspace has nothing to upgrade", () => {
   const ws = makeWorkspace();
   const out = awo(ws, ["upgrade"]);
@@ -290,6 +312,7 @@ test("upgrade never touches goals, logs or the manifest's repos", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "awo-upgrepo-"));
   awo(ws, ["connect", repo, "--name", "api"]);
   awo(ws, ["req", "new", "--title", "Keep me"]);
+  approveRequirement(ws, "UP-R1");
   awo(ws, ["goal", "new", "--from", "UP-R1"]);
   awo(ws, ["task", "new", "--goal", "UP-G1", "--name", "Work", "--targets", "api"]);
   awo(ws, ["task", "run", "UP-T1"]);

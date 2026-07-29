@@ -12,7 +12,8 @@ next, so you don't spend tokens scanning the tree.
 - `agents/` — the roles. Each declares its skills, rules and model `tier`.
 - `rules/` — always-on policy. Not invoked; ambient.
 - `skills/` — invokable procedures ("how to …").
-- `instructions/` — workflow glue; `full-workflow.md` is the master sequence.
+- `instructions/` — workflow glue; `full-workflow.md` is the master sequence,
+  and `pm-to-pr.md` is the PM request to human-approved PR playbook.
 - `requirements/` — intake: `<KEY>-R#.md`, until a goal is planned from it.
 - `goals/` — one directory per goal (`goals/<KEY>-G#/`), holding `goal.md`, the
   `requirement.md` it came from, and `tasks/<KEY>-T#.md`.
@@ -32,8 +33,8 @@ next, so you don't spend tokens scanning the tree.
 | `awo add <url>` / `awo connect <path>` | Link a working repo (git / local). |
 | `awo sync` | Reconcile `repos/` with the manifest. |
 | `awo list` / `awo doctor` | Repo status / diagnose drift and unfinished work. |
-| `awo req new --title "…"` | Intake: creates `{{PROJECT_KEY}}-R#`. |
-| `awo goal new --from {{PROJECT_KEY}}-R#` | Distil a requirement into a goal. |
+| `awo req new --title "…"` → `req refine` → `req propose` → `req approve` | Intake: capture and human-approve `{{PROJECT_KEY}}-R#`. |
+| `awo goal new --from {{PROJECT_KEY}}-R#` | Distil an approved requirement into a goal. |
 | `awo task new --goal {{PROJECT_KEY}}-G# --name "…" --targets <repo>` | Add a task; allocates `{{PROJECT_KEY}}-T#`. |
 | `awo task run {{PROJECT_KEY}}-T#` | Open a run: creates the worktree, prints the model to use. |
 | `awo task event {{PROJECT_KEY}}-T# test --data '{"repo":"…","pass":42}'` | Record what ran. |
@@ -47,6 +48,8 @@ next, so you don't spend tokens scanning the tree.
   which goes in the log. Individually passing tasks are not evidence that a feature works.
 - **Work happens in the task's worktree**, never in `repos/<name>` directly. `awo task run`
   creates it and tells you the path.
+- **AI stops at a review-ready PR.** It may open and fix a PR, but a human must
+  approve and merge it (`rules/human-approval-required.md`).
 
 Nothing here reads or writes outside this directory. Connector credentials are the one
 exception and live in `.workspace/credentials/` (gitignored, per-machine).

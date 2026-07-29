@@ -3,6 +3,15 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { Command } from "commander";
+import { findWorkspaceRoot } from "./workspace.js";
+import {
+  findCriteria,
+  listRequirements,
+  runReqDecide,
+  runReqPropose,
+  runReqRefine,
+} from "./commands/intake.js";
+import { runAuto } from "./commands/autorun.js";
 import { runInit } from "./commands/init.js";
 import { runAdd } from "./commands/add.js";
 import { runConnect } from "./commands/connect.js";
@@ -325,16 +334,152 @@ req
   .description("Create the next requirement skeleton (allocates <KEY>-R#).")
   .requiredOption("--title <title>", "what is being asked for")
   .option("--source <source>", "where the ask came from (stakeholder, ticket, …)")
-  .action(async (opts: { title: string; source?: string }) => {
+  .option("--body-file <path>", "import an existing ticket's text instead of retyping it")
+  .option("--proposed", "a human PM already wrote the criteria — skip refinement, not approval")
+  .action(async (opts: { title: string; source?: string; bodyFile?: string; proposed?: boolean }) => {
     try {
       const r = await runReqNew(opts);
       console.log(`${r.id} created at ${r.file}`);
-      console.log(`Refine it, then: awo goal new --from ${r.id}`);
+      console.log(
+        opts.proposed
+          ? `Read the criteria, then: awo req approve ${r.id}`
+          : `Next: awo req refine ${r.id}   (the PM role writes acceptance criteria)`
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
     }
   });
+
+req
+  .command("list")
+  .description("Requirements and where each one is in intake.")
+  .action(async () => {
+    try {
+      const rows = await listRequirements(findWorkspaceRoot(process.cwd()));
+      if (rows.length === 0) {
+        console.log('No requirements yet. Capture one with `awo req new --title "…"`.');
+        return;
+      }
+      for (const r of rows) {
+        const criteria = findCriteria(r.body).length;
+        console.log(
+          `${r.id}\t${r.status}\t${criteria} criteria\t${r.goalId ? `-> ${r.goalId}` : "unplanned"}\t${r.title}`
+        );
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+req
+  .command("refine <reqId>")
+  .description("Hand the requirement to the product-manager role to write acceptance criteria.")
+  .action(async (reqId: string) => {
+    try {
+      const r = await runReqRefine(reqId);
+      console.log(`brief:   ${r.briefRunId}`);
+      console.log(`model:   ${r.model}  (high tier — specification is judgment work)`);
+      console.log("");
+      console.log(r.invocation);
+      console.log("");
+      console.log(`Then it runs: awo req propose ${r.id}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+req
+  .command("propose <reqId>")
+  .description("Mark a refined requirement ready for human approval (agents run this).")
+  .action(async (reqId: string) => {
+    try {
+      const r = await runReqPropose(reqId);
+      console.log(`${r.id} proposed with ${r.criteria.length} acceptance criteria:`);
+      for (const c of r.criteria) console.log(`  - ${c}`);
+      console.log(`\nWaiting on a human: awo req approve ${r.id}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+for (const [name, flag] of [
+  ["approve", "approve"],
+  ["reject", "reject"],
+] as const) {
+  req
+    .command(`${name} <reqId>`)
+    .description(
+      flag === "approve"
+        ? "Accept the terms of the work. Planning cannot start without this."
+        : "Send it back, with the reason recorded."
+    )
+    .option("--why <text>", "reason (required to reject)")
+    .option("--who <name>", "who decided (default: human)")
+    .action(async (reqId: string, opts: { why?: string; who?: string }) => {
+      try {
+        const r = await runReqDecide(reqId, { ...opts, [flag]: true });
+        console.log(`${r.id} ${r.status} — ${r.title}`);
+        if (r.status === "approved") {
+          console.log(`${r.criteria.length} criteria accepted. Next: awo goal new --from ${r.id}`);
+        }
+        console.log(`recorded as ${r.runId}`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+}
+
+program
+  .command("run")
+  .description("Work a goal's tasks in dependency order, stopping before the QA verdict.")
+  .requiredOption("--goal <goalId>", "which goal to work")
+  .option("--until <taskId>", "stop after this task, inclusive")
+  .option("--yolo", "keep going past a failed task (never past the gate)")
+  .option("--dry-run", "show the plan and the stopping conditions, run nothing")
+  .option("--max-tasks <n>", "safety cap (default 25)", (v) => parseInt(v, 10))
+  .option("--timeout <minutes>", "per-worker timeout (default 45)", (v) => parseInt(v, 10))
+  .action(
+    async (opts: {
+      goal: string;
+      until?: string;
+      yolo?: boolean;
+      dryRun?: boolean;
+      maxTasks?: number;
+      timeout?: number;
+    }) => {
+      try {
+        const r = await runAuto({
+          goal: opts.goal,
+          until: opts.until,
+          yolo: opts.yolo,
+          dryRun: opts.dryRun,
+          maxTasks: opts.maxTasks,
+          timeoutMinutes: opts.timeout,
+        });
+        if (r.dryRun) {
+          console.log(r.message);
+          return;
+        }
+        for (const s of r.steps) {
+          console.log(`  ${s.taskId}\t${s.outcome}\t${s.model}\t${s.runId}`);
+        }
+        console.log("");
+        console.log(`stopped: ${r.stoppedBecause}`);
+        console.log(r.message);
+        if (r.stoppedBecause === "task-failed" || r.stoppedBecause === "needs-human") {
+          process.exitCode = 1;
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    }
+  );
 
 const goal = program.command("goal").description("Goals: the objective distilled from a requirement (§7.2).");
 

@@ -67,6 +67,10 @@ export async function runReqNew(options: {
   title: string;
   cwd?: string;
   source?: string;
+  /** Content from an existing ticket, so an already-specified ask is not retyped. */
+  bodyFile?: string;
+  /** Skip refinement: a human PM already wrote the criteria. Still needs approval. */
+  proposed?: boolean;
 }): Promise<ReqNewResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { projectKey } = await readManifest(root);
@@ -76,8 +80,14 @@ export async function runReqNew(options: {
   // Frontmatter is serialized by the YAML library, never string-interpolated:
   // a title or source containing ":" or "#" would otherwise produce a file
   // that no longer parses.
+  const imported = options.bodyFile
+    ? await fs.readFile(path.resolve(options.cwd ?? process.cwd(), options.bodyFile), "utf8")
+    : "";
+
   const body = matter.stringify(
-    `\n# ${options.title}\n\n## Raw requirement
+    imported
+      ? `\n# ${options.title}\n\n${imported.trim()}\n`
+      : `\n# ${options.title}\n\n## Raw requirement
 _Verbatim of what was asked._
 
 ## Clarifications
@@ -90,7 +100,9 @@ _Q&A gathered during intake._
       id,
       type: "requirement",
       title: options.title,
-      status: "draft",
+      // `--proposed` says a human already specified this, so it skips refinement —
+      // but never approval. Only a person can accept the terms of the work.
+      status: options.proposed ? "proposed" : "draft",
       source: options.source ?? "unspecified",
       createdAt: new Date().toISOString(),
       goalId: null,
@@ -136,6 +148,24 @@ export async function runGoalNew(options: {
   // Directory is the ID alone. A slug here was truncated at 40 characters, so real
   // titles produced names cut mid-word with a trailing hyphen, and editing a title
   // would have stranded the path. The title lives in frontmatter, where it can change.
+  // §16 — the gate. Planning from an unapproved requirement is how a wish becomes
+  // six tasks and a broken feature: every task inherits the ambiguity, and the cost
+  // of resolving it multiplies by the number of workers already building on it.
+  const { readRequirement, findCriteria } = await import("./intake.js");
+  const req = await readRequirement(root, options.from);
+  if (req.status !== "approved") {
+    throw new Error(
+      `${options.from} is ${req.status}, not approved — planning cannot start from it.\n` +
+        (req.status === "draft"
+          ? `  Have the PM role write acceptance criteria:  awo req refine ${options.from}\n`
+          : req.status === "proposed"
+            ? `  It is waiting on you:  awo req approve ${options.from}\n` +
+              `  (${findCriteria(req.body).length} acceptance criteria to read in ${req.file})\n`
+            : `  It was rejected${req.data.decisionNote ? `: ${String(req.data.decisionNote)}` : ""}.\n` +
+              `  Revise ${req.file}, then:  awo req propose ${options.from}\n`)
+    );
+  }
+
   const dir = path.join(root, "goals", id);
   await fs.ensureDir(path.join(dir, "tasks"));
 

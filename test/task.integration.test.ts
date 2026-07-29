@@ -110,6 +110,28 @@ function dayRows(ws: string): Record<string, unknown>[] {
     .filter((l) => l.type === "run");
 }
 
+/**
+ * Walk a requirement through intake so a test can get to planning.
+ *
+ * Every one of these call sites used to be `goal new --from` on a bare skeleton.
+ * The approval gate (§16) makes that an error on purpose, so the helper does what a
+ * PM agent and a human would: write checkable criteria, propose, approve.
+ */
+function approveRequirement(ws: string, id: string): void {
+  const file = path.join(ws, "requirements", `${id}.md`);
+  const text = fs.readFileSync(file, "utf8");
+  // Idempotent: a test that already walked the gate itself must not walk it twice.
+  if (/^status:\s*approved\s*$/m.test(text)) return;
+  if (!/Given /.test(text)) {
+    fs.writeFileSync(
+      file,
+      text.replace("- _…_", "- Given a precondition, when the action happens, then the outcome holds")
+    );
+  }
+  execFileSync(process.execPath, [CLI, "req", "propose", id], { cwd: ws, stdio: "ignore" });
+  execFileSync(process.execPath, [CLI, "req", "approve", id], { cwd: ws, stdio: "ignore" });
+}
+
 test("task list reads authored frontmatter status before any state exists", () => {
   const ws = makeWorkspace();
   const out = awo(ws, ["task", "list"]);
@@ -807,6 +829,7 @@ function makeEvidenceWorkspace(
   execFileSync(process.execPath, [CLI, "init", "--key", "EV"], { cwd: ws });
   execFileSync(process.execPath, [CLI, "connect", repo], { cwd: ws });
   execFileSync(process.execPath, [CLI, "req", "new", "--title", "thing"], { cwd: ws });
+  approveRequirement(ws, "EV-R1");
   execFileSync(process.execPath, [CLI, "goal", "new", "--from", "EV-R1"], { cwd: ws });
   execFileSync(process.execPath, [CLI, "task", "new", "--goal", "EV-G1", "--name", "Do", "--targets", "api"], { cwd: ws });
   execFileSync(process.execPath, [CLI, "task", "run", "EV-T1"], { cwd: ws });

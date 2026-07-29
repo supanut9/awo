@@ -60,7 +60,17 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
   } else if (todo.length > 0) {
     next = `start ${todo[0].id} — \`awo task run ${todo[0].id}\``;
   } else if (looseRequirements.length > 0) {
-    next = `turn ${looseRequirements[0]} into a goal — \`awo goal new --from ${looseRequirements[0]}\``;
+    const { readRequirement } = await import("./intake.js");
+    const requirement = await readRequirement(root, looseRequirements[0]);
+    if (requirement.status === "draft") {
+      next = `refine ${requirement.id} into checkable criteria — \`awo req refine ${requirement.id}\``;
+    } else if (requirement.status === "proposed") {
+      next = `have a human accept ${requirement.id} — \`awo req approve ${requirement.id}\``;
+    } else if (requirement.status === "rejected") {
+      next = `revise ${requirement.id} and propose it again — \`awo req propose ${requirement.id}\``;
+    } else {
+      next = `turn ${requirement.id} into a goal — \`awo goal new --from ${requirement.id}\``;
+    }
   } else if (snapshot.goals.length === 0) {
     next = `nothing planned yet — \`awo req new --title "…"\``;
   } else {

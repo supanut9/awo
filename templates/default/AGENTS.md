@@ -47,6 +47,8 @@ logs/<date>/workers/                        raw worker output, when dispatched
 - `conventional-commits` — commit messages follow Conventional Commits.
 - `no-push-to-main` — never commit/push directly to `main`; use a PR.
 - `pr-requirements` — every PR needs description, testing section, linked task.
+- `human-approval-required` — AI may prepare and fix a PR but never approve or
+  merge it; human approval is required.
 - `stay-in-scope` — only touch repos declared as a task's `targets`.
 - `isolate-task-worktrees` — concurrent tasks on the same repo never share a working tree.
 - `tests-must-pass` — a task/PR can't proceed with failing or unverified tests.
@@ -75,7 +77,7 @@ boundaries. A human naming a role explicitly always overrides the above.
 - `refine-requirement` — turn a raw ask into a clear, scoped requirement.
 - `create-commit` — stage + commit with a conventional message.
 - `open-pr` — branch, push, open a PR from the template.
-- `resolve-pr` — address review feedback and re-request review.
+- `resolve-pr` — address review feedback until the PR is ready for human approval.
 - `sync-repos` — reconcile `repos/` with the manifest before starting work.
 - `create-task-worktree` — give a task its own isolated git worktree + branch.
 - `run-tests` — run each target repo's declared test command; report pass/fail.
@@ -87,8 +89,8 @@ boundaries. A human naming a role explicitly always overrides the above.
 - `tech-lead` — decomposes a goal into runnable tasks.
 - `software-engineer` — writes the code for a task and verifies it via tests.
 - `qa-engineer` — verifies a goal's definition-of-done as a whole; files gaps as new requirements.
-- `release-engineer` — takes a verified task from code to merged PR.
-- `code-reviewer` — reviews PRs and enforces standards.
+- `release-engineer` — takes a verified task from code to a review-ready PR.
+- `code-reviewer` — reviews PRs and reports readiness; it never approves.
 
 > This is the **default baseline** installed at init — domain-agnostic, just
 > enough for the link → plan → work → ship loop to function. Anything

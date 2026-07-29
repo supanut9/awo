@@ -1770,6 +1770,50 @@ the code it covers — is flagged `test-and-code-changed` and blocked from reach
 *neither file can be the tiebreak*. The acceptance criteria are, and if they do not
 settle it the task belongs in `blocked` with the question.
 
+### 16.4 Intake: the one gate that cannot be delegated
+
+Requirements arrive two ways and both are normal — a PM already wrote one in JIRA,
+or someone says "we need an FAQ on the product page" with nothing behind it.
+Treating those identically is the mistake: the first is specified, the second is a
+wish.
+
+```
+draft ──(PM role writes acceptance criteria)──▶ proposed ──(human)──▶ approved
+                                                    └────────────────▶ rejected
+```
+
+`goal new --from` refuses anything not approved, because planning from a wish is how
+one ambiguity becomes six tasks that each inherit it. `req new --proposed
+--body-file <ticket>` covers the JIRA case: it skips *refinement*, never *approval*.
+Only a person accepts the terms of the work.
+
+`req propose` refuses placeholder criteria — the scaffold's own `- _…_` does not
+count. Given-When-Then is encouraged because it is the shape of a test, which is how
+criteria become machine-checked instead of adding to the review pile.
+
+Every decision is recorded as a run, so the trail shows who authorised the work and
+on what criteria.
+
+### 16.5 `awo run`: scoped autonomy with one non-negotiable stop
+
+```sh
+awo run --goal SHOP-G1 --until SHOP-T3   # explicit scope
+awo run --goal SHOP-G1                   # every ready task, stop at the gate
+awo run --goal SHOP-G1 --yolo            # do not stop on failure either
+```
+
+It stops at the gate, on a failed task, on any dependency awaiting a verdict, and
+**always** on evidence flagged `needsHuman` — `--yolo` included, because continuing
+would build the next task on a result nobody has judged.
+
+`--yolo` relaxes failure-stopping. It does not, and will not, relax the verdict: a
+machine grading its own work is the single thing here that cannot be automated away.
+Everything before the gate is measurable and 0.0.36 made it measured; the verdict is
+judgment against acceptance criteria, which is the human's half.
+
+`--dry-run` prints the plan and every stopping condition, so the scope is inspectable
+before anything spawns.
+
 ### 16.3 Findings
 
 65. **A gate that accepts a string is not a gate.** `tests-must-pass` looked
@@ -1781,3 +1825,8 @@ settle it the task belongs in `blocked` with the question.
 67. **`.git` inside a worktree is a file, not a directory.** The baseline worktree
     was created under `<repo>/.git/`, which cannot exist in a worktree. Anything
     building paths under `.git` has to ask git where the real one is.
+
+68. **A real gate breaks every test that took the old shortcut, and that is the
+    signal it is real.** Adding the approval gate turned 14 passing tests red — all
+    of them planning from a bare skeleton. If it had broken nothing it would not
+    have been enforcing anything.

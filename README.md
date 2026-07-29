@@ -38,6 +38,8 @@ awo add https://github.com/me/web.git    # or clone one
 awo context                              # where things stand, and what to do next
 
 awo req new --title "FAQ on the product page"
+awo req refine SHOP-R1                   # PM role writes acceptance criteria
+awo req approve SHOP-R1                  # THE human gate — planning needs this
 awo goal new --from SHOP-R1              # requirement -> goal
 awo task new --goal SHOP-G1 --name "Read endpoint" --targets my-api --agent software-engineer
 
@@ -49,8 +51,52 @@ awo task complete SHOP-T1 --outcome success --gate
 awo goal verify SHOP-G1                   # assemble the QA gate for a high-tier review
 awo goal verdict SHOP-G1 --pass --summary "meets the definition of done"
 
+awo run --goal SHOP-G1 --until SHOP-T3    # work the plan, stopping before the verdict
 awo ui                                    # local dashboard on 127.0.0.1
 ```
+
+## PM requirement to human-approved PR
+
+`awo` is designed for the practical AI-era engineering loop: a PM supplies the
+outcome; agents turn it into scoped, testable work; and a human keeps the final
+repository authority. The end state is a validated pull request **ready for
+human approval**, never an AI-approved or AI-merged change.
+
+```text
+PM request -> requirement -> goal and task plan -> isolated implementation
+           -> measured tests and QA -> open PR -> fix checks and review feedback
+           -> ready for human approval -> human approves and merges
+```
+
+Start a request like this:
+
+```sh
+awo req new --title "PM outcome in one sentence"
+# The product-manager role refines scope, non-goals, acceptance criteria, and open questions.
+awo req refine SHOP-R1
+# After the criteria are written, the agent proposes them; a human accepts the work.
+awo req propose SHOP-R1
+awo req approve SHOP-R1 --who "PM name"
+awo goal new --from SHOP-R1
+# Plan repo-scoped, dependency-ordered tasks with testable done-when criteria.
+awo task new --goal SHOP-G1 --name "Implement API contract" --targets api --agent software-engineer
+awo task dispatch SHOP-T1
+awo task event SHOP-T1 test --run "npm test" --baseline
+awo task complete SHOP-T1 --outcome success --gate
+awo goal verify SHOP-G1
+```
+
+For the complete generated-workspace procedure, use
+`instructions/pm-to-pr.md`. `release-engineer` may open a PR and repeatedly
+fix actionable comments or failed checks. It must stop after requesting human
+review; `human-approval-required` prohibits AI approval, merge, auto-merge, and
+merge-queue actions.
+
+To make that boundary technical as well as procedural, configure each target
+repository to require a human approving review, deny bypass to the AI
+credential, and reserve merge authority for humans or a separately governed
+release system. AWO cannot revoke capabilities from an arbitrary GitHub token
+that an external agent runtime already holds.
 
 ## Commands
 
@@ -78,7 +124,9 @@ awo ui                                    # local dashboard on 127.0.0.1
 
 | Command | Purpose |
 |---|---|
-| `awo req new --title <t>` | Intake: the next `<KEY>-R#`. |
+| `awo req new --title <t>` | Intake: the next `<KEY>-R#`. `--body-file` imports a ticket; `--proposed` skips refinement. |
+| `awo req refine` · `propose` · `approve` · `reject` · `list` | Turn a wish into checkable criteria, then **a human accepts the terms**. `goal new` refuses anything unapproved. |
+| `awo run --goal <id> [--until <task>] [--yolo]` | Work the plan in dependency order. Stops at the gate, on failure, and always on evidence needing a human. |
 | `awo goal new --from <req>` | Turn a requirement into a goal, moving it in as `requirement.md`. |
 | `awo goal list` · `goal verify` · `goal verdict` | Progress · assemble the QA gate · record its outcome. |
 | `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`. |
