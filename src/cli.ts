@@ -36,6 +36,7 @@ import { runGoalTrace, runTaskEvidence } from "./commands/traceability.js";
 import {
   runPrFinalize,
   runPrLink,
+  runPrMeta,
   runPrPreflight,
   runPrReconcile,
   runPrStatus,
@@ -717,7 +718,16 @@ task
   .option("--targets <repos>", "comma-separated repo names from the manifest", (v) => v.split(","))
   .option("--depends-on <taskIds>", "comma-separated task ids that must finish first", (v) => v.split(","))
   .option("--agent <agent>", "agent that should run it")
-  .action(async (opts: { goal: string; name: string; targets?: string[]; dependsOn?: string[]; agent?: string }) => {
+  .option("--label <name...>", "PR labels for this task — applied only if the repo already has them")
+  .action(
+    async (opts: {
+      goal: string;
+      name: string;
+      targets?: string[];
+      dependsOn?: string[];
+      agent?: string;
+      label?: string[];
+    }) => {
     try {
       const t = await runTaskNew(opts);
       console.log(`${t.id} created at ${t.file}`);
@@ -993,6 +1003,25 @@ task
     }
   });
 
+/**
+ * Reported rather than summarised: a label you believe was applied is worse than one
+ * you know was not, and awo will not create a label to make the list come out even.
+ */
+function reportPrMetadata(
+  m: { assignee: string | null; applied: string[]; unavailable: string[]; titleMissingTask: boolean },
+  taskId: string
+): void {
+  if (m.assignee) console.log(`  assignee: ${m.assignee}`);
+  if (m.applied.length > 0) console.log(`  labels:   ${m.applied.join(", ")}`);
+  if (m.unavailable.length > 0) {
+    console.log(`  not applied — the repo has no such label: ${m.unavailable.join(", ")}`);
+    console.log(`    awo never creates labels. Add it on GitHub first, or drop it from the task.`);
+  }
+  if (m.titleMissingTask) {
+    console.log(`  ! the PR never mentions ${taskId}, so it cannot be traced back from GitHub`);
+  }
+}
+
 const pr = program.command("pr").description("Link, reconcile, and safely finalize GitHub pull requests.");
 
 pr
@@ -1016,15 +1045,41 @@ pr
   .description("Link a task to an existing GitHub PR and persist its live snapshot.")
   .requiredOption("--repo <repo>", "linked repository name")
   .requiredOption("--number <n>", "GitHub PR number", (v) => parseInt(v, 10))
-  .action(async (taskId: string, opts: { repo: string; number: number }) => {
+  .option("--no-meta", "link only: do not set assignee or labels")
+  .action(async (taskId: string, opts: { repo: string; number: number; meta?: boolean }) => {
     try {
-      const linked = await runPrLink({ taskId, ...opts });
+      const linked = await runPrLink({
+        taskId,
+        repo: opts.repo,
+        number: opts.number,
+        noMeta: opts.meta === false,
+      });
       console.log(`${taskId} -> ${linked.repo}#${linked.number} ${linked.url}`);
+      if (linked.metadata) reportPrMetadata(linked.metadata, taskId);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
     }
   });
+
+pr
+  .command("meta <taskId>")
+  .description("Set the linked PR's assignee and labels from the task. Existing labels only.")
+  .option("--label <name...>", "extra labels on top of the task's own")
+  .option("--assignee <login>", "override the assignee (default: the authenticated gh user)")
+  .option("--dry-run", "show what would change without touching the PR")
+  .action(
+    async (taskId: string, opts: { label?: string[]; assignee?: string; dryRun?: boolean }) => {
+      try {
+        const r = await runPrMeta(taskId, opts);
+        console.log(`${taskId} -> ${r.repo}#${r.number}${opts.dryRun ? " (dry run)" : ""}`);
+        reportPrMetadata(r, taskId);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    }
+  );
 
 pr
   .command("status <taskId>")

@@ -85,9 +85,24 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  case "$*" in
+    *title,body*)
+      if [ "$GH_PR_UNTITLED" = "1" ]; then
+        echo '{"title":"some change","body":"no task reference"}'
+      else
+        echo '{"title":"TEST-T1 implement feature","body":"closes TEST-T1"}'
+      fi
+      exit 0 ;;
+  esac
   if [ "$GH_UNREADY" = "1" ]; then echo '${failingPr}'; else echo '${pr}'; fi
   exit 0
 fi
+if [ "$1" = "label" ] && [ "$2" = "list" ]; then
+  echo '[{"name":"shop"},{"name":"performance"},{"name":"ALMO-263"}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then echo "supanut9"; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then exit 0; fi
 if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
   if [ "$GH_NO_THREADS" = "1" ]; then echo '${resolvedThreads}'; else echo '${threads}'; fi
   exit 0
@@ -163,6 +178,79 @@ test("PR control layer links live GitHub state, traces criteria, repairs reviews
     const calls = fs.readFileSync(github.log, "utf8");
     assert.match(calls, /api --method PUT repos\/acme\/api\/pulls\/42\/merge -f merge_method=squash -f sha=abc123/);
     assert.doesNotMatch(calls, /pr review .*--approve/, "AWO must never submit an approval");
+  } finally {
+    github.cleanup();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("linking a PR assigns it and applies only labels the repo actually has", () => {
+  const workspace = makeWorkspace();
+  const github = fakeGithub();
+  try {
+    // The task asks for one real label, one project-wide label, and one that does not
+    // exist in the repo.
+    const taskFile = path.join(
+      workspace, "goals", "TEST-G1-demo", "tasks", "TEST-T1-implement.md"
+    );
+    fs.writeFileSync(
+      taskFile,
+      fs.readFileSync(taskFile, "utf8").replace(
+        "status: todo",
+        "labels: [performance, needs-design]\nstatus: todo"
+      )
+    );
+    const manifestPath = path.join(workspace, ".workspace", "manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest.pullRequests = { ...manifest.pullRequests, labels: ["shop"] };
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+    const out = awo(workspace, ["pr", "link", "TEST-T1", "--repo", "api", "--number", "42"], github.env);
+    assert.equal(out.code, 0, out.stderr);
+
+    assert.match(out.stdout, /assignee: supanut9/);
+    assert.match(out.stdout, /labels: {3}performance, shop/);
+    // Reported by name, not silently dropped.
+    assert.match(out.stdout, /no such label: needs-design/);
+    assert.match(out.stdout, /awo never creates labels/);
+
+    // And the gh call proves it: the missing label is absent from the edit.
+    const calls = fs.readFileSync(github.env.GH_LOG as string, "utf8");
+    assert.match(calls, /pr edit 42 .*--add-label performance/);
+    assert.match(calls, /--add-label shop/);
+    assert.ok(!/--add-label needs-design/.test(calls), "a label the repo lacks must never be sent");
+    assert.match(calls, /--add-assignee supanut9/);
+  } finally {
+    github.cleanup();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("pr meta re-applies metadata, and warns when the PR never names its task", () => {
+  const workspace = makeWorkspace();
+  const github = fakeGithub();
+  try {
+    awo(workspace, ["pr", "link", "TEST-T1", "--repo", "api", "--number", "42", "--no-meta"], github.env);
+    const linkOnly = fs.readFileSync(github.env.GH_LOG as string, "utf8");
+    assert.ok(!/pr edit/.test(linkOnly), "--no-meta must not touch the PR");
+
+    const dry = awo(workspace, ["pr", "meta", "TEST-T1", "--label", "ALMO-263", "--dry-run"], github.env);
+    assert.equal(dry.code, 0, dry.stderr);
+    assert.match(dry.stdout, /\(dry run\)/);
+    assert.match(dry.stdout, /labels: {3}ALMO-263/);
+    assert.ok(!/pr edit/.test(fs.readFileSync(github.env.GH_LOG as string, "utf8")), "dry run edits nothing");
+
+    const applied = awo(workspace, ["pr", "meta", "TEST-T1", "--assignee", "someone"], github.env);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.match(applied.stdout, /assignee: someone/);
+    assert.match(fs.readFileSync(github.env.GH_LOG as string, "utf8"), /--add-assignee someone/);
+
+    // A PR that never names its task cannot be traced back from GitHub.
+    const untitled = awo(workspace, ["pr", "meta", "TEST-T1"], {
+      ...github.env,
+      GH_PR_UNTITLED: "1",
+    });
+    assert.match(untitled.stdout, /never mentions TEST-T1/);
   } finally {
     github.cleanup();
     fs.rmSync(workspace, { recursive: true, force: true });

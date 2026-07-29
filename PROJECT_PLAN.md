@@ -1963,3 +1963,37 @@ A `.new` now means what it says — **the same lines moved on both sides** — a
     `gitignore` -> `.gitignore` rename then failed because the adopt path had already
     written the dotted name, which aborted the adopt *after* it had written most of
     the tree — the worst possible place to stop.
+
+
+## 18. PR identity: assignee and labels
+
+`awo pr link` recorded a PR against a task and left the PR itself anonymous — no
+assignee, no labels, and no check that it even mentioned the task. On GitHub, which is
+where reviewers actually are, the link did not exist.
+
+Link now applies both, from the task:
+
+- **labels** = the task's `labels:` (or `--label`) plus manifest `pullRequests.labels`
+- **assignee** = manifest `pullRequests.assignee`, else the authenticated `gh` user —
+  the only assignee awo can infer honestly
+
+### 18.1 Existing labels only, and say what was skipped
+
+awo never creates a label. A label is shared project vocabulary; letting each task
+mint its own is how a label list becomes forty near-duplicates that nobody filters by.
+So requested labels are intersected with `gh label list`, and the remainder is
+reported **by name** — a label you believe was applied is worse than one you know was
+not. The test asserts the unavailable label never reaches the `gh pr edit` argv, not
+merely that the message was printed.
+
+### 18.2 A metadata failure must not lose the link
+
+The state write that records the PR happens first, and metadata application is caught
+rather than thrown. Losing the task-to-PR link because a label call failed would trade
+something durable for something cosmetic.
+
+### 18.3 Findings
+
+81. **The traceability check is worth more than the labels.** If a PR's title and body
+    never mention the task, nothing on the GitHub side points back — the link exists
+    only in `state.json`, which no reviewer opens. `link` and `meta` both report it.

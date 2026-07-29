@@ -216,6 +216,8 @@ export async function runTaskNew(options: {
   targets?: string[];
   dependsOn?: string[];
   agent?: string;
+  /** PR labels for this task. Applied only if the repo already has them (§18). */
+  labels?: string[];
   /** Used by control-plane commands that create a task from external feedback. */
   body?: string;
   cwd?: string;

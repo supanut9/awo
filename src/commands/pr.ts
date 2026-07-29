@@ -105,7 +105,104 @@ async function linkedTask(taskId: string, cwd?: string) {
   return { root, ...located, taskState };
 }
 
-export async function runPrLink(options: { taskId: string; repo: string; number: number; cwd?: string }): Promise<PullRequestState> {
+/**
+ * §18 — a PR should say whose it is and what it belongs to.
+ *
+ * Labels are applied ONLY if the repository already has them. awo never creates
+ * one: a label is shared project vocabulary, and letting every task invent its own
+ * is how a label list becomes forty near-duplicates that nobody can filter by.
+ * Anything unavailable is reported by name rather than silently dropped — a label
+ * you thought was applied is worse than one you know was not.
+ */
+export interface PrMetadataResult {
+  assignee: string | null;
+  applied: string[];
+  /** Requested but absent from the repo, with the reason stated to the caller. */
+  unavailable: string[];
+  /** True when the PR body/title never mentions the task it is linked to. */
+  titleMissingTask: boolean;
+}
+
+async function repoLabels(root: string, repo: string): Promise<Set<string>> {
+  const raw = await runGh(repoPath(root, repo), [
+    "label", "list", "--limit", "200", "--json", "name",
+  ]).catch(() => "[]");
+  const parsed = JSON.parse(raw || "[]") as { name: string }[];
+  return new Set(parsed.map((l) => l.name));
+}
+
+async function currentGhUser(root: string, repo: string): Promise<string | null> {
+  const raw = await runGh(repoPath(root, repo), ["api", "user", "--jq", ".login"]).catch(() => "");
+  return raw.trim() || null;
+}
+
+/**
+ * Put the task's identity on its PR: assignee, labels, and a check that the PR
+ * actually references the task.
+ */
+export async function applyPrMetadata(
+  root: string,
+  repo: string,
+  number: number,
+  taskId: string,
+  options: { taskLabels: string[]; policyLabels: string[]; assignee?: string; dryRun?: boolean } = {
+    taskLabels: [],
+    policyLabels: [],
+  }
+): Promise<PrMetadataResult> {
+  const cwd = repoPath(root, repo);
+  const available = await repoLabels(root, repo);
+
+  // Task labels first, then project-wide ones; de-duplicated, order preserved so a
+  // task's own vocabulary reads first on the PR.
+  const wanted = [...new Set([...options.taskLabels, ...options.policyLabels])];
+  const applied = wanted.filter((l) => available.has(l));
+  const unavailable = wanted.filter((l) => !available.has(l));
+
+  const assignee = options.assignee ?? (await currentGhUser(root, repo));
+
+  // Does the PR mention the task at all? A PR that does not name its task cannot be
+  // traced back from GitHub, which is the only place a reviewer is looking.
+  const view = JSON.parse(
+    await runGh(cwd, ["pr", "view", String(number), "--json", "title,body"]).catch(() => "{}")
+  ) as { title?: string; body?: string };
+  const titleMissingTask = !`${view.title ?? ""}\n${view.body ?? ""}`.includes(taskId);
+
+  if (!options.dryRun && (applied.length > 0 || assignee)) {
+    const args = ["pr", "edit", String(number)];
+    for (const l of applied) args.push("--add-label", l);
+    if (assignee) args.push("--add-assignee", assignee);
+    await runGh(cwd, args);
+  }
+
+  return { assignee, applied, unavailable, titleMissingTask };
+}
+
+/** Re-apply assignee and labels to an already-linked PR. */
+export async function runPrMeta(
+  taskId: string,
+  options: { cwd?: string; dryRun?: boolean; label?: string[]; assignee?: string } = {}
+): Promise<PrMetadataResult & { repo: string; number: number }> {
+  const linked = await linkedTask(taskId, options.cwd);
+  const manifest = await readManifest(linked.root);
+  const pr = linked.taskState.pullRequest!;
+  const result = await applyPrMetadata(linked.root, pr.repo, pr.number, taskId, {
+    taskLabels: [...linked.task.labels, ...(options.label ?? [])],
+    policyLabels: manifest.pullRequests?.labels ?? [],
+    assignee: options.assignee ?? manifest.pullRequests?.assignee,
+    dryRun: options.dryRun,
+  });
+  return { ...result, repo: pr.repo, number: pr.number };
+}
+
+export async function runPrLink(options: {
+  taskId: string;
+  repo: string;
+  number: number;
+  cwd?: string;
+  /** Skip assignee/label application. Linking still records the PR. */
+  noMeta?: boolean;
+}): Promise<PullRequestState & { metadata?: PrMetadataResult }> {
   if (!Number.isInteger(options.number) || options.number < 1) throw new Error("--number must be a positive PR number.");
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const manifest = await readManifest(root);
@@ -121,7 +218,19 @@ export async function runPrLink(options: { taskId: string; repo: string; number:
     const taskState = (state.tasks[task.id] ??= newTaskState(task.authoredStatus));
     taskState.pullRequest = pr;
   });
-  return pr;
+
+  if (options.noMeta) return pr;
+
+  // Applied at link time, because that is the moment the PR and the task become one
+  // thing. Failing to label must not lose the link, though — the state write above
+  // is the part that matters, so a metadata failure is reported, not thrown.
+  const metadata = await applyPrMetadata(root, options.repo, options.number, task.id, {
+    taskLabels: task.labels,
+    policyLabels: manifest.pullRequests?.labels ?? [],
+    assignee: manifest.pullRequests?.assignee,
+  }).catch(() => undefined);
+
+  return { ...pr, metadata };
 }
 
 export async function runPrStatus(taskId: string, options: { cwd?: string } = {}): Promise<PullRequestState> {

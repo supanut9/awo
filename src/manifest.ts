@@ -45,6 +45,13 @@ export type PullRequestMergePolicy = "human-only" | "authorized-maintainer";
 
 export interface PullRequestPolicy {
   mergePolicy?: PullRequestMergePolicy;
+  /** Applied to every PR, on top of the task's own. Existing labels only. */
+  labels?: string[];
+  /**
+   * Who owns the PR. Omitted means the authenticated `gh` user — the person whose
+   * credentials opened it, which is the only assignee awo can infer honestly.
+   */
+  assignee?: string;
 }
 
 export interface Manifest {

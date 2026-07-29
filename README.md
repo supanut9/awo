@@ -169,7 +169,7 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | `awo run --goal <id> [--until <task>] [--yolo]` | Work the plan in dependency order. Stops at the gate, on failure, and always on evidence needing a human. |
 | `awo goal new --from <req>` | Turn a requirement into a goal, moving it in as `requirement.md`. |
 | `awo goal list` · `goal trace` · `goal verify` · `goal verdict` | Progress · criterion coverage · assemble the QA gate · record its outcome. |
-| `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`. |
+| `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`, `--label`. |
 | `awo task run <id> [--instruction <text>]` | Open a run: resolve dependencies, create the isolated worktree, resolve the model, and **record the brief the worker is given**. |
 | `awo task dispatch <id>` | Open a run **and spawn** the resolved worker, blocking until it exits. |
 | `awo task event <id> <kind>` | Record progress during a run. |

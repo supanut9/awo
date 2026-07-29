@@ -293,6 +293,40 @@ turns out to be red at the branch point, the run is `skipped` and the task is le
 
 ---
 
+### Pull requests: assignee and labels
+
+A PR should say whose it is and what it belongs to, so link records both:
+
+```sh
+awo task new --goal SHOP-G1 --name "Read endpoint" --targets learn-shop-online-server \
+             --label ALMO-263 --label performance
+awo pr link SHOP-T3 --repo learn-shop-online-server --number 412
+```
+
+```
+SHOP-T3 -> learn-shop-online-server#412 https://github.com/…/412
+  assignee: supanut9
+  labels:   ALMO-263, performance, shop
+  not applied — the repo has no such label: needs-design
+    awo never creates labels. Add it on GitHub first, or drop it from the task.
+```
+
+- **Labels come from the task** (`--label`, or `labels:` in its frontmatter) plus any
+  project-wide `pullRequests.labels` in the manifest.
+- **Only labels the repo already has are applied.** awo never creates one: a label is
+  shared project vocabulary, and letting each task invent its own is how a label list
+  becomes forty near-duplicates nobody filters by. Anything unavailable is reported by
+  name — a label you believe was applied is worse than one you know was not.
+- **The assignee** defaults to the authenticated `gh` user, which is the only assignee
+  awo can infer honestly. Override per-PR with `--assignee`, or project-wide with
+  `pullRequests.assignee`.
+- **It checks the PR names its task.** If neither title nor body mentions the task ID,
+  it says so — a PR that cannot be traced back from GitHub is where a reviewer is
+  actually looking.
+
+`awo pr meta <taskId>` re-applies both to an already-linked PR; `--dry-run` shows what
+would change, and `awo pr link --no-meta` links without touching the PR.
+
 ## 7. The QA gate
 
 Per task:

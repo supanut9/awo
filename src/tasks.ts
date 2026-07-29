@@ -18,6 +18,12 @@ export interface TaskDefinition {
    * that does it normally runs low.
    */
   tier: "high" | "standard" | "low" | null;
+  /**
+   * Labels to put on this task's PR. Applied only if the repo already HAS them —
+   * awo never creates a label, because inventing project vocabulary from a task
+   * file is how a label list turns into forty near-duplicates nobody filters by.
+   */
+  labels: string[];
   file: string;
   body: string;
 }
@@ -88,6 +94,7 @@ export async function readTaskFile(file: string): Promise<TaskDefinition> {
     authoredStatus: authored as TaskStatus,
     tier:
       fm.tier === "high" || fm.tier === "standard" || fm.tier === "low" ? fm.tier : null,
+    labels: asArray(fm.labels),
     file,
     body: parsed.content.trim(),
   };
