@@ -1997,3 +1997,12 @@ something durable for something cosmetic.
 81. **The traceability check is worth more than the labels.** If a PR's title and body
     never mention the task, nothing on the GitHub side points back — the link exists
     only in `state.json`, which no reviewer opens. `link` and `meta` both report it.
+
+82. **`git push --follow-tags` pushes annotated tags only, and says nothing about the
+    rest.** Every release from 0.0.36 to 0.1.6 bumped with `--no-git-tag-version` and
+    then ran `git tag vX` — a lightweight tag. `--follow-tags` skipped all twelve
+    while the push itself succeeded, so the commits and the npm publishes were fine
+    and the tags existed on one machine only. Nothing failed; the release log even
+    said "pushed v0.1.6", because that line echoed a shell variable rather than
+    anything git reported. Two lessons: prefer `npm version` (annotated), and never
+    print a success message that the tool did not actually confirm.

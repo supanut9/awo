@@ -352,9 +352,19 @@ npm link          # use your local build as the real `awo` command
 ## Releasing
 
 ```sh
-npm version patch        # bumps, commits AND tags
+npm version patch        # bumps, commits AND tags (annotated)
 git push --follow-tags
 npm publish              # prepublishOnly builds, runs the suite, verifies the tarball
+```
+
+`npm version` creates an **annotated** tag, which is the only kind `--follow-tags`
+pushes. If you bump with `--no-git-tag-version` and then `git tag v1.2.3` yourself,
+that tag is **lightweight** and `--follow-tags` silently skips it: the commit and the
+npm publish both succeed, and the tag exists only on your machine. Either use
+`npm version`, or tag annotated (`git tag -a v1.2.3 -m v1.2.3`) and verify:
+
+```sh
+git ls-remote --tags origin | grep v1.2.3
 ```
 
 ## Documentation
