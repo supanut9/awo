@@ -67,6 +67,14 @@ function readState(ws: string): {
   );
 }
 
+/** logs/<taskId|_adhoc>/<timestamp>/<file> — the 0.0.32 layout. */
+function runFile(ws: string, runId: string, file: string): string {
+  const cut = runId.indexOf("_");
+  const suffix = cut < 0 ? "" : runId.slice(cut + 1);
+  const slot = /^[A-Za-z][A-Za-z0-9]*-T\d+$/.test(suffix) ? suffix : "_adhoc";
+  return path.join(ws, "logs", slot, cut < 0 ? runId : runId.slice(0, cut), file);
+}
+
 test("task list reads authored frontmatter status before any state exists", () => {
   const ws = makeWorkspace();
   const out = awo(ws, ["task", "list"]);
@@ -141,7 +149,7 @@ test("a full run: open -> events -> complete, writing state, events, index and d
   assert.equal(state.tasks["TEST-T1"].lastRunOutcome, "success");
 
   // Events file: run.start, step.start, repo.diff, run.end
-  const eventsPath = path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`);
+  const eventsPath = runFile(ws, runId, "events.jsonl");
   const kinds = fs
     .readFileSync(eventsPath, "utf8")
     .trim()
@@ -150,12 +158,12 @@ test("a full run: open -> events -> complete, writing state, events, index and d
   assert.deepEqual(kinds, ["run.start", "step.start", "repo.diff", "run.end"]);
 
   // Index line + detail file
-  const index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim());
+  const index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim());
   assert.equal(index.runId, runId);
   assert.equal(index.status, "success");
   assert.deepEqual(index.reposChanged, ["api"], "reposChanged is derived from repo.diff events");
 
-  const detail = fs.readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.md`), "utf8");
+  const detail = fs.readFileSync(runFile(ws, runId, "record.md"), "utf8");
   assert.match(detail, /^---\n/);
   assert.match(detail, /taskId: TEST-T1/);
   assert.match(detail, /Did it\./);
@@ -344,12 +352,12 @@ test("log add records work that is not a task run, with taskId null", () => {
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /recorded \d{4}-\d{2}-\d{2}T.*_intake/);
 
-  const index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim());
+  const index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim());
   assert.equal(index.taskId, null, "ad-hoc work has no task (§7.3)");
   assert.equal(index.agent, "product-manager");
   assert.equal(index.status, "success");
 
-  const detail = fs.readFileSync(path.join(ws, "logs", "runs", index.runId.slice(0, 10), `${index.runId}.md`), "utf8");
+  const detail = fs.readFileSync(runFile(ws, index.runId, "record.md"), "utf8");
   assert.match(detail, /taskId: null/);
   assert.match(detail, /Refined the requirement\./);
   assert.match(detail, /two questions open/);
@@ -428,7 +436,7 @@ test("tier follows the work: agent default, manifest policy, and per-task overri
   // The run.start event records tier, where it came from, and the model.
   const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
   const events = fs
-    .readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`), "utf8")
+    .readFileSync(runFile(ws, runId, "events.jsonl"), "utf8")
     .trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(events[0].tier, "low");
   assert.equal(events[0].tierFrom, "agent");
@@ -483,7 +491,7 @@ test("task run creates the isolated worktree at the specced path", () => {
   // It is announced in the event stream, so the log shows isolation happened.
   const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
   const events = fs
-    .readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`), "utf8")
+    .readFileSync(runFile(ws, runId, "events.jsonl"), "utf8")
     .trim().split("\n").map((l) => JSON.parse(l));
   assert.ok(events.some((e) => String(e.label ?? "").includes("worktree ready for api")));
 
@@ -508,14 +516,14 @@ test("reposChanged is derived from any repo-bearing event, and falls back to tar
   // what the dogfood produced, which used to yield reposChanged: [].
   awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":10}']);
   awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--summary", "done"]);
-  let index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n")[0]);
+  let index = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim().split("\n")[0]);
   assert.deepEqual(index.reposChanged, ["api"], "a test event naming a repo counts");
 
   awo(ws, ["task", "status", "TEST-T1", "todo"]);
   awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
   awo(ws, ["task", "event", "TEST-T1", "commit", "--label", "abc123 feat: thing"]);
   awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture"]);
-  const lines = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n");
+  const lines = fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim().split("\n");
   index = JSON.parse(lines[lines.length - 1]);
   assert.deepEqual(index.reposChanged, ["api"], "a commit with no repo falls back to the task's targets");
   fs.rmSync(ws, { recursive: true, force: true });
@@ -635,7 +643,7 @@ test("the index records tier, model, effort and attempts, and log list can filte
   awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
   awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture"]);
 
-  const lines = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const lines = fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(lines.length, 2);
   for (const l of lines) {
     assert.equal(l.tier, "low");
@@ -698,7 +706,7 @@ test("a task cannot close as success without test evidence", () => {
   assert.equal(excused.code, 0, excused.stderr);
   const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
   const detail = fs.readFileSync(
-    path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.md`), "utf8"
+    runFile(ws, runId, "record.md"), "utf8"
   );
   assert.match(detail, /UNTESTED: no database available/);
   fs.rmSync(ws, { recursive: true, force: true });
@@ -729,12 +737,12 @@ test("dispatch spawns the worker, blocks, and fails loudly when the runtime is m
 
   // The worker's own output is captured beside the run, not just summarised.
   const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
-  const workerLog = path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.worker.log`);
+  const workerLog = runFile(ws, runId, "worker.log");
   assert.ok(fs.existsSync(workerLog), "the worker's output must be retained for diagnosis");
 
   // The dispatch is visible in the event stream, command included.
   const events = fs
-    .readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`), "utf8")
+    .readFileSync(runFile(ws, runId, "events.jsonl"), "utf8")
     .trim().split("\n").map((l) => JSON.parse(l));
   assert.ok(events.some((e) => String(e.label ?? "").includes("dispatching to codex")));
   assert.ok(events.some((e) => e.kind === "step.end" && e.ok === false));

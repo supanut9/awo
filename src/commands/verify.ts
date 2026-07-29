@@ -7,7 +7,7 @@ import { readManifest } from "../manifest.js";
 import { findGoals, findTasksInGoal } from "../tasks.js";
 import { newTaskState, readState } from "../state.js";
 import { invocationHint, resolveModel, type ResolvedModel } from "../models.js";
-import { readEvents, readIndex } from "../runs.js";
+import { readEvents, readIndex, newRunId, runDir } from "../runs.js";
 import { runTaskVerify } from "./task.js";
 import { runReqNew } from "./plan.js";
 import { runLogAdd } from "./log.js";
@@ -137,7 +137,10 @@ export async function runGoalVerify(
   const model = await resolveModel(root, "qa-engineer", "high");
 
   const brief = buildBrief(goal.id, goalBody, reqBody, entries, index.length);
-  const briefPath = path.join(root, "logs", `verify-${goal.id}.md`);
+  // Filed as a run of its own rather than loose in logs/. A brief written straight
+  // into logs/verify-<goal>.md was invisible to `awo log list`, overwritten by the
+  // next verify of the same goal, and lost the history of earlier gates.
+  const briefPath = path.join(runDir(root, newRunId(goal.id)), "brief.md");
   await fs.ensureDir(path.dirname(briefPath));
   await fs.writeFile(briefPath, brief);
 
@@ -203,7 +206,7 @@ function buildBrief(
     "by a prioritised list of what must change. Be blunt — a false pass is worse than a",
     "harsh review. Say explicitly whether the branches compose.",
     "",
-    `(${runCount} runs are recorded in logs/runs.jsonl if history helps.)`
+    `(${runCount} runs are recorded in logs/index.jsonl if history helps.)`
   );
 
   return lines.join("\n");

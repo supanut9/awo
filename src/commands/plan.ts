@@ -5,30 +5,15 @@ import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest } from "../manifest.js";
 import { findGoals, findAllTasks } from "../tasks.js";
 
-/**
- * §7.2 — these commands own the *mechanical* half of the pipeline: allocating
- * the next ID, placing files in the goal-centric layout, and wiring `taskIds`.
- * The *content* stays agent-driven (the `refine-requirement` and `plan-a-goal`
- * instructions), which is why each writes a skeleton with the section headings
- * §7.2 specifies rather than trying to invent prose.
- */
-
-function slug(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
-}
 
 /**
  * A requirement has no goal yet, so it cannot live in the goal folder the spec
- * shows. It sits at `goals/<KEY>-R#.md` until `goal new --from` moves it in as
+ * shows. It sits at `requirements/<KEY>-R#.md` until `goal new --from` moves it in as
  * `requirement.md` — which is also what an agent did unprompted during the
  * first dogfood.
  */
 function requirementPath(root: string, id: string): string {
-  return path.join(root, "goals", `${id}.md`);
+  return path.join(root, "requirements", `${id}.md`);
 }
 
 async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promise<string> {
@@ -40,9 +25,11 @@ async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promi
     if (m) used.add(Number(m[1]));
   };
 
-  const goalsRoot = path.join(root, "goals");
-  if (await fs.pathExists(goalsRoot)) {
-    for (const entry of await fs.readdir(goalsRoot)) consider(entry);
+  for (const rel of ["goals", "requirements"]) {
+    const dir = path.join(root, rel);
+    if (await fs.pathExists(dir)) {
+      for (const entry of await fs.readdir(dir)) consider(entry);
+    }
   }
   for (const goal of await findGoals(root)) {
     consider(path.basename(goal.dir));
@@ -131,13 +118,13 @@ export async function runGoalNew(options: {
 
   const reqFile = requirementPath(root, options.from);
   if (!(await fs.pathExists(reqFile))) {
-    const loose = (await fs.readdir(path.join(root, "goals")).catch(() => []))
+    const loose = (await fs.readdir(path.join(root, "requirements")).catch(() => []))
       .filter((f) => f.endsWith(".md"))
       .map((f) => f.replace(/\.md$/, ""));
     throw new Error(
       loose.length > 0
-        ? `No requirement "${options.from}" at goals/${options.from}.md. Available: ${loose.join(", ")}.`
-        : `No requirement "${options.from}" at goals/${options.from}.md. Create one with \`awo req new --title "…"\`.`
+        ? `No requirement "${options.from}" at requirements/${options.from}.md. Available: ${loose.join(", ")}.`
+        : `No requirement "${options.from}" at requirements/${options.from}.md. Create one with \`awo req new --title "…"\`.`
     );
   }
 
@@ -146,7 +133,10 @@ export async function runGoalNew(options: {
   const title = options.title ?? (typeof fm.title === "string" ? fm.title : options.from);
 
   const id = await nextId(root, projectKey, "G");
-  const dir = path.join(root, "goals", `${id}-${slug(title)}`);
+  // Directory is the ID alone. A slug here was truncated at 40 characters, so real
+  // titles produced names cut mid-word with a trailing hyphen, and editing a title
+  // would have stranded the path. The title lives in frontmatter, where it can change.
+  const dir = path.join(root, "goals", id);
   await fs.ensureDir(path.join(dir, "tasks"));
 
   // The requirement moves into the goal folder, becoming requirement.md (§4).
@@ -227,7 +217,7 @@ export async function runTaskNew(options: {
   }
 
   const id = await nextId(root, manifest.projectKey, "T");
-  const file = path.join(goal.dir, "tasks", `${id}-${slug(options.name)}.md`);
+  const file = path.join(goal.dir, "tasks", `${id}.md`);
 
   await fs.writeFile(
     file,

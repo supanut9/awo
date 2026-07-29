@@ -18,7 +18,7 @@ function makeWorkspace(): string {
   fs.writeFileSync(path.join(repo, "README.md"), "# api\n");
   execFileSync(process.execPath, [CLI, "connect", repo, "--name", "api"], { cwd: dir });
 
-  const goalDir = path.join(dir, "goals", "UI-G1-demo");
+  const goalDir = path.join(dir, "goals", "UI-G1");
   fs.mkdirSync(path.join(goalDir, "tasks"), { recursive: true });
   fs.writeFileSync(path.join(goalDir, "goal.md"), `---\nid: UI-G1\ntitle: Demo\n---\n\nx\n`);
   fs.writeFileSync(
@@ -176,7 +176,7 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
   });
   assert.equal(ok.status, 200);
   assert.equal(
-    JSON.parse(fs.readFileSync(path.join(ws, "goals", "UI-G1-demo", "state.json"), "utf8")).tasks[
+    JSON.parse(fs.readFileSync(path.join(ws, "goals", "UI-G1", "state.json"), "utf8")).tasks[
       "UI-T1"
     ].status,
     "cancelled",

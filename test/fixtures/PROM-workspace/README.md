@@ -13,10 +13,15 @@ next, so you don't spend tokens scanning the tree.
 - `rules/` — always-on policy. Not invoked; ambient.
 - `skills/` — invokable procedures ("how to …").
 - `instructions/` — workflow glue; `full-workflow.md` is the master sequence.
-- `goals/` — the work hierarchy (Requirement → Goal → Tasks), populated by the commands below.
+- `requirements/` — intake: `<KEY>-R#.md`, until a goal is planned from it.
+- `goals/` — one directory per goal (`goals/<KEY>-G#/`), holding `goal.md`, the
+  `requirement.md` it came from, and `tasks/<KEY>-T#.md`.
 - `catalog/` — extra agents/skills shipped but **not installed**; add one with `awo agent add <name>`.
 - `repos/` — linked working repos (gitignored). Task worktrees live under `repos/.worktrees/<repo>/<taskId>/`.
-- `logs/` — the audit trail (gitignored): `runs.jsonl` index, per-run `.md`, per-run `.events.jsonl`.
+- `logs/` — the audit trail (gitignored): an `index.jsonl` for querying, plus one
+  directory per run at `logs/<taskId>/<timestamp>/` holding `record.md`,
+  `events.jsonl` and (when a worker was dispatched) `worker.log`. Work with no task
+  files under `logs/_adhoc/`.
 - `.workspace/manifest.json` — the single source of truth for repos, model policy and version.
 
 ## Common commands

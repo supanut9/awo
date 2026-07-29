@@ -3,7 +3,7 @@ import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest } from "../manifest.js";
 import { FileReader } from "../ui/reader.js";
-import { eventsFile } from "../runs.js";
+import { resolveRunFile } from "../runs.js";
 
 /**
  * §7.6 — optional publishing of a workspace's state to MongoDB, so a hosted
@@ -358,7 +358,7 @@ export async function runPublish(
 const WORKER_LOG_MAX = 256 * 1024;
 
 async function readWorkerLog(root: string, runId: string): Promise<string> {
-  const file = eventsFile(root, runId).replace(/\.events\.jsonl$/, ".worker.log");
+  const file = await resolveRunFile(root, runId, "worker");
   try {
     const { size } = await fs.stat(file);
     const text = await fs.readFile(file, "utf8");

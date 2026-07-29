@@ -1,1 +1,3 @@
-# Goals are created here by `awo goal new` (e.g. goals/{{PROJECT_KEY}}-G1-<slug>/).
+# Goals are created here by `awo goal new` — one directory per goal, named for its
+# ID alone (e.g. goals/{{PROJECT_KEY}}-G1/). The title lives in goal.md frontmatter
+# so renaming it never moves the path.

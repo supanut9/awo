@@ -33,6 +33,31 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
 
   const manifest = await readManifest(root);
 
+  // ---- unresolved upgrade conflicts (§11.2) ----
+  // `upgrade` writes `<file>.new` beside a file you edited rather than overwriting
+  // it, then says so once. Nothing ever mentioned it again, so a stale `.new` could
+  // sit next to AGENTS.md — the canonical instruction file — indefinitely, with two
+  // versions on disk and agents reading the wrong one.
+  const conflicts: string[] = [];
+  const scanConflicts = async (dir: string, depth = 0): Promise<void> => {
+    if (depth > 2) return;
+    for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      if (entry.name === "repos" || entry.name === ".git" || entry.name === "node_modules") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await scanConflicts(full, depth + 1);
+      else if (entry.name.endsWith(".new")) conflicts.push(path.relative(root, full));
+    }
+  };
+  await scanConflicts(root);
+  for (const rel of conflicts) {
+    add({
+      severity: "warn",
+      area: "workspace",
+      message: `unresolved upgrade conflict: ${rel} is waiting to be merged into ${rel.replace(/\.new$/, "")}`,
+      fix: `diff ${rel.replace(/\.new$/, "")} ${rel} — then take what you want and delete ${rel}`,
+    });
+  }
+
   // ---- version skew (§11) ----
   const installed = (
     JSON.parse(await fs.readFile(path.join(PACKAGE_ROOT, "package.json"), "utf8")) as {

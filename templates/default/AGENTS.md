@@ -19,8 +19,18 @@ use `awo log show <runId>`.
 
 ## How work is organized
 Work flows down a hierarchy: **Requirement → Goal → Tasks**. Each level is a
-markdown file with YAML frontmatter under `goals/`. IDs are project-key
-prefixed: `{{PROJECT_KEY}}-R#` (requirement), `{{PROJECT_KEY}}-G#` (goal), `{{PROJECT_KEY}}-T#` (task).
+markdown file with YAML frontmatter. IDs are project-key prefixed:
+`{{PROJECT_KEY}}-R#` (requirement), `{{PROJECT_KEY}}-G#` (goal), `{{PROJECT_KEY}}-T#` (task) —
+and an ID is permanent, which is why paths are named for IDs and never for titles:
+
+```
+requirements/{{PROJECT_KEY}}-R1.md          intake, not yet planned
+goals/{{PROJECT_KEY}}-G1/goal.md            the objective and its definition of done
+                    /requirement.md         the ask it came from
+                    /tasks/{{PROJECT_KEY}}-T1.md   executable units
+logs/{{PROJECT_KEY}}-T1/<timestamp>/record.md · events.jsonl · worker.log
+logs/index.jsonl                            queryable index of every run
+```
 
 **See `instructions/full-workflow.md` for the canonical end-to-end sequence**
 — intake → plan → build & ship (per task) → QA gate → done.

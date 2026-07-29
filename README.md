@@ -105,6 +105,21 @@ Requirement  →  Goal  →  Tasks  →  Runs → Logs
                 objective)  units)        happened)
 ```
 
+```
+requirements/<KEY>-R1.md              intake, until a goal is planned from it
+goals/<KEY>-G1/goal.md                the objective and its definition of done
+              /requirement.md         the ask it came from
+              /tasks/<KEY>-T1.md      executable units
+logs/index.jsonl                      queryable index of every run
+logs/<KEY>-T1/<timestamp>/            one directory per run:
+    record.md · events.jsonl · worker.log
+logs/<KEY>-G1/<timestamp>/brief.md    each QA gate the goal went through
+```
+
+Paths are named for **IDs, never titles** — an ID is permanent, so renaming a goal
+never moves its directory. Runs file under the task they belong to, which makes
+"every attempt at `<KEY>-T2`" an `ls` rather than a glob over dates.
+
 Definitions are tracked markdown with YAML frontmatter. **State is separate**:
 lifecycle status lives in a gitignored `state.json`, and each run appends to an
 event stream plus a queryable index. A task's status (`todo · queued · running ·

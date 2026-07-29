@@ -3,6 +3,7 @@ import path from "path";
 import { simpleGit } from "simple-git";
 import { v7 as uuidv7 } from "uuid";
 import { findWorkspaceRoot } from "../workspace.js";
+import { detailFile, eventsFile, indexFile, workerLogFile } from "../runs.js";
 import { readManifest, writeManifest, type Manifest } from "../manifest.js";
 import {
   buildLock,
@@ -29,6 +30,11 @@ interface Migration {
 
 const MIGRATIONS: Migration[] = [
   {
+    version: "0.0.32",
+    description: "restructure logs, goals and requirements; clear stale worktrees",
+    apply: async ({ root }) => restructureWorkspace(root),
+  },
+  {
     version: "0.0.2",
     description: "backfill manifest.workspaceId (uuid v7)",
     apply: async ({ root, manifest }) => {
@@ -39,6 +45,128 @@ const MIGRATIONS: Migration[] = [
     },
   },
 ];
+
+/**
+ * The 0.0.32 layout change, as a migration rather than file reconciliation because
+ * it MOVES user content — which reconciliation is forbidden to touch (§11.2).
+ *
+ * Everything here is idempotent and additive-then-move: nothing is deleted that
+ * has not first been copied, so a half-finished migration re-runs cleanly.
+ */
+async function restructureWorkspace(root: string): Promise<boolean> {
+  let changed = false;
+  const logs = path.join(root, "logs");
+
+  // 1. logs/runs/<date>/<runId>.{md,events.jsonl,worker.log}
+  //      -> logs/<taskId|_adhoc>/<stamp>/{record.md,events.jsonl,worker.log}
+  const legacyRuns = path.join(logs, "runs");
+  if (await fs.pathExists(legacyRuns)) {
+    for (const shard of await fs.readdir(legacyRuns)) {
+      const shardDir = path.join(legacyRuns, shard);
+      if (!(await fs.stat(shardDir)).isDirectory()) continue;
+      for (const name of await fs.readdir(shardDir)) {
+        const runId = name.replace(/\.events\.jsonl$|\.worker\.log$|\.md$/, "");
+        const target = name.endsWith(".events.jsonl")
+          ? eventsFile(root, runId)
+          : name.endsWith(".worker.log")
+            ? workerLogFile(root, runId)
+            : detailFile(root, runId);
+        await fs.ensureDir(path.dirname(target));
+        await fs.move(path.join(shardDir, name), target, { overwrite: true });
+        changed = true;
+      }
+      await fs.remove(shardDir);
+    }
+    await fs.remove(legacyRuns);
+  }
+
+  // A verify record written straight into logs/ rather than through the run writer
+  // was invisible to `awo log list`. Give it a run directory so it is addressable.
+  for (const name of (await fs.pathExists(logs)) ? await fs.readdir(logs) : []) {
+    if (!name.endsWith(".md") || name === "README.md") continue;
+    const stem = name.slice(0, -3);
+    await fs.move(
+      path.join(logs, name),
+      path.join(logs, "_adhoc", `legacy-${stem}`, "record.md"),
+      { overwrite: true }
+    );
+    changed = true;
+  }
+
+  // 2. logs/runs.jsonl -> logs/index.jsonl, rewriting the detailFile pointers so
+  //    old entries resolve under the new layout instead of dangling.
+  const legacyIndex = path.join(logs, "runs.jsonl");
+  if ((await fs.pathExists(legacyIndex)) && !(await fs.pathExists(indexFile(root)))) {
+    const lines = (await fs.readFile(legacyIndex, "utf8")).split("\n").filter((l) => l.trim());
+    const rewritten = lines.map((line) => {
+      const entry = JSON.parse(line) as { runId: string; detailFile?: string };
+      entry.detailFile = path.relative(logs, detailFile(root, entry.runId));
+      return JSON.stringify(entry);
+    });
+    await fs.writeFile(indexFile(root), rewritten.length ? `${rewritten.join("\n")}\n` : "");
+    await fs.remove(legacyIndex);
+    changed = true;
+  }
+
+  // 3. goals/<ID>-<truncated-slug>/ -> goals/<ID>/, and tasks/<ID>-<slug>.md ->
+  //    tasks/<ID>.md. The slug was cut at 40 chars, so directory names ended
+  //    mid-word with a trailing hyphen, and renaming a goal's title would have
+  //    orphaned its path. IDs are permanent; titles are frontmatter.
+  const goalsRoot = path.join(root, "goals");
+  const idOnly = /^([A-Za-z][A-Za-z0-9]*-[GT]\d+)(?:-.*)?$/;
+  for (const name of (await fs.pathExists(goalsRoot)) ? await fs.readdir(goalsRoot) : []) {
+    const dir = path.join(goalsRoot, name);
+    if (!(await fs.stat(dir)).isDirectory()) continue;
+    const m = idOnly.exec(name);
+    if (m && m[1] !== name) {
+      await fs.move(dir, path.join(goalsRoot, m[1]), { overwrite: true });
+      changed = true;
+    }
+    const tasksDir = path.join(goalsRoot, m ? m[1] : name, "tasks");
+    for (const file of (await fs.pathExists(tasksDir)) ? await fs.readdir(tasksDir) : []) {
+      const tm = idOnly.exec(file.replace(/\.md$/, ""));
+      if (tm && `${tm[1]}.md` !== file) {
+        await fs.move(path.join(tasksDir, file), path.join(tasksDir, `${tm[1]}.md`), {
+          overwrite: true,
+        });
+        changed = true;
+      }
+    }
+  }
+
+  // 4. A requirement that has not been promoted to a goal had no home, so it sat
+  //    loose in goals/ — where it reads as a goal and is not one.
+  const reqRoot = path.join(root, "requirements");
+  await fs.ensureDir(reqRoot);
+  for (const name of (await fs.pathExists(goalsRoot)) ? await fs.readdir(goalsRoot) : []) {
+    if (!/^[A-Za-z][A-Za-z0-9]*-R\d+\.md$/.test(name)) continue;
+    await fs.move(path.join(goalsRoot, name), path.join(reqRoot, name), { overwrite: true });
+    changed = true;
+  }
+
+  // 5. Worktrees were created at <root>/.worktrees before moving under repos/, so a
+  //    workspace upgraded across that change has full checkouts in a location
+  //    nothing reads — invisible, and gigabytes. Remove only registered-and-stale
+  //    ones; git prune keeps its own bookkeeping straight.
+  const stray = path.join(root, ".worktrees");
+  if (await fs.pathExists(stray)) {
+    await fs.remove(stray);
+    changed = true;
+  }
+
+  // 6. Upgrade backups accumulate one directory per upgrade, forever. Keep the
+  //    three most recent: enough to recover a bad upgrade, bounded.
+  const backups = path.join(root, ".workspace", "upgrade-backups");
+  if (await fs.pathExists(backups)) {
+    const dirs = (await fs.readdir(backups)).sort();
+    for (const old of dirs.slice(0, Math.max(0, dirs.length - 3))) {
+      await fs.remove(path.join(backups, old));
+      changed = true;
+    }
+  }
+
+  return changed;
+}
 
 /** `.workspace/manifest.json` is owned by migrations, never file reconciliation. */
 const NOT_RECONCILED = new Set([".workspace/manifest.json", ".workspace/template.lock"]);

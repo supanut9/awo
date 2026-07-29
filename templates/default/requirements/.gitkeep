@@ -1,0 +1,3 @@
+# Requirements are captured here by `awo req new` as {{PROJECT_KEY}}-R#.md.
+# `awo goal new --from <id>` moves one into its goal as requirement.md, so what is
+# left here is intake that has not been planned yet.

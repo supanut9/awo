@@ -10,7 +10,7 @@ requires:
 Periodically, or for a specific goal/time range under audit.
 
 ## Steps
-1. Start from a goal (or a date range in `logs/runs.jsonl`).
+1. Start from a goal (or a date range in `logs/index.jsonl`).
 2. Trace PROM-G# → its PROM-T#s → each task's run(s) → log detail.
 3. Confirm: commits followed `conventional-commits`; no direct pushes to
    main; PRs met `pr-requirements`; `run-tests` passed before shipping;

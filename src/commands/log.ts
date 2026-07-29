@@ -4,6 +4,7 @@ import { findWorkspaceRoot } from "../workspace.js";
 import {
   appendIndex,
   detailFile,
+  resolveRunFile,
   newRunId,
   readEvents,
   readIndex,
@@ -43,7 +44,7 @@ export async function runLogShow(
   options: { cwd?: string } = {}
 ): Promise<{ detail: string; events: RunEvent[] }> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
-  const file = detailFile(workspaceRoot, runId);
+  const file = await resolveRunFile(workspaceRoot, runId, "detail");
 
   if (!(await fs.pathExists(file))) {
     const known = (await readIndex(workspaceRoot)).map((r) => r.runId);

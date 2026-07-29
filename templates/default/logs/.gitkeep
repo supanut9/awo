@@ -1,1 +1,2 @@
-# Run logs land here (gitignored). See runs.jsonl + runs/<date>/<runId>.md
+# Run logs land here (gitignored): index.jsonl for queries, and one directory per
+# run at <taskId|_adhoc>/<timestamp>/ holding record.md, events.jsonl, worker.log.

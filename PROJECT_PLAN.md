@@ -1553,3 +1553,72 @@ run log (§7.3). "What did we try, what happened, what was deferred" is answered
 `awo log list` / `awo log show`, not by a summary someone has to remember to update.
 The one thing neither covers is *why* a decision was made — that belongs in the
 requirement's Clarifications or the goal's Scope, next to the work it constrains.
+
+
+## 14. Workspace layout, revised (0.0.32)
+
+The original layout (§4, §7.3) was designed before there was any real usage to
+look at. One day of dogfooding produced a tree with five separate structural
+problems, all of them invisible until the directory had real content in it:
+
+1. **`logs/runs/<date>/` put everything in one flat directory.** 39 files after a
+   single day, four filename variants per run (`<runId>.md`,
+   `<runId>.events.jsonl`, `<runId>.worker.log`), and no way to ask "every attempt
+   at SHOP-T2" without globbing a date you had to already know.
+2. **Goal directories carried a slug truncated at 40 characters**, so a real title
+   produced `SHOP-G1-faq-section-on-product-detail-page-with-` — cut mid-word,
+   trailing hyphen. Worse, it coupled a path to a title, so editing the title
+   would have stranded the directory.
+3. **An unpromoted requirement had no home.** It sat in `goals/` as
+   `SHOP-R2.md`, where it reads as a goal and is not one.
+4. **`goal verify` wrote `logs/verify-<goalId>.md` directly**, bypassing the run
+   writer: invisible to `awo log list`, and silently overwritten by the next gate
+   on the same goal.
+5. **Worktrees existed in two places at once** — `.worktrees/` from before the
+   move and `repos/.worktrees/` after it — so a workspace upgraded across that
+   change had full repo checkouts in a location nothing reads.
+
+### 14.1 The layout
+
+```
+requirements/<KEY>-R#.md
+goals/<KEY>-G#/{goal.md, requirement.md, state.json, tasks/<KEY>-T#.md}
+logs/index.jsonl
+logs/<taskId|goalId|_adhoc>/<timestamp>/{record.md, events.jsonl, worker.log, brief.md}
+repos/.worktrees/<repo>/<taskId>
+```
+
+Two rules generate all of it:
+
+**Paths are named for IDs, never for titles.** An ID is permanent and a title is
+not, so the ID is the only thing safe to put in a path. Titles live in
+frontmatter, where the CLI and both dashboards read them from.
+
+**A run is a directory, not a filename prefix.** The runId is the directory, so
+filenames inside are fixed (`record.md`, `events.jsonl`, `worker.log`) and a new
+artefact is a new file rather than another suffix for every reader to parse.
+Filing by task also bounds the directory naturally — a task has a handful of runs
+where a date has all of them.
+
+### 14.2 What did not change
+
+The **runId string is untouched**. It is the key in `index.jsonl`, in
+`state.json`, and in every already-published Mongo document, so changing it would
+have meant a data migration on the hosted side too. Only the path derived from it
+moved. `resolveRunFile` still reads the pre-0.0.32 locations, so a workspace that
+has not upgraded shows its history rather than appearing to have lost it.
+
+### 14.3 Findings this produced
+
+56. **A layout is a hypothesis until it holds real content.** Every one of the
+    five problems above was invisible in the fixture and obvious in the first real
+    workspace. Date-sharding looked like it bounded directory size; filing by task
+    actually does.
+57. **`.new` conflict files were written once and then never mentioned again.**
+    `AGENTS.md.new` — beside the *canonical instruction file* — sat unresolved
+    through several upgrades, meaning two versions on disk and no way for an agent
+    to know which one was current. `awo doctor` now reports unresolved conflicts,
+    because a warning delivered once is a warning lost.
+58. **Anything that writes outside the run writer becomes invisible.** The verify
+    brief proved it: it was real work, on disk, and absent from every view. The
+    fix is not "remember to log it" but "there is one writer".

@@ -307,3 +307,78 @@ test("upgrade never touches goals, logs or the manifest's repos", () => {
   assert.equal(awo(ws, ["task", "list"]).stdout.includes("UP-T1"), true);
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+test("the 0.0.32 restructure moves logs, goals and requirements without losing content", () => {
+  const ws = makeWorkspace();
+  pretendOlder(ws, "0.0.31");
+
+  // Rebuild the pre-0.0.32 layout by hand, including the things that had no home.
+  const runId = "2026-07-28T16-33-45-180Z_UP-T2";
+  const oldRunDir = path.join(ws, "logs", "runs", "2026-07-28");
+  fs.mkdirSync(oldRunDir, { recursive: true });
+  fs.writeFileSync(path.join(oldRunDir, `${runId}.md`), "---\nrunId: x\n---\n\nrecord body\n");
+  fs.writeFileSync(path.join(oldRunDir, `${runId}.events.jsonl`), '{"t":"1","kind":"test"}\n');
+  fs.writeFileSync(path.join(oldRunDir, `${runId}.worker.log`), "worker said this\n");
+  fs.writeFileSync(
+    path.join(ws, "logs", "runs.jsonl"),
+    `${JSON.stringify({ runId, taskId: "UP-T2", status: "success", detailFile: `runs/2026-07-28/${runId}.md` })}\n`
+  );
+  fs.writeFileSync(path.join(ws, "logs", "verify-UP-G1.md"), "gate brief\n");
+
+  const oldGoal = path.join(ws, "goals", "UP-G1-a-title-truncated-mid-wor");
+  fs.mkdirSync(path.join(oldGoal, "tasks"), { recursive: true });
+  fs.writeFileSync(path.join(oldGoal, "goal.md"), "---\nid: UP-G1\n---\n\ngoal\n");
+  fs.writeFileSync(path.join(oldGoal, "tasks", "UP-T2-some-slug.md"), "---\nid: UP-T2\n---\n\ntask\n");
+  fs.writeFileSync(path.join(ws, "goals", "UP-R7.md"), "---\nid: UP-R7\n---\n\nintake\n");
+
+  // Stale worktrees at the pre-move location, and four backups where three is the cap.
+  fs.mkdirSync(path.join(ws, ".worktrees", "api", "UP-T1"), { recursive: true });
+  for (const v of ["0.0.1-to-0.0.2", "0.0.2-to-0.0.3", "0.0.3-to-0.0.4", "0.0.4-to-0.0.5"]) {
+    fs.mkdirSync(path.join(ws, ".workspace", "upgrade-backups", v), { recursive: true });
+  }
+
+  execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
+
+  // Logs: one directory per run, filed under the task, with fixed names.
+  const newRun = path.join(ws, "logs", "UP-T2", "2026-07-28T16-33-45-180Z");
+  assert.match(fs.readFileSync(path.join(newRun, "record.md"), "utf8"), /record body/);
+  assert.match(fs.readFileSync(path.join(newRun, "events.jsonl"), "utf8"), /"kind":"test"/);
+  assert.equal(fs.readFileSync(path.join(newRun, "worker.log"), "utf8"), "worker said this\n");
+  assert.ok(!fs.existsSync(path.join(ws, "logs", "runs")), "the date-sharded tree must be gone");
+
+  // The index moves and its pointers are rewritten, not left dangling.
+  assert.ok(!fs.existsSync(path.join(ws, "logs", "runs.jsonl")));
+  const entry = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim());
+  assert.equal(entry.detailFile, path.join("UP-T2", "2026-07-28T16-33-45-180Z", "record.md"));
+  assert.ok(fs.existsSync(path.join(ws, "logs", entry.detailFile)), "the pointer must resolve");
+
+  // The loose verify brief becomes addressable instead of sitting in logs/.
+  assert.ok(!fs.existsSync(path.join(ws, "logs", "verify-UP-G1.md")));
+  assert.match(
+    fs.readFileSync(path.join(ws, "logs", "_adhoc", "legacy-verify-UP-G1", "record.md"), "utf8"),
+    /gate brief/
+  );
+
+  // Goals and tasks are named for their IDs; the truncated slug is gone.
+  assert.ok(!fs.existsSync(oldGoal), "the truncated directory must be renamed");
+  assert.match(fs.readFileSync(path.join(ws, "goals", "UP-G1", "goal.md"), "utf8"), /id: UP-G1/);
+  assert.match(
+    fs.readFileSync(path.join(ws, "goals", "UP-G1", "tasks", "UP-T2.md"), "utf8"),
+    /id: UP-T2/
+  );
+
+  // An unpromoted requirement gets a home of its own.
+  assert.ok(!fs.existsSync(path.join(ws, "goals", "UP-R7.md")));
+  assert.match(fs.readFileSync(path.join(ws, "requirements", "UP-R7.md"), "utf8"), /intake/);
+
+  assert.ok(!fs.existsSync(path.join(ws, ".worktrees")), "stale worktrees must be cleared");
+  assert.deepEqual(fs.readdirSync(path.join(ws, ".workspace", "upgrade-backups")).sort(), [
+    "0.0.2-to-0.0.3",
+    "0.0.3-to-0.0.4",
+    "0.0.4-to-0.0.5",
+  ]);
+
+  // Idempotent: running it again must be a no-op, not a second round of moves.
+  execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
+  assert.match(fs.readFileSync(path.join(newRun, "record.md"), "utf8"), /record body/);
+});

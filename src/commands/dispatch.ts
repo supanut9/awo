@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import fs from "fs-extra";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
-import { appendEvent, eventsFile } from "../runs.js";
+import { appendEvent, workerLogFile } from "../runs.js";
 import { runTaskComplete, runTaskRun, type TaskRunResult } from "./task.js";
 
 /**
@@ -94,7 +94,7 @@ export async function runDispatch(
 
   // The worker's own output is part of the audit trail — a summary in the run log is
   // not enough to diagnose a worker that went wrong.
-  const outputPath = eventsFile(root, runId).replace(/\.events\.jsonl$/, ".worker.log");
+  const outputPath = workerLogFile(root, runId);
   await fs.ensureDir(path.dirname(outputPath));
 
   await appendEvent(root, runId, "step.start", {

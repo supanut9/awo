@@ -38,9 +38,9 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
 
   const req = awo(ws, ["req", "new", "--title", "Add SSO login", "--source", "stakeholder: Priya"]);
   assert.equal(req.code, 0, req.stderr);
-  assert.match(req.stdout, /PL-R1 created at goals\/PL-R1\.md/);
+  assert.match(req.stdout, /PL-R1 created at requirements\/PL-R1\.md/);
 
-  const reqBody = fs.readFileSync(path.join(ws, "goals", "PL-R1.md"), "utf8");
+  const reqBody = fs.readFileSync(path.join(ws, "requirements", "PL-R1.md"), "utf8");
   assert.match(reqBody, /id: PL-R1/);
   assert.match(reqBody, /status: draft/);
   assert.match(reqBody, /source: 'stakeholder: Priya'|source: "stakeholder: Priya"|source: stakeholder/);
@@ -51,11 +51,11 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
 
   const goal = awo(ws, ["goal", "new", "--from", "PL-R1"]);
   assert.equal(goal.code, 0, goal.stderr);
-  assert.match(goal.stdout, /PL-G1 created at goals\/PL-G1-add-sso-login\//);
+  assert.match(goal.stdout, /PL-G1 created at goals\/PL-G1\//);
 
-  const goalDir = path.join(ws, "goals", "PL-G1-add-sso-login");
+  const goalDir = path.join(ws, "goals", "PL-G1");
   // The requirement moved into the goal folder (§4) and gained its goalId.
-  assert.ok(!fs.existsSync(path.join(ws, "goals", "PL-R1.md")), "requirement must move, not be copied");
+  assert.ok(!fs.existsSync(path.join(ws, "requirements", "PL-R1.md")), "requirement must move, not be copied");
   const moved = fs.readFileSync(path.join(goalDir, "requirement.md"), "utf8");
   assert.match(moved, /goalId: PL-G1/);
   assert.match(fs.readFileSync(path.join(goalDir, "goal.md"), "utf8"), /requirementId: PL-R1/);
@@ -65,7 +65,7 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
     "--targets", "api", "--agent", "software-engineer",
   ]);
   assert.equal(t1.code, 0, t1.stderr);
-  assert.match(t1.stdout, /PL-T1 created at goals\/PL-G1-add-sso-login\/tasks\/PL-T1-add-oidc-config\.md/);
+  assert.match(t1.stdout, /PL-T1 created at goals\/PL-G1\/tasks\/PL-T1\.md/);
 
   const t2 = awo(ws, [
     "task", "new", "--goal", "PL-G1", "--name", "Login UI",
@@ -102,19 +102,19 @@ test("a requirement id is never reissued after it moves into a goal folder", () 
   awo(ws, ["req", "new", "--title", "First ask"]);
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
 
-  // PL-R1 now lives at goals/PL-G1-first-ask/requirement.md, invisible in the
+  // PL-R1 now lives at goals/PL-G1/requirement.md, invisible in the
   // goals/ listing — but it is still referenced by goal.md's requirementId, so
   // reusing the number would give two requirements the same id.
   const second = awo(ws, ["req", "new", "--title", "Second ask"]);
   assert.equal(second.code, 0, second.stderr);
   assert.match(second.stdout, /PL-R2 created/, "must not reissue PL-R1");
-  assert.ok(!fs.existsSync(path.join(ws, "goals", "PL-R1.md")));
+  assert.ok(!fs.existsSync(path.join(ws, "requirements", "PL-R1.md")));
 
   // Same for goal ids after a goal exists.
   awo(ws, ["goal", "new", "--from", "PL-R2"]);
   assert.match(
     fs.readdirSync(path.join(ws, "goals")).join(" "),
-    /PL-G1-first-ask.*PL-G2-second-ask|PL-G2-second-ask.*PL-G1-first-ask/
+    /PL-G1.*PL-G2|PL-G2.*PL-G1/
   );
   fs.rmSync(ws, { recursive: true, force: true });
 });
@@ -137,7 +137,7 @@ test("task new validates goal, targets and dependsOn before writing anything", (
   const ws = makeWorkspace();
   awo(ws, ["req", "new", "--title", "Thing"]);
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
-  const goalDir = path.join(ws, "goals", "PL-G1-thing");
+  const goalDir = path.join(ws, "goals", "PL-G1");
 
   const badGoal = awo(ws, ["task", "new", "--goal", "PL-G9", "--name", "x"]);
   assert.equal(badGoal.code, 1);
@@ -165,10 +165,10 @@ test("ID allocation skips numbers already used by hand-authored files", () => {
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
 
   // Someone hand-authors PL-T1 and PL-T2; the next allocation must be T3.
-  const tasksDir = path.join(ws, "goals", "PL-G1-one", "tasks");
+  const tasksDir = path.join(ws, "goals", "PL-G1", "tasks");
   for (const n of [1, 2]) {
     fs.writeFileSync(
-      path.join(tasksDir, `PL-T${n}-manual.md`),
+      path.join(tasksDir, `PL-T${n}.md`),
       `---\nid: PL-T${n}\ngoalId: PL-G1\nname: Manual ${n}\nstatus: todo\n---\n\nx\n`
     );
   }
@@ -189,9 +189,9 @@ test("doctor reports a clean workspace, and finds broken targets, deps and links
   assert.match(clean.stdout, /No problems found\.|0 error\(s\)/);
 
   // Break things: a bad target, a bad dependency, and a missing repo link.
-  const tasksDir = path.join(ws, "goals", "PL-G1-thing", "tasks");
+  const tasksDir = path.join(ws, "goals", "PL-G1", "tasks");
   fs.writeFileSync(
-    path.join(tasksDir, "PL-T9-broken.md"),
+    path.join(tasksDir, "PL-T9.md"),
     `---\nid: PL-T9\ngoalId: PL-G1\nname: Broken\ntargets: [ghost]\ndependsOn: [PL-T42]\nstatus: todo\n---\n\nx\n`
   );
   fs.rmSync(path.join(ws, "repos", "api"), { recursive: true, force: true });
@@ -378,7 +378,10 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   );
   assert.ok(!/--add-dir/.test(v.stdout), "a read-only run needs no write grants");
 
-  const brief = fs.readFileSync(path.join(ws, "logs", "verify-PL-G1.md"), "utf8");
+  // The brief is filed as its own run directory, not loose in logs/.
+  const briefDirs = fs.readdirSync(path.join(ws, "logs", "PL-G1"));
+  assert.equal(briefDirs.length, 1, "verify must file one brief under its goal");
+  const brief = fs.readFileSync(path.join(ws, "logs", "PL-G1", briefDirs[0], "brief.md"), "utf8");
   assert.match(brief, /Judge the goal AS A WHOLE/);
   assert.match(brief, /CONTRACTS BETWEEN them/);
   assert.match(brief, /feature\/PL-T1/);
@@ -398,7 +401,7 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t2\/2 done/);
 
   // Both verdicts are in the log, attributed to qa-engineer.
-  const runs = fs.readFileSync(path.join(ws, "logs", "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const runs = fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   const gates = runs.filter((r) => r.runId.includes("qa-gate-PL-G1"));
   assert.equal(gates.length, 2);
   assert.deepEqual(gates.map((g) => g.status).sort(), ["failed", "success"]);

@@ -38,7 +38,7 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
   const fs = await import("fs-extra");
   const path = await import("path");
   const looseRequirements = (
-    await fs.default.readdir(path.default.join(root, "goals")).catch(() => [])
+    await fs.default.readdir(path.default.join(root, "requirements")).catch(() => [])
   )
     .filter((f: string) => f.endsWith(".md"))
     .map((f: string) => f.replace(/\.md$/, ""));
