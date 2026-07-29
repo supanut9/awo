@@ -14,10 +14,12 @@ summary: takes a verified task through its configured PR outcome.
   operating from the task's isolated worktree (rule: `isolate-task-worktrees`)
   — never the shared `repos/<name>` checkout.
 - Drive the PR through checks and review feedback until all repository-required
-  conditions are satisfied.
+  conditions are satisfied, using `awo pr link`, `awo pr status`, and
+  `awo pr reconcile` so the task state remains auditable.
 - Follow `pullRequests.mergePolicy`: hand off at human approval by default, or
-  merge only as an authorised maintainer after verifying required checks and
-  reviews. Worktree cleanup follows the completed PR lifecycle.
+  merge only through `awo pr finalize` as an authorised maintainer after
+  verifying required checks and reviews. Worktree cleanup follows the completed
+  PR lifecycle.
 
 ## Boundaries
 - Operates on GitHub via the `github` connector only.

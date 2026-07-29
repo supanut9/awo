@@ -24,18 +24,21 @@ expected outcome is a review-ready pull request.
 3. **Implement in isolation** — dispatch or hand each unblocked task to its
    owner. Work only in the task's worktree, run the declared checks, capture
    measured evidence with `awo task event <id> test --run "..."`, then send the
-   task through its QA gate.
+   task through its QA gate. Link every test/manual check to the requirement with
+   `awo task evidence <id> --criterion <n> --kind test|manual --ref "..."`.
 4. **Verify the feature** — `qa-engineer` checks the goal's acceptance criteria
-   across tasks. A gap becomes a follow-up requirement/task; it is not hidden by
-   a passing unit suite.
+   across tasks using `awo goal trace <goal>`. A gap becomes a follow-up
+   requirement/task; it is not hidden by a passing unit suite.
 5. **Open and maintain the PR** — `release-engineer` commits, pushes the task
-   branch, opens a PR with evidence, then repeatedly addresses actionable
-   comments and failing checks. Re-request review after every meaningful push.
+   branch, opens a PR with evidence, runs `awo pr link <task> --repo <repo>
+   --number <n>`, then repeatedly runs `awo pr reconcile <task>` to address
+   actionable comments and failing checks. Re-request review after every
+   meaningful push.
 6. **Finish at the configured boundary** — when required checks pass and all
-   actionable threads are resolved, follow `pullRequests.mergePolicy`. The
-   default is **ready for human approval**. An authorised maintainer may merge
-   only after confirming GitHub's required checks and reviews; AI never
-   approves, enables auto-merge, or enters a merge queue.
+   actionable threads are resolved, run `awo pr finalize <task>` to follow
+   `pullRequests.mergePolicy`. The default is **ready for human approval**. An
+   authorised maintainer may merge only after confirming GitHub's required checks
+   and reviews; AI never approves, enables auto-merge, or enters a merge queue.
 
 ## Definition of ready for human approval
 

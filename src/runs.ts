@@ -80,6 +80,16 @@ export function runSlot(runId: string): { date: string; slot: string; time: stri
 }
 
 export type EventKind =
+  /**
+   * What the worker was told, recorded when the run opens.
+   *
+   * 28 of 28 records from the first real multi-agent run said "User prompt: _not
+   * recorded_". The prompt flag existed but sat on `task complete`, at the end,
+   * optional — so nobody passed it, and the log could show what a worker did with no
+   * trace of what it was asked. An instruction nobody kept is an instruction nobody
+   * can hold the worker to.
+   */
+  | "brief"
   | "run.start"
   | "step.start"
   | "step.end"

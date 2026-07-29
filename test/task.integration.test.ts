@@ -207,7 +207,8 @@ test("a full run: open -> events -> complete, writing state, events, index and d
 
   // The day's file carries this run's events, in order, alongside its run row.
   const kinds = runLines(ws, runId).map((e) => e.kind);
-  assert.deepEqual(kinds, ["run.start", "step.start", "repo.diff", "run.end"]);
+  // `brief` follows run.start: what the worker was told, recorded at open (§16.7).
+  assert.deepEqual(kinds, ["run.start", "brief", "step.start", "repo.diff", "run.end"]);
 
   // The run row, and the record section it points at
   const index = dayRows(ws).find((r) => r.runId === runId) as Record<string, unknown>;
@@ -985,5 +986,68 @@ test("recheck refuses a task that is not closed, and says what to run instead", 
   assert.equal(out.code, 1);
   assert.match(out.stderr, /is running, so there is nothing to re-check/);
   assert.match(out.stderr, /awo task run EV-T1/);
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("a recheck against an already-red suite is inconclusive, not a verdict on the task", () => {
+  // The suite fails at the branch point, so it says nothing about this change. The
+  // first version of recheck blamed the task for it and left it blocked.
+  const { ws, worktree } = makeEvidenceWorkspace({ brokenAtBase: true });
+  execFileSync(
+    process.execPath,
+    [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then"],
+    { cwd: ws }
+  );
+  fs.writeFileSync(path.join(worktree, "README.md"), "unrelated\n");
+  execSync("git add -A && git commit -qm unrelated", { cwd: worktree, stdio: "ignore" });
+
+  const out = awo(ws, ["task", "recheck", "EV-T1", "--run", "./t.sh", "--baseline"]);
+  assert.equal(out.code, 1, "inconclusive is not success");
+  assert.match(out.stdout, /pre-existing/);
+  assert.match(out.stdout, /proves nothing about this/);
+
+  // Blocked, not done: the task cannot be verified until the base is green, and it
+  // was only `done` because it closed before any gate existed. Laundering it back to
+  // done would also need an illegal blocked -> done transition.
+  assert.match(awo(ws, ["task", "show", "EV-T1"]).stdout, /status: {3}blocked/);
+  const rows = dayRows(ws).filter((r) => r.taskId === "EV-T1");
+  assert.equal(rows.at(-1)!.status, "skipped", "the run is skipped, not failed");
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("what the worker was told is recorded at run-open, not left to be remembered", () => {
+  const { ws } = makeEvidenceWorkspace();
+  // makeEvidenceWorkspace already opened the run; open a second one with an
+  // orchestrator instruction attached.
+  awo(ws, ["task", "complete", "EV-T1", "--outcome", "failed", "--summary", "x"]);
+  awo(ws, ["task", "status", "EV-T1", "todo"]);
+  const opened = awo(ws, [
+    "task", "run", "EV-T1",
+    "--instruction", "Use the existing pagination helper; add no dependency.",
+  ]);
+  assert.equal(opened.code, 0, opened.stderr);
+
+  const day = fs.readdirSync(path.join(ws, "logs")).filter((d) => /^\d{4}-/.test(d))[0];
+  const briefs = fs
+    .readFileSync(path.join(ws, "logs", day, "runs.jsonl"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.kind === "brief");
+
+  assert.ok(briefs.length >= 1, "opening a run must record the brief");
+  const brief = briefs.at(-1)!;
+  assert.match(String(brief.text), /You are software-engineer working task EV-T1/);
+  assert.match(String(brief.text), /isolated git worktree/);
+  assert.match(String(brief.text), /--run "<cmd>"/, "it must tell the worker how evidence works");
+  assert.equal(brief.instruction, "Use the existing pagination helper; add no dependency.");
+
+  // And it reaches the record with nobody passing --prompt, which is the whole point:
+  // 28 of 28 records from the first real run said "_not recorded_".
+  awo(ws, ["task", "event", "EV-T1", "test", "--run", "./t.sh"]);
+  awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--summary", "done"]);
+  const record = runRecord(ws, String(briefs.at(-1)!.runId));
+  assert.match(record, /### User prompt\n+You are software-engineer/);
+  assert.ok(!/### User prompt\n_not recorded_/.test(record));
   fs.rmSync(path.dirname(ws), { recursive: true, force: true });
 });

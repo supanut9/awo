@@ -1928,3 +1928,24 @@ A `.new` now means what it says — **the same lines moved on both sides** — a
     run rather than editing the original, so the history says what happened — closed
     once without evidence, verified later. Rewriting the original would have made the
     audit trail a story instead of a record, which is the one property it has.
+
+76. **The outcome must follow the diagnosis, not the exit code.** `recheck` treated
+    any non-zero exit as "the original close was wrong" — and then blamed SHOP-T3 for
+    a suite that was already red at its branch point, which the diagnosis had
+    explicitly said was not its defect. A `pre-existing` failure means exactly one
+    thing: this command cannot verify this task. That is a `skipped` run.
+77. **The state machine caught the tool trying to launder a status.** The first fix
+    was to restore the task to `done` after an inconclusive check, which failed:
+    `blocked -> done` is not a legal transition for anyone. It was right to refuse.
+    An unverifiable task IS blocked, and it was only `done` because it closed before
+    a gate existed — so `blocked` is the honest state and the code now leaves it
+    there rather than working around the table.
+78. **An instruction nobody kept is an instruction nobody can be held to.** 28 of 28
+    records from the first multi-agent run read "User prompt: _not recorded_". The
+    flag existed, but on `task complete`, at the end, optional. Now `task run`
+    *composes* the brief and records it as a `brief` event at open — so it exists
+    even for an abandoned run, it is identical whether a human pastes the invocation
+    or `dispatch` spawns it, and the record falls back to it when nobody passes
+    `--prompt`. `--instruction` carries the orchestrator's own words into the same
+    place. Making it automatic beat asking people to remember, which had a 0% hit
+    rate across 28 attempts.

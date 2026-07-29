@@ -18,3 +18,9 @@ Every pull request MUST include:
 `pullRequests.mergePolicy: human-only` stops at a review-ready PR. With
 `authorized-maintainer`, the worker may merge only after it has verified that
 the repository's required checks and reviews are satisfied.
+
+Before PR work, run `awo pr preflight --repo <repo>`. After creating a PR, link
+it to its task with `awo pr link <task> --repo <repo> --number <n>` and use
+`awo pr reconcile <task>` to turn new unresolved review threads into explicit
+repair tasks. Record requirement coverage with `awo task evidence` and inspect
+it with `awo goal trace`; a green check alone is not criterion-level evidence.

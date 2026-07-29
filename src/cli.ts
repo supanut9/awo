@@ -32,6 +32,14 @@ import {
 import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 import { runGoalNew, runReqNew, runTaskNew } from "./commands/plan.js";
+import { runGoalTrace, runTaskEvidence } from "./commands/traceability.js";
+import {
+  runPrFinalize,
+  runPrLink,
+  runPrPreflight,
+  runPrReconcile,
+  runPrStatus,
+} from "./commands/pr.js";
 import { runSync, syncHadProblems } from "./commands/sync.js";
 import { doctorExitCode, runDoctor } from "./commands/doctor.js";
 import { planHasWork, runUpgrade } from "./commands/upgrade.js";
@@ -589,6 +597,24 @@ goal
   });
 
 goal
+  .command("trace <goalId>")
+  .description("Show each acceptance criterion and the test/manual/exception evidence recorded against it.")
+  .action(async (goalId: string) => {
+    try {
+      const rows = await runGoalTrace(goalId);
+      for (const row of rows) {
+        console.log(`${row.index}\t${row.status}\t${row.criterion}`);
+        for (const evidence of row.evidence) {
+          console.log(`  ${evidence.kind}\t${evidence.taskId}\t${evidence.ref}`);
+        }
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
   .command("verdict <goalId>")
   .description("Record the QA gate's outcome: --pass verifies the in-review tasks, --gap files a new requirement.")
   .option("--pass", "the goal meets its definition of done")
@@ -707,6 +733,22 @@ task
   });
 
 task
+  .command("evidence <taskId>")
+  .description("Link a task's test, manual check, or accepted exception to one acceptance criterion.")
+  .requiredOption("--criterion <n>", "1-based acceptance-criterion number", (v) => parseInt(v, 10))
+  .requiredOption("--kind <kind>", "test | manual | exception")
+  .requiredOption("--ref <text>", "test command/run ID, manual evidence URL, or exception reference")
+  .action(async (taskId: string, opts: { criterion: number; kind: "test" | "manual" | "exception"; ref: string }) => {
+    try {
+      const evidence = await runTaskEvidence({ taskId, ...opts });
+      console.log(`criterion ${opts.criterion} <- ${evidence.kind} evidence from ${taskId}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+task
   .command("status <taskId> <status>")
   .description("Move a task's lifecycle state by hand. The only way to reach `cancelled`.")
   .option("--reason <reason>", "why (recorded when moving to blocked)")
@@ -726,9 +768,13 @@ task
     "Open a run for a task: resolves dependsOn, validates targets, creates the isolated worktrees, moves state to running, starts the event stream. The agent then does the work and closes it with `task complete`."
   )
   .option("--no-worktree", "skip worktree creation (work in the shared checkout)")
-  .action(async (taskId: string, opts: { worktree?: boolean }) => {
+  .option("--instruction <text>", "what you are telling this worker — recorded in the run")
+  .action(async (taskId: string, opts: { worktree?: boolean; instruction?: string }) => {
     try {
-      const r = await runTaskRun(taskId, { noWorktree: opts.worktree === false });
+      const r = await runTaskRun(taskId, {
+        noWorktree: opts.worktree === false,
+        instruction: opts.instruction,
+      });
       console.log(`${r.taskId} is running — run ${r.runId}`);
       console.log(`agent:   ${r.agent ?? "unassigned"} — ${r.model.tier} tier (from ${r.model.tierSource})`);
       console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}${r.model.mode ? ` (${r.model.mode} mode)` : ""}`);
@@ -852,7 +898,14 @@ task
         console.log(
           `${r.taskId}: ${r.previousStatus} -> ${r.status} — ${r.diagnosis} (run ${r.runId})`
         );
-        if (!r.passed) {
+        if (r.inconclusive) {
+          console.log(
+            "  That command fails at the branch point too, so it proves nothing about this\n" +
+              "  task — and the task is now blocked rather than done, which is the honest\n" +
+              "  state: it cannot be verified until the base suite is green."
+          );
+          process.exitCode = 1;
+        } else if (!r.passed) {
           console.log("  It does not pass, so the original close was wrong. Left for you to deal with.");
           process.exitCode = 1;
         }
@@ -893,6 +946,83 @@ task
     try {
       const to = await runTaskVerify(taskId, { approve: !opts.reject, reason: opts.reason });
       console.log(`${taskId} -> ${to}.`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+const pr = program.command("pr").description("Link, reconcile, and safely finalize GitHub pull requests.");
+
+pr
+  .command("preflight")
+  .description("Verify GitHub CLI authentication and repository access before an agent works a PR.")
+  .option("--repo <repo>", "one linked repository (default: all linked repositories)")
+  .action(async (opts: { repo?: string }) => {
+    try {
+      const rows = await runPrPreflight(opts);
+      for (const row of rows) {
+        console.log(`${row.repo}\tauthenticated\tpermission=${row.permission}\tdefault=${row.defaultBranch}`);
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+pr
+  .command("link <taskId>")
+  .description("Link a task to an existing GitHub PR and persist its live snapshot.")
+  .requiredOption("--repo <repo>", "linked repository name")
+  .requiredOption("--number <n>", "GitHub PR number", (v) => parseInt(v, 10))
+  .action(async (taskId: string, opts: { repo: string; number: number }) => {
+    try {
+      const linked = await runPrLink({ taskId, ...opts });
+      console.log(`${taskId} -> ${linked.repo}#${linked.number} ${linked.url}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+pr
+  .command("status <taskId>")
+  .description("Refresh and show the linked PR's checks, review decision, and merge state.")
+  .action(async (taskId: string) => {
+    try {
+      const status = await runPrStatus(taskId);
+      console.log(`${status.repo}#${status.number}\tchecks=${status.checks}\treviews=${status.reviews}\tmerge=${status.mergeState}${status.isDraft ? "\tdraft" : ""}`);
+      console.log(status.url);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+pr
+  .command("reconcile <taskId>")
+  .description("Refresh a linked PR and create one repair task for each new unresolved review thread.")
+  .action(async (taskId: string) => {
+    try {
+      const result = await runPrReconcile(taskId);
+      console.log(`${result.pr.repo}#${result.pr.number}\t${result.unresolved} unresolved review thread(s)`);
+      if (result.createdTaskIds.length > 0) console.log(`created: ${result.createdTaskIds.join(", ")}`);
+      if (result.warning) console.log(`WARNING: ${result.warning}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+pr
+  .command("finalize <taskId>")
+  .description("Apply pullRequests.mergePolicy. AWO never approves a PR; human-only never merges.")
+  .option("--dry-run", "show an authorized-maintainer merge without calling GitHub")
+  .action(async (taskId: string, opts: { dryRun?: boolean }) => {
+    try {
+      const result = await runPrFinalize(taskId, opts);
+      console.log(`${result.action}\t${result.reason}`);
+      if (result.action === "blocked") process.exitCode = 1;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

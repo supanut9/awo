@@ -71,29 +71,19 @@ export async function runDispatch(
     };
   }
 
-  const opened: TaskRunResult = await runTaskRun(taskId, { cwd: root });
+  const opened: TaskRunResult = await runTaskRun(taskId, {
+    cwd: root,
+    instruction: options.instruction,
+  });
   const runId = opened.runId;
   const mergePolicy = resolvePullRequestMergePolicy(await readManifest(root));
 
   const usable = opened.worktrees.filter((w) => !w.error);
   const cwd = usable[0] ? path.join(root, usable[0].path) : root;
 
-  const prompt = [
-    `You are ${opened.agent ?? "software-engineer"} working task ${taskId}.`,
-    `Follow instructions/ship-a-change.md and the workspace's rules in AGENTS.md.`,
-    usable[0]
-      ? `You are in an isolated git worktree on ${usable[0].branch}. Work ONLY here — never in repos/<name> directly.`
-      : `WARNING: no worktree isolation was established. Be conservative.`,
-    `Record what you ran, then commit on this branch. Do not push and do not open a PR.`,
-    mergePolicy === "authorized-maintainer"
-      ? `Non-negotiable boundary: never approve a pull request. An authorised maintainer may merge only after GitHub confirms every repository-required check and review is satisfied; do not enable auto-merge or a merge queue.`
-      : `Non-negotiable boundary: do not approve, merge, enable auto-merge, or queue any pull request. AI work ends at a PR ready for authenticated human approval.`,
-    options.instruction ?? "",
-    "",
-    opened.body,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  // The brief comes from `task run`, which already recorded it — so what the worker
+  // is told and what the log says it was told cannot drift apart.
+  const prompt = opened.brief;
 
   const argv = buildArgv(opened, prompt, usable.flatMap((w) => w.writablePaths));
 

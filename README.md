@@ -47,6 +47,8 @@ awo task run SHOP-T1                     # opens the run, creates the worktree,
                                           # prints which model should do it
 awo task event SHOP-T1 test --data '{"repo":"my-api","pass":42}'
 awo task complete SHOP-T1 --outcome success --gate
+awo task evidence SHOP-T1 --criterion 1 --kind test --ref "npm test"
+awo goal trace SHOP-G1
 
 awo goal verify SHOP-G1                   # assemble the QA gate for a high-tier review
 awo goal verdict SHOP-G1 --pass --summary "meets the definition of done"
@@ -84,6 +86,8 @@ awo task new --goal SHOP-G1 --name "Implement API contract" --targets api --agen
 awo task dispatch SHOP-T1
 awo task event SHOP-T1 test --run "npm test" --baseline
 awo task complete SHOP-T1 --outcome success --gate
+awo task evidence SHOP-T1 --criterion 1 --kind test --ref "npm test"
+awo goal trace SHOP-G1
 awo goal verify SHOP-G1
 ```
 
@@ -93,6 +97,14 @@ fix actionable comments or failed checks. It never submits an approval. By
 default it stops after requesting human review; set
 `pullRequests.mergePolicy` to `authorized-maintainer` only when that account is
 intentionally permitted to merge after GitHub-required checks and reviews pass.
+
+Before PR work, `awo pr preflight --repo api` verifies the existing `gh` identity
+and repo access. After opening the PR, link it with `awo pr link SHOP-T1 --repo api
+--number 42`; `awo pr reconcile SHOP-T1` refreshes the live PR and creates focused
+repair tasks for unresolved review threads. `awo pr finalize SHOP-T1` always
+reconciles first: `human-only` reports ready for a colleague, while
+`authorized-maintainer` can perform only an immediate, clean squash merge. It never
+submits an approval, enables auto-merge, or joins a merge queue.
 
 Configure branch protection/rulesets to match your team. In a company repo,
 require colleague approval and keep `human-only`. In a solo/maintainer repo,
@@ -131,15 +143,25 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | `awo req refine` · `propose` · `approve` · `reject` · `list` | Turn a wish into checkable criteria, then **a human accepts the terms**. `goal new` refuses anything unapproved. |
 | `awo run --goal <id> [--until <task>] [--yolo]` | Work the plan in dependency order. Stops at the gate, on failure, and always on evidence needing a human. |
 | `awo goal new --from <req>` | Turn a requirement into a goal, moving it in as `requirement.md`. |
-| `awo goal list` · `goal verify` · `goal verdict` | Progress · assemble the QA gate · record its outcome. |
+| `awo goal list` · `goal trace` · `goal verify` · `goal verdict` | Progress · criterion coverage · assemble the QA gate · record its outcome. |
 | `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`. |
-| `awo task run <id>` | Open a run: resolve dependencies, create the isolated worktree, resolve the model. |
+| `awo task run <id> [--instruction <text>]` | Open a run: resolve dependencies, create the isolated worktree, resolve the model, and **record the brief the worker is given**. |
 | `awo task dispatch <id>` | Open a run **and spawn** the resolved worker, blocking until it exits. |
 | `awo task event <id> <kind>` | Record progress during a run. |
+| `awo task evidence <id> --criterion <n> --kind <test\|manual\|exception> --ref <text>` | Trace task evidence to an acceptance criterion. |
 | `awo task complete <id> --outcome <o>` | Close it. `--gate` routes success to review. |
 | `awo task verify <id> [--reject]` | QA gate on one task. |
 | `awo task recheck <id> --run <cmd>` | Attach real evidence to a task closed without any. Opens a new run; never rewrites the old one. |
 | `awo log list` · `log show` · `log tail` · `log add` | Run history, filterable by task/agent/repo/status/tier/effort. |
+
+**Pull requests**
+
+| Command | Purpose |
+|---|---|
+| `awo pr preflight [--repo <repo>]` | Verify GitHub CLI authentication and linked-repository access. |
+| `awo pr link <task> --repo <repo> --number <n>` · `pr status <task>` | Persist and refresh a task's live PR snapshot. |
+| `awo pr reconcile <task>` | Create repair tasks for newly unresolved GitHub review threads. |
+| `awo pr finalize <task> [--dry-run]` | Enforce merge policy; no AI approval, and merge only as an authorised maintainer. |
 
 **Catalog and publishing**
 

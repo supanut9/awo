@@ -36,6 +36,15 @@ logs/<date>/workers/                        raw worker output, when dispatched
 **See `instructions/full-workflow.md` for the canonical end-to-end sequence**
 — intake → plan → build & ship (per task) → QA gate → done.
 
+## PR control loop
+Before working a pull request, run `awo pr preflight --repo <repo>`. Link it to
+the implementation task with `awo pr link <task> --repo <repo> --number <n>`.
+Use `awo pr reconcile <task>` after every review/check cycle; it snapshots the
+live PR and creates focused repair tasks for unresolved review threads. Record
+acceptance-criterion evidence with `awo task evidence` and inspect coverage with
+`awo goal trace`. Finish only through `awo pr finalize <task>`: it never approves
+a PR and applies the configured merge policy.
+
 ## Adding your own
 Drop a file in the directory and awo picks it up — the lists below are generated
 from `rules/`, `skills/` and `agents/`, so there is nothing to register:

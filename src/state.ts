@@ -56,6 +56,48 @@ export interface TaskState {
   attempts: number;
   worktree: string | null;
   blockedReason: string | null;
+  /** Runtime link to the PR that implements this task; never authored into task.md. */
+  pullRequest?: PullRequestState;
+}
+
+export type PullRequestCheckStatus = "passing" | "failing" | "pending" | "unknown";
+export type PullRequestReviewStatus =
+  | "approved"
+  | "changes-requested"
+  | "pending"
+  | "not-required";
+
+export interface PullRequestFeedbackState {
+  id: string;
+  body: string;
+  url: string | null;
+  author: string | null;
+  resolved: boolean;
+  taskId: string | null;
+}
+
+/** A last-observed GitHub PR snapshot, kept in ignored state.json. */
+export interface PullRequestState {
+  repo: string;
+  number: number;
+  url: string;
+  branch: string;
+  headSha: string;
+  isDraft: boolean;
+  mergeState: string;
+  checks: PullRequestCheckStatus;
+  reviews: PullRequestReviewStatus;
+  lastCheckedAt: string;
+  feedback: Record<string, PullRequestFeedbackState>;
+}
+
+export type CriterionEvidenceKind = "test" | "manual" | "exception";
+
+export interface CriterionEvidence {
+  taskId: string;
+  kind: CriterionEvidenceKind;
+  ref: string;
+  recordedAt: string;
 }
 
 /** §7.2 — a goal's status is rolled up from its tasks, never hand-authored. */
@@ -73,6 +115,8 @@ export interface GoalState {
   goalStatus: GoalStatus;
   updatedAt: string;
   tasks: Record<string, TaskState>;
+  /** 1-based acceptance-criterion index -> evidence gathered for the criterion. */
+  criteria?: Record<string, CriterionEvidence[]>;
 }
 
 export function newTaskState(status: TaskStatus = "todo"): TaskState {

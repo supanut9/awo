@@ -131,7 +131,7 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
   const events = await (await fetch(`${ui.url}/api/events?run=${encodeURIComponent(runId)}`)).json();
   assert.deepEqual(
     events.map((e: { kind: string }) => e.kind),
-    ["run.start", "step.start", "run.end"]
+    ["run.start", "brief", "step.start", "run.end"]
   );
 
   const noRun = await fetch(`${ui.url}/api/events`);

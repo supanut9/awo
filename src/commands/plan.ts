@@ -216,6 +216,8 @@ export async function runTaskNew(options: {
   targets?: string[];
   dependsOn?: string[];
   agent?: string;
+  /** Used by control-plane commands that create a task from external feedback. */
+  body?: string;
   cwd?: string;
 }): Promise<TaskNewResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
@@ -252,7 +254,7 @@ export async function runTaskNew(options: {
   await fs.writeFile(
     file,
     matter.stringify(
-      `\n## Objective
+      options.body ?? `\n## Objective
 _What "done" means for this unit._
 
 ## Steps

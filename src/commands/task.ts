@@ -133,7 +133,39 @@ export async function runTaskStatus(
   return target;
 }
 
+/**
+ * The instruction a worker receives. Composed by awo rather than by whoever is
+ * driving, so it is identical whether a human pastes it or `dispatch` spawns it —
+ * and so it is always in the log.
+ */
+export function composeBrief(input: {
+  taskId: string;
+  agent: string | null;
+  body: string;
+  branch?: string;
+  isolated: boolean;
+  instruction?: string;
+}): string {
+  return [
+    `You are ${input.agent ?? "software-engineer"} working task ${input.taskId}.`,
+    `Follow instructions/ship-a-change.md and the workspace's rules in AGENTS.md.`,
+    input.isolated
+      ? `You are in an isolated git worktree on ${input.branch}. Work ONLY here — never in repos/<name> directly.`
+      : `WARNING: no worktree isolation was established. Be conservative.`,
+    `Record what you ran with \`awo task event ${input.taskId} test --run "<cmd>" --baseline\` —`,
+    `a claim that tests passed is refused at the gate. Then commit on this branch.`,
+    `Do not push and do not open a PR.`,
+    input.instruction ? `\n## From the orchestrator\n${input.instruction}` : "",
+    "",
+    input.body,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 export interface TaskRunResult {
+  /** Exactly what the worker is told. Also recorded as the run's `brief` event. */
+  brief: string;
   taskId: string;
   runId: string;
   eventsFile: string;
@@ -157,7 +189,7 @@ export interface TaskRunResult {
  */
 export async function runTaskRun(
   taskId: string,
-  options: { cwd?: string; noWorktree?: boolean } = {}
+  options: { cwd?: string; noWorktree?: boolean; instruction?: string } = {}
 ): Promise<TaskRunResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const manifest = await readManifest(workspaceRoot);
@@ -271,7 +303,25 @@ export async function runTaskRun(
     ...(model.effort ? { effort: model.effort } : {}),
   });
 
+  // Recorded at open, not at close, and composed here rather than by the caller —
+  // so the log holds what the worker was told even if the run is abandoned, and
+  // whether a human pasted the invocation or `dispatch` spawned it.
+  const isolated = worktrees.some((w) => !w.error);
+  const brief = composeBrief({
+    taskId: task.id,
+    agent: task.agent,
+    body: task.body,
+    branch: worktrees.find((w) => !w.error)?.branch,
+    isolated,
+    instruction: options.instruction,
+  });
+  await appendEvent(workspaceRoot, runId, "brief", {
+    text: brief,
+    ...(options.instruction ? { instruction: options.instruction } : {}),
+  });
+
   return {
+    brief,
     model,
     worktrees,
     invocation: invocationHint(model, task.id, workerContext),
@@ -494,6 +544,8 @@ export async function runTaskComplete(
     : null;
 
   const events = await readEvents(workspaceRoot, runId);
+  const briefEvent = events.find((e) => e.kind === "brief");
+  const briefText = typeof briefEvent?.text === "string" ? briefEvent.text : undefined;
 
   // Any event may name a repo — repo.diff, test, commit. Deriving only from
   // repo.diff reported `reposChanged: []` for a run that changed 8 files and
@@ -526,7 +578,9 @@ export async function runTaskComplete(
       reposChanged,
     },
     {
-      prompt: options.prompt,
+      // Falls back to the brief, so "what was this worker asked to do" is answerable
+      // for every run rather than only the ones where someone remembered --prompt.
+      prompt: options.prompt ?? briefText,
       interpreted: options.interpreted,
       summary: options.summary,
       // An excused-untested run must say so in its own record, or the exemption
@@ -610,6 +664,8 @@ export interface RecheckResult {
   status: TaskStatus;
   diagnosis: string;
   passed: boolean;
+  /** The command could not verify the task, so nothing was learned. */
+  inconclusive: boolean;
 }
 
 export async function runTaskRecheck(
@@ -659,17 +715,44 @@ export async function runTaskRecheck(
   const events = await readEvents(workspaceRoot, (await readState(goal.dir, goal.id)).tasks[task.id]!.lastRunId!);
   const test = events.filter((e) => e.kind === "test").at(-1);
   const passed = test?.exitCode === 0;
+  const diagnosis = measured.diagnosis ?? "unknown";
+
+  // The outcome follows the DIAGNOSIS, not the exit code.
+  //
+  // Treating any non-zero exit as "the original close was wrong" blamed a task for a
+  // suite that was already red at its branch point — which the diagnosis had already
+  // said was not its defect. A `pre-existing` failure means one thing only: this
+  // command cannot verify this task. That is a `skipped` run, and the task keeps the
+  // status it had, because nothing was learned about it either way.
+  const outcome: RunOutcome = passed ? "success" : diagnosis === "pre-existing" ? "skipped" : "failed";
 
   await runTaskComplete(task.id, {
     cwd: workspaceRoot,
-    outcome: passed ? "success" : "failed",
+    outcome,
     // A pass that still needs a human goes to review, not straight back to done.
     gate: passed && measured.needsHuman === true,
+    // `skipped` closes the run without evidence, which is honest and needs saying.
+    untested:
+      outcome === "skipped"
+        ? `"${command}" was already failing at the branch point, so it cannot verify this task`
+        : undefined,
     summary: passed
-      ? `Re-checked with \`${command}\`: ${measured.diagnosis}. Original run closed with no evidence.`
-      : `Re-checked with \`${command}\`: ${measured.diagnosis}. It does not pass, so the original close was wrong.`,
+      ? `Re-checked with \`${command}\`: ${diagnosis}. Original run closed with no evidence.`
+      : diagnosis === "pre-existing"
+        ? `Re-checked with \`${command}\`, which fails at the branch point too. Not this task's ` +
+          `defect — and not verification either. A command that is already red proves nothing ` +
+          `about this change; the task needs a check that passes on the base first.`
+        : `Re-checked with \`${command}\`: ${diagnosis}. It does not pass, so the original close was wrong.`,
     note: [`re-opened from ${before.status} to attach evidence the original run never had`],
   });
+
+  // Deliberately NOT restored to `done`.
+  //
+  // A skipped run leaves the task blocked, and blocked is the truthful state: the
+  // task cannot be verified until the base suite is green, and it was only `done`
+  // because it closed before there was a gate. Putting it back would also require
+  // an illegal transition (blocked -> done), which is the state machine correctly
+  // refusing to let a tool launder a status.
 
   const after = effectiveState(await readState(goal.dir, goal.id), task);
   return {
@@ -677,7 +760,8 @@ export async function runTaskRecheck(
     runId: after.lastRunId ?? "(none)",
     previousStatus: before.status,
     status: after.status,
-    diagnosis: measured.diagnosis ?? "unknown",
+    diagnosis,
     passed,
+    inconclusive: outcome === "skipped",
   };
 }

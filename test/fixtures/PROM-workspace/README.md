@@ -19,10 +19,8 @@ next, so you don't spend tokens scanning the tree.
   `requirement.md` it came from, and `tasks/<KEY>-T#.md`.
 - `catalog/` — extra agents/skills shipped but **not installed**; add one with `awo agent add <name>`.
 - `repos/` — linked working repos (gitignored). Task worktrees live under `repos/.worktrees/<repo>/<taskId>/`.
-- `logs/` — the audit trail (gitignored): an `index.jsonl` for querying, plus one
-  directory per run at `logs/<taskId>/<timestamp>/` holding `record.md`,
-  `events.jsonl` and (when a worker was dispatched) `worker.log`. Work with no task
-  files under `logs/_adhoc/`.
+- `logs/` — the audit trail (gitignored): each day has `runs.jsonl` (events and
+  completed-run rows), `runs.md` (readable records), and optional `workers/` output.
 - `.workspace/manifest.json` — the single source of truth for repos, model policy and version.
 
 ## Common commands
@@ -39,7 +37,13 @@ next, so you don't spend tokens scanning the tree.
 | `awo task run PROM-T#` | Open a run: creates the worktree, prints the model to use. |
 | `awo task event PROM-T# test --data '{"repo":"…","pass":42}'` | Record what ran. |
 | `awo task complete PROM-T# --outcome success --gate` | Close it for review. |
+| `awo task evidence PROM-T# --criterion 1 --kind test --ref "<run or command>"` | Trace task evidence to an acceptance criterion. |
+| `awo goal trace PROM-G#` | Show criterion coverage and any accepted exceptions. |
 | `awo goal verify PROM-G#` → `awo goal verdict … --pass\|--gap` | The QA gate, and its outcome. |
+| `awo pr preflight [--repo <repo>]` | Confirm `gh` authentication and repository access before PR work. |
+| `awo pr link PROM-T# --repo <repo> --number <n>` | Persist the task-to-PR link and live GitHub snapshot. |
+| `awo pr reconcile PROM-T#` | Refresh checks/reviews and create repair tasks for new review threads. |
+| `awo pr finalize PROM-T#` | Apply `pullRequests.mergePolicy`; never approves a PR. |
 | `awo log list [--tier low] [--status failed]` | Run history. |
 | `awo ui` | Local dashboard on 127.0.0.1. |
 

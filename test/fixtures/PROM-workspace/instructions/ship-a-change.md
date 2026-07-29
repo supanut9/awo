@@ -18,12 +18,15 @@ Sequence for delivering a task (`PROM-T#`):
    (rule: `tests-must-pass`) — software-engineer.
 5. **create-commit** — record the change (rule: `conventional-commits`) —
    release-engineer.
-6. **open-pr** — open the PR from the task's worktree/branch
-   (rule: `pr-requirements`) — release-engineer.
-7. **resolve-pr** — iterate until required checks pass and actionable feedback
-   is resolved — release-engineer / code-reviewer.
-8. Follow `pullRequests.mergePolicy`: `human-only` stops at **ready for human
+6. **open-pr** — open the PR from the task's worktree/branch, then record the
+   link with `awo pr link <task> --repo <repo> --number <n>` (rule:
+   `pr-requirements`) — release-engineer.
+7. **resolve-pr** — run `awo pr reconcile <task>` until required checks pass and
+   actionable feedback is resolved — release-engineer / code-reviewer.
+8. Record `awo task evidence` for every relevant acceptance criterion and check
+   goal coverage with `awo goal trace <goal>` before QA sign-off.
+9. Run `awo pr finalize <task>`: `human-only` stops at **ready for human
    approval**; `authorized-maintainer` may merge after verifying GitHub's
-   required checks and reviews. An AI worker never approves, enables
-   auto-merge, or queues a PR (rule: `human-approval-required`). The run is
-   captured under `logs/` with the task ID.
+   required checks and reviews. An AI worker never approves, enables auto-merge,
+   or queues a PR (rule: `human-approval-required`). The run is captured under
+   `logs/` with the task ID.
