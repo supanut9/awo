@@ -1645,3 +1645,12 @@ has not upgraded shows its history rather than appearing to have lost it.
     to notice that only one of them needs to be a *path* — the other is a query,
     and `logs/index.jsonl` already answers it. Structure the tree for browsing;
     leave lookup to the index.
+
+61. **A migration test that runs every migration in one hop tests a path most
+    users never take.** The 0.0.33 reshard rewrote no index pointers, and the test
+    passed anyway: it started from a pre-0.0.32 workspace, so 0.0.32's rewrite ran
+    *after* the code that computes the new paths and produced correct pointers by
+    accident. The real workspace had run 0.0.32 in an earlier session, hit 0.0.33
+    alone, and came out with all 24 `detailFile` pointers dangling. `awo log list`
+    still worked — it resolves by runId — so nothing looked wrong. Migration tests
+    must start from *each* shipped version, not only the oldest.

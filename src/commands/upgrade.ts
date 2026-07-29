@@ -40,6 +40,20 @@ const MIGRATIONS: Migration[] = [
     apply: async ({ root }) => reshardLogsByDate(root),
   },
   {
+    version: "0.0.34",
+    description: "repair index pointers left dangling by the 0.0.33 reshard",
+    apply: async ({ root }) => {
+      // 0.0.33 shipped without rewriting the index, so a workspace that had already
+      // run the 0.0.32 migration in an earlier session came out of it with every
+      // detailFile pointing at a path the reshard had just emptied. Repaired here
+      // rather than by asking anyone to re-run anything.
+      const before = await fs.readFile(indexFile(root), "utf8").catch(() => "");
+      if (!before.trim()) return false;
+      await rewriteIndexPointers(root);
+      return (await fs.readFile(indexFile(root), "utf8")) !== before;
+    },
+  },
+  {
     version: "0.0.2",
     description: "backfill manifest.workspaceId (uuid v7)",
     apply: async ({ root, manifest }) => {
@@ -212,7 +226,29 @@ async function reshardLogsByDate(root: string): Promise<boolean> {
     await fs.remove(path.join(logs, slot));
   }
 
+  // The index's detailFile pointers are relative paths, so moving the files
+  // invalidates them. Rewriting them here rather than trusting 0.0.32's rewrite is
+  // the whole bug this block exists for: on a workspace that had already run the
+  // 0.0.32 migration in an earlier session, that rewrite happened at 0.0.32 paths
+  // and this migration then moved the files out from under it — 24 dangling
+  // pointers, invisible to `awo log list` because it resolves by runId.
+  if (changed) await rewriteIndexPointers(root);
+
   return changed;
+}
+
+/** Point every index entry at wherever its record actually is now. */
+async function rewriteIndexPointers(root: string): Promise<void> {
+  const file = indexFile(root);
+  if (!(await fs.pathExists(file))) return;
+  const logs = path.join(root, "logs");
+  const lines = (await fs.readFile(file, "utf8")).split("\n").filter((l) => l.trim());
+  const rewritten = lines.map((line) => {
+    const entry = JSON.parse(line) as { runId: string; detailFile?: string };
+    entry.detailFile = path.relative(logs, detailFile(root, entry.runId));
+    return JSON.stringify(entry);
+  });
+  await fs.writeFile(file, rewritten.length ? `${rewritten.join("\n")}\n` : "");
 }
 
 /** `.workspace/manifest.json` is owned by migrations, never file reconciliation. */

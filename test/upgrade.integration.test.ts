@@ -385,3 +385,37 @@ test("the 0.0.32 restructure moves logs, goals and requirements without losing c
   execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
   assert.match(fs.readFileSync(path.join(newRun, "record.md"), "utf8"), /record body/);
 });
+
+test("resharding a workspace already at 0.0.32 rewrites its index pointers", () => {
+  // The 0.0.32 migration rewrote pointers using 0.0.32 paths. A workspace that ran
+  // it in an earlier session then hits 0.0.33, which MOVES those files — so the
+  // reshard must rewrite the pointers too. Both migrations running in one
+  // invocation hides this, which is exactly how it shipped once.
+  const ws = makeWorkspace();
+  pretendOlder(ws, "0.0.32");
+
+  const runId = "2026-07-28T16-33-45-180Z_UP-T2";
+  const taskFirst = path.join(ws, "logs", "UP-T2", "2026-07-28T16-33-45-180Z");
+  fs.mkdirSync(taskFirst, { recursive: true });
+  fs.writeFileSync(path.join(taskFirst, "record.md"), "record body\n");
+  fs.writeFileSync(path.join(taskFirst, "events.jsonl"), '{"t":"1","kind":"test"}\n');
+  fs.writeFileSync(
+    path.join(ws, "logs", "index.jsonl"),
+    `${JSON.stringify({
+      runId,
+      taskId: "UP-T2",
+      status: "success",
+      detailFile: path.join("UP-T2", "2026-07-28T16-33-45-180Z", "record.md"),
+    })}\n`
+  );
+
+  execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
+
+  const entry = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim());
+  assert.equal(entry.detailFile, path.join("2026-07-28", "UP-T2", "16-33-45-180Z", "record.md"));
+  assert.ok(
+    fs.existsSync(path.join(ws, "logs", entry.detailFile)),
+    "the rewritten pointer must resolve to the moved record"
+  );
+  assert.ok(!fs.existsSync(path.join(ws, "logs", "UP-T2")), "the task-first tree must be gone");
+});
