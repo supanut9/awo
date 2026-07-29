@@ -134,7 +134,7 @@ program
       if (opts.watch) {
         const first = await runPublish({});
         console.log(
-          `synced ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs` +
+          `synced ${first.detail} · ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs` +
             `${first.uriHost ? ` -> ${first.uriHost}/${first.database}` : ""}`
         );
         console.log("watching for changes — Ctrl+C to stop.");
@@ -158,7 +158,17 @@ program
         `${r.dryRun ? "would publish" : "published"} workspace ${r.workspaceId}` +
           `${r.uriHost ? ` -> ${r.uriHost}/${r.database}` : ""}`
       );
-      console.log(`  goals ${r.counts.goals} · tasks ${r.counts.tasks} · runs ${r.counts.runs}`);
+      console.log(
+        `  ${r.detail} · goals ${r.counts.goals} · tasks ${r.counts.tasks} · runs ${r.counts.runs}` +
+          `${r.counts.events > 0 ? ` · events ${r.counts.events}` : ""}`
+      );
+      if (r.detail === "summary") {
+        console.log(
+          `  bodies, run logs and event streams stay local. For the hosted dashboard to show them,\n` +
+            `  set "publish": { "detail": "full" } in .workspace/manifest.json — that sends prose\n` +
+            `  describing your code and prompts, which is why it is not the default.`
+        );
+      }
       if (r.dryRun && !r.uriHost) {
         console.log(`  no credentials yet — add MONGO_URI to .workspace/credentials/mongo.env`);
       }

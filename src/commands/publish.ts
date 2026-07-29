@@ -21,13 +21,23 @@ export interface PublishConfig {
   database: string;
   /** Prefix so a shared cluster can host several tools without collision. */
   collectionPrefix: string;
+  /**
+   * `summary` — statuses, counts and model/tier/effort only. Nothing describing
+   * the work itself leaves the machine.
+   * `full` — additionally the requirement/goal/task **bodies**, each run's
+   * markdown record and its event stream, so a hosted dashboard can show what the
+   * local one does. That prose describes private code and private prompts, so it
+   * is opt-in rather than the default.
+   */
+  detail: "summary" | "full";
   redact: { prompts: boolean; filePaths: boolean };
 }
 
 export interface PublishResult {
   workspaceId: string;
   database: string;
-  counts: { goals: number; tasks: number; runs: number };
+  detail: "summary" | "full";
+  counts: { goals: number; tasks: number; runs: number; events: number };
   dryRun: boolean;
   uriHost: string | null;
 }
@@ -36,6 +46,7 @@ const DEFAULTS: PublishConfig = {
   database: "awo",
   collectionPrefix: "awo_",
   // §7.6 — statuses and counts travel by default; prose about private code does not.
+  detail: "summary",
   redact: { prompts: true, filePaths: true },
 };
 
@@ -52,6 +63,7 @@ export async function readPublishConfig(
   const config: PublishConfig = {
     database: declared.database ?? DEFAULTS.database,
     collectionPrefix: declared.collectionPrefix ?? DEFAULTS.collectionPrefix,
+    detail: declared.detail === "full" ? "full" : DEFAULTS.detail,
     redact: { ...DEFAULTS.redact, ...(declared.redact ?? {}) },
   };
 
@@ -166,6 +178,24 @@ export async function runPublish(
     updatedAt: new Date().toISOString(),
   };
 
+  const full = config.detail === "full";
+  const reader = new FileReader(root);
+
+  // `full` carries the prose a hosted dashboard needs to be useful: the goal's
+  // definition-of-done, the requirement it came from, each task's objective and
+  // steps, every run's markdown record and its event stream.
+  const goalBodies = new Map<string, { goal: string; requirement: string }>();
+  if (full) {
+    const { findGoals } = await import("../tasks.js");
+    for (const g of await findGoals(root)) {
+      const read = async (f: string): Promise<string> =>
+        (await fs.pathExists(path.join(g.dir, f)))
+          ? await fs.readFile(path.join(g.dir, f), "utf8")
+          : "";
+      goalBodies.set(g.id, { goal: await read("goal.md"), requirement: await read("requirement.md") });
+    }
+  }
+
   const goals = snapshot.goals.map((g) => ({
     _id: `${wid}:${g.id}`,
     workspaceId: wid,
@@ -173,6 +203,12 @@ export async function runPublish(
     title: g.title,
     status: g.status,
     taskIds: g.tasks.map((t) => t.id),
+    ...(full
+      ? {
+          body: goalBodies.get(g.id)?.goal ?? "",
+          requirementBody: goalBodies.get(g.id)?.requirement ?? "",
+        }
+      : {}),
   }));
 
   const tasks = snapshot.goals.flatMap((g) =>
@@ -192,6 +228,19 @@ export async function runPublish(
     }))
   );
 
+  if (full) {
+    // Task bodies come from the reader so the hosted view sees exactly what the
+    // local drawer shows, rather than a second parse of the same files.
+    for (const t of tasks) {
+      const detail = await reader.task(t.taskId).catch(() => null);
+      if (detail) {
+        (t as Record<string, unknown>).body = detail.body;
+        (t as Record<string, unknown>).dependsOn = detail.dependsOn;
+        (t as Record<string, unknown>).file = detail.file;
+      }
+    }
+  }
+
   const runs = snapshot.runs.map((r) => ({
     _id: `${wid}:${r.runId}`,
     workspaceId: wid,
@@ -210,10 +259,31 @@ export async function runPublish(
     reposChanged: config.redact.filePaths ? r.reposChanged : r.reposChanged,
   }));
 
+  // One document per run holding its markdown record and event stream. Kept out of
+  // the run index docs so a board query never drags the prose along with it.
+  const events: Record<string, unknown>[] = [];
+  if (full) {
+    for (const r of snapshot.runs) {
+      const [stream, markdown] = await Promise.all([
+        reader.runEvents(r.runId).catch(() => []),
+        reader.runDetail(r.runId).catch(() => ""),
+      ]);
+      events.push({
+        _id: `${wid}:${r.runId}`,
+        workspaceId: wid,
+        runId: r.runId,
+        taskId: r.taskId,
+        events: stream,
+        markdown: config.redact.prompts ? stripPrompt(markdown) : markdown,
+      });
+    }
+  }
+
   const result: PublishResult = {
     workspaceId: wid,
     database: config.database,
-    counts: { goals: goals.length, tasks: tasks.length, runs: runs.length },
+    detail: config.detail,
+    counts: { goals: goals.length, tasks: tasks.length, runs: runs.length, events: events.length },
     dryRun: Boolean(options.dryRun),
     uriHost: uri ? hostOf(uri) : null,
   };
@@ -231,10 +301,21 @@ export async function runPublish(
     await db.collection(c("projects")).replaceOne({ _id: wid } as never, project as never, {
       upsert: true,
     });
+    // Indexes, created idempotently on every publish: without them every dashboard
+    // query is a collection scan, and nobody is going to run createIndex by hand.
+    await Promise.all([
+      db.collection(c("goals")).createIndex({ workspaceId: 1, goalId: 1 }),
+      db.collection(c("tasks")).createIndex({ workspaceId: 1, status: 1 }),
+      db.collection(c("runs")).createIndex({ workspaceId: 1, runId: -1 }),
+      db.collection(c("events")).createIndex({ workspaceId: 1, runId: 1 }),
+      db.collection(c("projects")).createIndex({ updatedAt: -1 }),
+    ]).catch(() => undefined);
+
     for (const [name, docs] of [
       ["goals", goals],
       ["tasks", tasks],
       ["runs", runs],
+      ["events", events],
     ] as const) {
       if (docs.length === 0) continue;
       await db.collection(c(name)).bulkWrite(
@@ -255,4 +336,15 @@ export async function runPublish(
   }
 
   return result;
+}
+
+/**
+ * Remove the verbatim request from a run record. The prompt is the most likely
+ * place for something the author would not choose to send to a shared cluster.
+ */
+function stripPrompt(markdown: string): string {
+  return markdown.replace(
+    /## User prompt\n[\s\S]*?(?=\n## )/,
+    "## User prompt\n_redacted — set publish.redact.prompts to false to include it_\n\n"
+  );
 }

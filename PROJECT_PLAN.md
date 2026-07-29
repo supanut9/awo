@@ -875,6 +875,39 @@ reported and the watcher keeps running.
 
 A dead network, an expired token, or a dashboard outage degrades the *board*, never the *work*. When connectivity returns the outbox replays in order, so the remote converges rather than silently losing history. This is what makes "never blocking" (§3.8) real rather than aspirational — without it, the first outage either stalls an agent mid-task or drops runs permanently.
 
+#### Does the user have to set anything up? No.
+
+MongoDB creates a collection on first write, so there is nothing to provision — and
+since v0.0.30 `awo publish` also **creates the indexes idempotently on every run**
+(`workspaceId`+`goalId`, `workspaceId`+`status`, `workspaceId`+`runId`, `updatedAt`).
+That was a genuine omission: without them every dashboard query is a collection scan,
+and nobody is going to run `createIndex` by hand. Adding a connection string is the
+whole setup.
+
+#### How much detail travels — `summary` vs `full`
+
+```jsonc
+"publish": {
+  "detail": "full",                                   // default: "summary"
+  "redact": { "prompts": false, "filePaths": false }
+}
+```
+
+- **`summary`** (default) — statuses, counts, model/tier/effort. Nothing describing the
+  work leaves the machine.
+- **`full`** — additionally each task's body, the goal's definition-of-done, the
+  requirement behind it, and **every run's markdown record and event stream** (a fifth
+  collection, `events`, one document per run). This is what a hosted dashboard needs to
+  show what `awo ui` shows.
+
+`full` is opt-in rather than the default because that prose describes private code and
+private prompts. `redact.prompts` additionally strips the verbatim request from run
+records even under `full`, since the prompt is the likeliest place for something the
+author would not choose to put on a shared cluster.
+
+Event streams live in their own collection deliberately: a board query should never
+drag run prose along with it.
+
 #### What gets published
 
 A **projection**, keyed on `(ownerId, workspaceId)` — never on `projectKey`, which collides across users (§5):
@@ -992,6 +1025,8 @@ Everything here is a design decision made on paper, not something that's been pr
 46. **The linked `node_modules` had to be writable, or the test run failed as a permission error.** Vitest writes `node_modules/.vite-temp`; with the link pointing into the repo and the sandbox granting only the git dir, the suite died on permissions rather than on a test. Granted alongside the git dir — caches and dependencies, never source, which is the distinction item 42 was about. The first task able to actually run tests was `SHOP-T5`, five tasks in.
 
 49. **`tests-must-pass` was a rule nothing could enforce, so it was enforced.** A task could close as `success` having recorded no evidence that anything ran — which is precisely how six tasks each "passed" and composed into a broken feature (§9 item 47). `task complete --outcome success` now requires a `test` event in the run, or `--untested "<why>"`, which is recorded in the run log as `UNTESTED: …` so the exemption is visible to whoever reads it later. Failure needs no evidence: a failed run is allowed to have run nothing. `doctor` gained the cheap version of the same check — any task `done`/`in-review` whose run recorded no `commit`/`repo.diff`, or no `test`. Lessons: **an always-on rule with no checkable artefact is a wish**; and the right shape for enforcement is *demand evidence or demand a reason*, never simply block — the escape hatch is what keeps the gate honest instead of encouraging people to fake a test event.
+
+55. **The published projection was too thin to be useful, and no indexes existed at all.** Two omissions found by asking the obvious question — "when someone adds a connection, does it just work?". Collections do appear on first write, so setup genuinely is just the connection string; but **no indexes were ever created**, meaning every dashboard query was a collection scan, and expecting a user to run `createIndex` by hand is expecting something that will not happen. Now created idempotently on each publish. Separately, the projection carried only statuses and counts, so the hosted board could show *that* a task existed but nothing about it — clicking a card did nothing, because there was nothing to show. Fixed with `publish.detail: "summary" | "full"`, where `full` adds task bodies, the goal's definition-of-done, the originating requirement, and each run's markdown record and event stream. Two design notes: event streams get **their own collection** so a board query never drags prose along with it; and where detail is absent the hosted page **says so and explains how to enable it**, because an empty page is indistinguishable from a task that did nothing — the worse failure. Lesson: **"it works" and "it is usable" are different questions, and the second is the one a user actually asks.**
 
 54. **"Always use the latest version" and "it must build" collided, and the collision was worth resolving rather than dodging.** `typescript@7` is the native rewrite and no longer exposes the compiler API Next's build worker used, so `next build` failed outright with a working `tsc --noEmit`. The two obvious moves were to pin back to TypeScript 6 or to abandon the standing preference. The third — enabling `experimental.useTypeScriptCli` so Next shells out to `tsc` — keeps both, and is the direction Next itself points. Lessons: **a typecheck passing is not a build passing** (different toolchains, different failure); and when a standing preference meets a hard constraint, look for the configuration that satisfies both before treating it as a choice between them. Recorded in the dashboard's config with the reason, so the next person does not "clean up" the flag.
 

@@ -162,6 +162,19 @@ Local stays canonical; the push is an opt-in projection, never a mirror. `--watc
 a separate watcher rather than a hook inside the commands, so nothing in `task run`
 ever waits on the network.
 
+Nothing needs provisioning — collections appear on first write and the indexes are
+created on every publish. How much travels is your choice:
+
+```jsonc
+// .workspace/manifest.json — default is "summary"
+"publish": { "detail": "full", "redact": { "prompts": false } }
+```
+
+`summary` sends statuses, counts and tier/effort only. `full` adds task bodies, the
+goal's definition-of-done, the requirement behind it, and every run's record and event
+stream — everything the local dashboard shows. It is opt-in because that prose
+describes your code and your prompts.
+
 ## Development
 
 ```sh
