@@ -138,6 +138,7 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | `awo task event <id> <kind>` | Record progress during a run. |
 | `awo task complete <id> --outcome <o>` | Close it. `--gate` routes success to review. |
 | `awo task verify <id> [--reject]` | QA gate on one task. |
+| `awo task recheck <id> --run <cmd>` | Attach real evidence to a task closed without any. Opens a new run; never rewrites the old one. |
 | `awo log list` · `log show` · `log tail` · `log add` | Run history, filterable by task/agent/repo/status/tier/effort. |
 
 **Catalog and publishing**

@@ -588,3 +588,96 @@ export async function runTaskVerify(
     reason: options.reason,
   });
 }
+
+/**
+ * §16.6 — attach real evidence to work that was closed without any.
+ *
+ * `awo doctor` reported "done with no test evidence" and told you to run
+ * `awo task event <id> test`, which fails: a closed task has no open run. A
+ * diagnostic whose suggested fix errors out is worse than no suggestion, because it
+ * costs the reader the time to discover that.
+ *
+ * The evidence cannot be retro-fitted into the original run — the log is append-only
+ * and rewriting it would make the audit trail a story rather than a record. So this
+ * opens a NEW run against the same task, measures for real, and closes it. The
+ * history then says what actually happened: closed once without evidence, verified
+ * later, and by whom.
+ */
+export interface RecheckResult {
+  taskId: string;
+  runId: string;
+  previousStatus: TaskStatus;
+  status: TaskStatus;
+  diagnosis: string;
+  passed: boolean;
+}
+
+export async function runTaskRecheck(
+  taskId: string,
+  options: { cwd?: string; run?: string; baseline?: boolean; repo?: string; timeoutMinutes?: number } = {}
+): Promise<RecheckResult> {
+  const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
+  const { task, goal } = await locateTask(workspaceRoot, taskId);
+  const before = effectiveState(await readState(goal.dir, goal.id), task);
+
+  if (!["done", "in-review"].includes(before.status)) {
+    throw new Error(
+      `${task.id} is ${before.status}, so there is nothing to re-check — just run it:\n` +
+        `  awo task run ${task.id}`
+    );
+  }
+
+  const manifest = await readManifest(workspaceRoot);
+  const repoName = options.repo ?? task.targets[0];
+  const command =
+    options.run ?? manifest.repos.find((r) => r.name === repoName)?.testCommand ?? null;
+  if (!command) {
+    throw new Error(
+      `No command to verify ${task.id} with.\n` +
+        `  Pass one:            awo task recheck ${task.id} --run "npm test"\n` +
+        `  Or declare it once:  set "testCommand" on ${repoName ?? "the repo"} in .workspace/manifest.json`
+    );
+  }
+
+  // Human-initiated correction, so the transition is attributed to a human.
+  await runTaskStatus(task.id, before.status === "done" ? "todo" : "todo", {
+    cwd: workspaceRoot,
+    actor: "human",
+    reason: "re-opened to attach missing test evidence",
+  });
+
+  await runTaskRun(task.id, { cwd: workspaceRoot });
+  const measured = await runTaskEvent(task.id, "test", {
+    cwd: workspaceRoot,
+    run: command,
+    baseline: options.baseline,
+    repo: options.repo,
+    timeoutMinutes: options.timeoutMinutes,
+    label: `retrospective verification of work closed before the evidence gate`,
+  });
+
+  const events = await readEvents(workspaceRoot, (await readState(goal.dir, goal.id)).tasks[task.id]!.lastRunId!);
+  const test = events.filter((e) => e.kind === "test").at(-1);
+  const passed = test?.exitCode === 0;
+
+  await runTaskComplete(task.id, {
+    cwd: workspaceRoot,
+    outcome: passed ? "success" : "failed",
+    // A pass that still needs a human goes to review, not straight back to done.
+    gate: passed && measured.needsHuman === true,
+    summary: passed
+      ? `Re-checked with \`${command}\`: ${measured.diagnosis}. Original run closed with no evidence.`
+      : `Re-checked with \`${command}\`: ${measured.diagnosis}. It does not pass, so the original close was wrong.`,
+    note: [`re-opened from ${before.status} to attach evidence the original run never had`],
+  });
+
+  const after = effectiveState(await readState(goal.dir, goal.id), task);
+  return {
+    taskId: task.id,
+    runId: after.lastRunId ?? "(none)",
+    previousStatus: before.status,
+    status: after.status,
+    diagnosis: measured.diagnosis ?? "unknown",
+    passed,
+  };
+}

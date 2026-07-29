@@ -927,3 +927,63 @@ test("the gate refuses a test event awo did not run", () => {
   assert.match(out.stderr, /--run/, "it must say how to fix it");
   fs.rmSync(path.dirname(ws), { recursive: true, force: true });
 });
+
+test("recheck attaches real evidence to a task closed without any", () => {
+  const { ws, worktree } = makeEvidenceWorkspace();
+
+  // Close it the way the dogfood did: success, no measurement, excused.
+  execFileSync(process.execPath, [CLI, "task", "event", "EV-T1", "commit", "--label", "abc feat: thing"], { cwd: ws });
+  execFileSync(
+    process.execPath,
+    [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then"],
+    { cwd: ws }
+  );
+  assert.match(awo(ws, ["task", "show", "EV-T1"]).stdout, /status: {3}done/);
+  assert.match(awo(ws, ["doctor"]).stdout, /EV-T1 is done with no test evidence/);
+
+  // doctor's advice must be runnable. The old text said `task event`, which cannot
+  // work on a closed task — assert the advice names the command that does.
+  assert.match(awo(ws, ["doctor"]).stdout, /awo task recheck EV-T1 --run/);
+
+  const rechecked = awo(ws, ["task", "recheck", "EV-T1", "--run", "./t.sh", "--baseline"]);
+  assert.equal(rechecked.code, 0, rechecked.stderr);
+  assert.match(rechecked.stdout, /done -> done — pass/);
+
+  // The original run is untouched; the verification is a new one (append-only).
+  const runs = dayRows(ws).filter((r) => r.taskId === "EV-T1");
+  assert.equal(runs.length, 2, "a new run, not a rewritten one");
+  const e = lastTestEvent(ws);
+  assert.equal(e.verified, true);
+  assert.equal(e.exitCode, 0);
+
+  assert.ok(!/no test evidence/.test(awo(ws, ["doctor"]).stdout), "the warning must be gone");
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("recheck that fails says the original close was wrong, and does not hide it", () => {
+  const { ws, worktree } = makeEvidenceWorkspace();
+  execFileSync(
+    process.execPath,
+    [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then"],
+    { cwd: ws }
+  );
+
+  // The work is actually broken.
+  fs.writeFileSync(path.join(worktree, "src", "pricing.ts"), "export const rate = 0.1; // BREAK\n");
+  execSync("git commit -aqm break", { cwd: worktree, stdio: "ignore" });
+
+  const out = awo(ws, ["task", "recheck", "EV-T1", "--run", "./t.sh", "--baseline"]);
+  assert.equal(out.code, 1, "a failed re-check must not exit 0");
+  assert.match(out.stdout, /the original close was wrong/);
+  assert.match(awo(ws, ["task", "show", "EV-T1"]).stdout, /status: {3}blocked/);
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+test("recheck refuses a task that is not closed, and says what to run instead", () => {
+  const { ws } = makeEvidenceWorkspace();
+  const out = awo(ws, ["task", "recheck", "EV-T1", "--run", "./t.sh"]);
+  assert.equal(out.code, 1);
+  assert.match(out.stderr, /is running, so there is nothing to re-check/);
+  assert.match(out.stderr, /awo task run EV-T1/);
+  fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});

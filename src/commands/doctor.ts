@@ -203,7 +203,11 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           severity: "warn",
           area: "runs",
           message: `${task.id} is ${ts.status} with no test evidence in its run`,
-          fix: "rule tests-must-pass — record `awo task event <id> test`, or re-close with --untested \"<why>\"",
+          // The old advice was `awo task event <id> test`, which fails on a closed
+          // task: there is no open run to append to. A fix that errors is worse than
+          // none — it costs the reader the time to find that out.
+          fix:
+            `rule tests-must-pass — verify it for real: \`awo task recheck ${task.id} --run "<cmd>" --baseline\``,
         });
       }
     }

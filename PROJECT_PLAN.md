@@ -1916,3 +1916,15 @@ A `.new` now means what it says — **the same lines moved on both sides** — a
     is by definition mergeable; the other deleted `template.lock` to simulate an old
     workspace while leaving `template-base/` in place, a state no real workspace has
     been in. A test that simulates a situation has to simulate all of it.
+
+74. **A diagnostic whose suggested fix errors out is worse than no suggestion.**
+    `doctor` reported "done with no test evidence" and advised
+    `awo task event <id> test` — which fails on a closed task, because there is no
+    open run to append to. The advice was written from the author's memory of the
+    command, never executed. It now names `awo task recheck`, which exists and works,
+    and the test asserts the advice text names a runnable command rather than just
+    asserting the warning appears.
+75. **Evidence cannot be retro-fitted; it can only be added.** `recheck` opens a NEW
+    run rather than editing the original, so the history says what happened — closed
+    once without evidence, verified later. Rewriting the original would have made the
+    audit trail a story instead of a record, which is the one property it has.

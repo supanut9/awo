@@ -21,6 +21,7 @@ import { runList } from "./commands/list.js";
 import { runRemove } from "./commands/remove.js";
 import {
   runTaskComplete,
+  runTaskRecheck,
   runTaskEvent,
   runTaskList,
   runTaskRun,
@@ -833,6 +834,34 @@ task
       process.exitCode = 1;
     }
   });
+
+task
+  .command("recheck <taskId>")
+  .description("Attach real evidence to a task that was closed without any. Opens a new run.")
+  .option("--run <command>", "command to verify with (default: the repo's testCommand)")
+  .option("--baseline", "also run it at the branch point, so a failure can be attributed")
+  .option("--repo <name>", "which target repo to run in")
+  .option("--timeout <minutes>", "kill the command after this long (default 30)", (v) => parseInt(v, 10))
+  .action(
+    async (
+      taskId: string,
+      opts: { run?: string; baseline?: boolean; repo?: string; timeout?: number }
+    ) => {
+      try {
+        const r = await runTaskRecheck(taskId, { ...opts, timeoutMinutes: opts.timeout });
+        console.log(
+          `${r.taskId}: ${r.previousStatus} -> ${r.status} — ${r.diagnosis} (run ${r.runId})`
+        );
+        if (!r.passed) {
+          console.log("  It does not pass, so the original close was wrong. Left for you to deal with.");
+          process.exitCode = 1;
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    }
+  );
 
 task
   .command("complete <taskId>")
