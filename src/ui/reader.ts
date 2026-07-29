@@ -3,7 +3,7 @@ import { readManifest } from "../manifest.js";
 import { runList, type RepoStatusEntry } from "../commands/list.js";
 import { findGoals, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
 import { newTaskState, readState, type GoalStatus, type TaskStatus } from "../state.js";
-import { resolveRunFile, readEvents, readIndex, type RunEvent, type RunIndexEntry } from "../runs.js";
+import { readDetail, readEvents, readIndex, type RunEvent, type RunIndexEntry } from "../runs.js";
 import fs from "fs-extra";
 
 export interface ProjectSummary {
@@ -158,9 +158,7 @@ export class FileReader implements WorkspaceReader {
 
   /** The run's markdown record (§7.3), read verbatim. */
   async runDetail(runId: string): Promise<string> {
-    const file = await resolveRunFile(this.root, runId, "detail");
-    if (!(await fs.pathExists(file))) throw new Error(`No run log for "${runId}".`);
-    return fs.readFile(file, "utf8");
+    return readDetail(this.root, runId);
   }
 
   async repos(): Promise<RepoStatusEntry[]> {

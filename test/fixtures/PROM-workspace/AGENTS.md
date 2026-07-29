@@ -28,9 +28,9 @@ requirements/PROM-R1.md          intake, not yet planned
 goals/PROM-G1/goal.md            the objective and its definition of done
                     /requirement.md         the ask it came from
                     /tasks/PROM-T1.md   executable units
-logs/<date>/PROM-T1/<time>/      record.md · events.jsonl · worker.log
-logs/<date>/PROM-G1/<time>/      brief.md — each QA gate
-logs/index.jsonl                            queryable index of every run
+logs/<date>/runs.jsonl                      every event + one row per run
+logs/<date>/runs.md                         every run's record, one section each
+logs/<date>/workers/                        raw worker output, when dispatched
 ```
 
 **See `instructions/full-workflow.md` for the canonical end-to-end sequence**

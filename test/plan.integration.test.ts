@@ -33,6 +33,26 @@ function makeWorkspace(): string {
   return dir;
 }
 
+/** The only day folder a test workspace has, since each test runs on one day. */
+function onlyDayFile(ws: string, name: string): string {
+  const day = fs.readdirSync(path.join(ws, "logs")).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+  return path.join(ws, "logs", day[0] ?? "missing", name);
+}
+/** Every run row recorded, across all days. There is no global index any more. */
+function dayRows(ws: string): Record<string, unknown>[] {
+  return fs
+    .readdirSync(path.join(ws, "logs"))
+    .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+    .flatMap((d) =>
+      fs
+        .readFileSync(path.join(ws, "logs", d, "runs.jsonl"), "utf8")
+        .split("\n")
+        .filter((l) => l.trim() !== "")
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+    )
+    .filter((l) => l.type === "run");
+}
+
 test("req -> goal -> task walks the whole pipeline and allocates IDs in order", () => {
   const ws = makeWorkspace();
 
@@ -379,12 +399,10 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   assert.ok(!/--add-dir/.test(v.stdout), "a read-only run needs no write grants");
 
   // The brief is filed as its own run directory, not loose in logs/.
-  const day = fs.readdirSync(path.join(ws, "logs")).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
-  assert.equal(day.length, 1, "one day of runs");
-  const goalDayDir = path.join(ws, "logs", day[0], "PL-G1");
-  const briefDirs = fs.readdirSync(goalDayDir);
-  assert.equal(briefDirs.length, 1, "verify must file one brief under its goal");
-  const brief = fs.readFileSync(path.join(goalDayDir, briefDirs[0], "brief.md"), "utf8");
+  // The brief is a section of the day's runs.md, addressable by its runId.
+  const dayMd = fs.readFileSync(onlyDayFile(ws, "runs.md"), "utf8");
+  assert.match(dayMd, /awo:run .*_PL-G1 -->/, "the gate brief must be a marked section");
+  const brief = dayMd.slice(dayMd.indexOf("<!-- awo:run"));
   assert.match(brief, /Judge the goal AS A WHOLE/);
   assert.match(brief, /CONTRACTS BETWEEN them/);
   assert.match(brief, /feature\/PL-T1/);
@@ -404,8 +422,8 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t2\/2 done/);
 
   // Both verdicts are in the log, attributed to qa-engineer.
-  const runs = fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  const gates = runs.filter((r) => r.runId.includes("qa-gate-PL-G1"));
+  const runs = dayRows(ws);
+  const gates = runs.filter((r) => String(r.runId).includes("qa-gate-PL-G1"));
   assert.equal(gates.length, 2);
   assert.deepEqual(gates.map((g) => g.status).sort(), ["failed", "success"]);
 

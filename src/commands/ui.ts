@@ -99,7 +99,13 @@ export async function runUi(options: UiOptions = {}): Promise<UiHandle> {
         const id = url.searchParams.get("id");
         if (!id) return sendJson(res, 400, { error: "missing ?id=<runId>" });
         try {
-          return sendJson(res, 200, { runId: id, markdown: await reader.runDetail(id) });
+          const markdown = await reader.runDetail(id);
+          // A record is now a section of a shared file rather than a file of its
+          // own, so "does it exist" is a content question, not a stat() one.
+          if (markdown.trim() === "") {
+            return sendJson(res, 404, { error: `no record for run ${id}` });
+          }
+          return sendJson(res, 200, { runId: id, markdown });
         } catch (err) {
           return sendJson(res, 404, { error: (err as Error).message });
         }

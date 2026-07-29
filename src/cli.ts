@@ -362,7 +362,7 @@ goal
   .action(async (goalId: string) => {
     try {
       const r = await runGoalVerify(goalId);
-      console.log(`brief:   ${r.briefPath}`);
+      console.log(`brief:   ${r.briefPath} (${r.briefRunId})`);
       console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}  (high tier — the gate is judgment work)`);
       for (const t of r.tasks) {
         console.log(

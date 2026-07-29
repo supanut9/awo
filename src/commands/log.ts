@@ -4,8 +4,8 @@ import { findWorkspaceRoot } from "../workspace.js";
 import {
   appendIndex,
   detailFile,
-  resolveRunFile,
-  newRunId,
+  readDetail,
+  allocateRunId,
   readEvents,
   readIndex,
   writeDetail,
@@ -44,9 +44,9 @@ export async function runLogShow(
   options: { cwd?: string } = {}
 ): Promise<{ detail: string; events: RunEvent[] }> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
-  const file = await resolveRunFile(workspaceRoot, runId, "detail");
+  const detail = await readDetail(workspaceRoot, runId);
 
-  if (!(await fs.pathExists(file))) {
+  if (detail.trim() === "") {
     const known = (await readIndex(workspaceRoot)).map((r) => r.runId);
     throw new Error(
       known.length > 0
@@ -56,7 +56,7 @@ export async function runLogShow(
   }
 
   return {
-    detail: await fs.readFile(file, "utf8"),
+    detail,
     events: await readEvents(workspaceRoot, runId),
   };
 }
@@ -123,7 +123,7 @@ export async function runLogAdd(options: {
     throw new Error(`--started must be an ISO timestamp; got "${options.startedAt}".`);
   }
 
-  const runId = newRunId(label, new Date(startedAt));
+  const runId = await allocateRunId(workspaceRoot, label, new Date(startedAt));
   const durationSec =
     options.durationSec ??
     Math.max(0, Math.round((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000));
@@ -133,7 +133,7 @@ export async function runLogAdd(options: {
     runId,
     {
       runId,
-      taskId: "null",
+      taskId: null,
       agent: options.agent,
       models: options.model ?? [],
       status: outcome,

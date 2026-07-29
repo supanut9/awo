@@ -158,8 +158,8 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
 
   // Run log: the markdown record written at completion.
   const log = await (await fetch(`${ui.url}/api/run?id=${encodeURIComponent(runId)}`)).json();
-  assert.match(log.markdown, /^---/, "run log is markdown with frontmatter");
-  assert.match(log.markdown, /taskId: UI-T1/);
+  assert.match(log.markdown, /^<!-- awo:run /, "run log is the day record's marked section");
+  assert.match(log.markdown, /\*\*taskId:\*\* UI-T1/);
   assert.equal((await fetch(`${ui.url}/api/run?id=nope`)).status, 404);
 
   // Writes: only human lifecycle moves, and invalid ones are refused.

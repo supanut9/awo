@@ -1583,8 +1583,8 @@ problems, all of them invisible until the directory had real content in it:
 ```
 requirements/<KEY>-R#.md
 goals/<KEY>-G#/{goal.md, requirement.md, state.json, tasks/<KEY>-T#.md}
-logs/index.jsonl
-logs/<date>/<taskId|goalId|_adhoc>/<time>/{record.md, events.jsonl, worker.log, brief.md}
+logs/<date>/{runs.jsonl, runs.md}
+logs/<date>/workers/<time>-<slot>.log
 repos/.worktrees/<repo>/<taskId>
 ```
 
@@ -1654,3 +1654,64 @@ has not upgraded shows its history rather than appearing to have lost it.
     alone, and came out with all 24 `detailFile` pointers dangling. `awo log list`
     still worked — it resolves by runId — so nothing looked wrong. Migration tests
     must start from *each* shipped version, not only the oldest.
+
+
+## 15. The log layout, settled (0.0.35)
+
+Four layouts shipped in one working session, which is three too many. Worth
+recording why, because the mistake was not any individual shape:
+
+| version | shape | what broke |
+|---|---|---|
+| ≤0.0.31 | `logs/runs/<date>/<runId>.{md,events.jsonl,worker.log}` | 39 files in one directory after a single day; three filename variants to parse |
+| 0.0.32 | `logs/<taskId>/<stamp>/` | lost chronological browsing; one top-level directory per task, forever |
+| 0.0.33–34 | `logs/<date>/<slot>/<time>/` | three levels before a file; `_adhoc`, goal and task directories mixed; machine-named leaves |
+| **0.0.35** | `logs/<date>/{runs.jsonl, runs.md}` | — |
+
+What the first three share is that **the number of filesystem entries grows with
+the number of runs**. A day of real work is unreadable however you nest it, so the
+answer was not a better nesting but fewer entries: a day is two files that grow
+internally.
+
+```
+logs/2026-07-28/runs.jsonl   every event, and one row per run. Append-only.
+logs/2026-07-28/runs.md      every record, behind <!-- awo:run <runId> --> markers.
+logs/2026-07-28/workers/     raw worker stdout, only when one was dispatched.
+```
+
+### 15.1 Why `.jsonl` and not `.json`
+
+A JSON document must be read-parse-rewritten to add a row, so two workers
+finishing in the same moment silently lose one of the writes. Appending a line is
+atomic. Parallel workers are the normal case here, not an edge one.
+
+### 15.2 Why no global index
+
+`logs/index.jsonl` duplicated rows that the day files already held, and
+duplication is how they drift: 0.0.33 moved every record and left all 24 pointers
+dangling. `awo log list` now reads the day folders. One writer, one copy.
+
+### 15.3 Why worker output stays out
+
+It is the spawned CLI's raw stdout — hundreds of KB, and interleaved nonsense if
+two concurrent workers shared a file. `runs.jsonl`/`runs.md` are what *awo*
+recorded; a worker log is what the runtime emitted, including everything the agent
+never reported. Keeping them apart is the difference between what an agent claims
+and what actually happened.
+
+### 15.4 Findings
+
+62. **Asking the user to choose between layouts costs one message; guessing costs
+    four migrations.** Each of the first three shapes was a reasonable reading of a
+    one-line comment, implemented immediately. Showing four candidate trees side by
+    side and asking would have reached 0.0.35 directly. When a change is
+    structural and irreversible-ish, the cheap move is to render the options.
+63. **A migration must describe the layout it migrates FROM, in literal paths.**
+    The 0.0.33 migration called `detailFile()`; when that helper's meaning changed,
+    the migration silently retargeted and stranded the index. Migrations are
+    historical documents and cannot share code with the present.
+64. **A spliced edit can silently delete a neighbour.** Rewriting the migration
+    array by cutting from one entry to `];` removed the unrelated 0.0.2
+    `workspaceId` backfill along with it. Only the test that asserted that
+    migration *by name* caught it — which is the argument for naming what you
+    assert rather than counting it.

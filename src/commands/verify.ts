@@ -7,7 +7,7 @@ import { readManifest } from "../manifest.js";
 import { findGoals, findTasksInGoal } from "../tasks.js";
 import { newTaskState, readState } from "../state.js";
 import { invocationHint, resolveModel, type ResolvedModel } from "../models.js";
-import { readEvents, readIndex, newRunId, runDir } from "../runs.js";
+import { readEvents, readIndex, allocateRunId, writeDetail } from "../runs.js";
 import { runTaskVerify } from "./task.js";
 import { runReqNew } from "./plan.js";
 import { runLogAdd } from "./log.js";
@@ -41,6 +41,7 @@ export interface VerifyTaskEntry {
 export interface GoalVerifyResult {
   goalId: string;
   briefPath: string;
+  briefRunId: string;
   model: ResolvedModel;
   invocation: string;
   tasks: VerifyTaskEntry[];
@@ -137,22 +138,31 @@ export async function runGoalVerify(
   const model = await resolveModel(root, "qa-engineer", "high");
 
   const brief = buildBrief(goal.id, goalBody, reqBody, entries, index.length);
-  // Filed as a run of its own rather than loose in logs/. A brief written straight
-  // into logs/verify-<goal>.md was invisible to `awo log list`, overwritten by the
-  // next verify of the same goal, and lost the history of earlier gates.
-  const briefPath = path.join(runDir(root, newRunId(goal.id)), "brief.md");
-  await fs.ensureDir(path.dirname(briefPath));
-  await fs.writeFile(briefPath, brief);
+
+  // The brief is recorded like any other work: a section in the day's runs.md,
+  // addressable by runId. Written straight to logs/verify-<goal>.md it was
+  // invisible to `awo log list` and silently overwritten by the next gate on the
+  // same goal, so a goal's earlier gates were simply gone.
+  const briefRunId = await allocateRunId(root, goal.id);
+  const briefPath = await writeDetail(
+    root,
+    briefRunId,
+    { kind: "qa-gate", goal: goal.id, model: `${model.runtime}:${model.model}`, tasks: entries.length },
+    { interpreted: `QA gate for ${goal.id}`, summary: brief }
+  );
 
   return {
     goalId: goal.id,
     briefPath: path.relative(root, briefPath),
+    briefRunId,
     model,
     // Read-only, and carrying the brief rather than a task prompt.
     invocation: invocationHint(model, goal.id, {
       cwd: ".",
       readOnly: true,
-      prompt: `$(cat ${path.relative(root, briefPath)})`,
+      // `log show` extracts this run's section, so the prompt stays reproducible
+      // now that the brief shares a file with the rest of the day.
+      prompt: `$(awo log show ${briefRunId})`,
     }),
     tasks: entries,
     unfinished,

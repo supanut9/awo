@@ -20,8 +20,8 @@ import {
   appendEvent,
   appendIndex,
   detailFile,
-  eventsFile as eventsFilePath,
-  newRunId,
+  dayDataFile,
+  allocateRunId,
   readEvents,
   writeDetail,
   type EventKind,
@@ -208,7 +208,7 @@ export async function runTaskRun(
   // open run that `doctor` then reported as abandoned.
   const model = await resolveModel(workspaceRoot, task.agent, task.tier);
 
-  const runId = newRunId(task.id);
+  const runId = await allocateRunId(workspaceRoot, task.id);
   const startedAt = new Date().toISOString();
 
   await mutateState(goal.dir, goal.id, (s) => {
@@ -268,7 +268,7 @@ export async function runTaskRun(
     fallbackInvocation: fallbackHint(model, task.id, workerContext),
     taskId: task.id,
     runId,
-    eventsFile: path.relative(workspaceRoot, eventsFilePath(workspaceRoot, runId)),
+    eventsFile: path.relative(workspaceRoot, dayDataFile(workspaceRoot, runId)),
     targets: task.targets,
     agent: task.agent,
     body: task.body,

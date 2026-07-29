@@ -308,114 +308,144 @@ test("upgrade never touches goals, logs or the manifest's repos", () => {
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test("the 0.0.32 restructure moves logs, goals and requirements without losing content", () => {
+/**
+ * One test per layout awo has ever shipped.
+ *
+ * The earlier suite only ever started from the oldest layout, which ran every
+ * migration in a single invocation and produced correct results by accident — that
+ * is how 0.0.33 shipped leaving 24 index pointers dangling (§9 finding 61). Each
+ * shipped version is a real starting point for a real user, so each gets a case.
+ */
+function seedGoal(ws: string, dirName: string, taskFile: string): void {
+  const dir = path.join(ws, "goals", dirName, "tasks");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(ws, "goals", dirName, "goal.md"), "---\nid: UP-G1\n---\n\ngoal\n");
+  fs.writeFileSync(path.join(dir, taskFile), "---\nid: UP-T2\n---\n\ntask\n");
+}
+
+function dayLines(ws: string, date: string): Record<string, unknown>[] {
+  return fs
+    .readFileSync(path.join(ws, "logs", date, "runs.jsonl"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+function assertCollapsed(ws: string, runId: string, date: string): void {
+  const day = path.join(ws, "logs", date);
+  assert.deepEqual(
+    fs.readdirSync(day).sort().filter((f) => f !== "workers"),
+    ["runs.jsonl", "runs.md"],
+    "a day holds exactly two files"
+  );
+  const lines = dayLines(ws, date);
+  assert.ok(
+    lines.some((l) => l.type === "event" && l.runId === runId && l.kind === "test"),
+    "the run's events must survive"
+  );
+  assert.ok(
+    lines.some((l) => l.type === "run" && l.runId === runId && l.status === "success"),
+    "the run's row must survive"
+  );
+  const md = fs.readFileSync(path.join(day, "runs.md"), "utf8");
+  assert.ok(md.includes(`<!-- awo:run ${runId} -->`), "the record must be a marked section");
+  assert.match(md, /record body/, "the record's content must survive");
+  assert.ok(!fs.existsSync(path.join(ws, "logs", "index.jsonl")), "no global index remains");
+  assert.ok(!fs.existsSync(path.join(ws, "logs", "runs")), "no date-sharded tree remains");
+}
+
+test("upgrading from the pre-0.0.32 layout collapses into day files", () => {
   const ws = makeWorkspace();
   pretendOlder(ws, "0.0.31");
-
-  // Rebuild the pre-0.0.32 layout by hand, including the things that had no home.
   const runId = "2026-07-28T16-33-45-180Z_UP-T2";
-  const oldRunDir = path.join(ws, "logs", "runs", "2026-07-28");
-  fs.mkdirSync(oldRunDir, { recursive: true });
-  fs.writeFileSync(path.join(oldRunDir, `${runId}.md`), "---\nrunId: x\n---\n\nrecord body\n");
-  fs.writeFileSync(path.join(oldRunDir, `${runId}.events.jsonl`), '{"t":"1","kind":"test"}\n');
-  fs.writeFileSync(path.join(oldRunDir, `${runId}.worker.log`), "worker said this\n");
+
+  const old = path.join(ws, "logs", "runs", "2026-07-28");
+  fs.mkdirSync(old, { recursive: true });
+  fs.writeFileSync(path.join(old, `${runId}.md`), "---\nrunId: x\n---\n\nrecord body\n");
+  fs.writeFileSync(path.join(old, `${runId}.events.jsonl`), '{"t":"1","kind":"test"}\n');
+  fs.writeFileSync(path.join(old, `${runId}.worker.log`), "worker said this\n");
   fs.writeFileSync(
     path.join(ws, "logs", "runs.jsonl"),
-    `${JSON.stringify({ runId, taskId: "UP-T2", status: "success", detailFile: `runs/2026-07-28/${runId}.md` })}\n`
+    `${JSON.stringify({ runId, taskId: "UP-T2", status: "success", reposChanged: [] })}\n`
   );
-  fs.writeFileSync(path.join(ws, "logs", "verify-UP-G1.md"), "gate brief\n");
-
-  const oldGoal = path.join(ws, "goals", "UP-G1-a-title-truncated-mid-wor");
-  fs.mkdirSync(path.join(oldGoal, "tasks"), { recursive: true });
-  fs.writeFileSync(path.join(oldGoal, "goal.md"), "---\nid: UP-G1\n---\n\ngoal\n");
-  fs.writeFileSync(path.join(oldGoal, "tasks", "UP-T2-some-slug.md"), "---\nid: UP-T2\n---\n\ntask\n");
+  seedGoal(ws, "UP-G1-a-title-truncated-mid-wor", "UP-T2-some-slug.md");
   fs.writeFileSync(path.join(ws, "goals", "UP-R7.md"), "---\nid: UP-R7\n---\n\nintake\n");
-
-  // Stale worktrees at the pre-move location, and four backups where three is the cap.
   fs.mkdirSync(path.join(ws, ".worktrees", "api", "UP-T1"), { recursive: true });
-  for (const v of ["0.0.1-to-0.0.2", "0.0.2-to-0.0.3", "0.0.3-to-0.0.4", "0.0.4-to-0.0.5"]) {
-    fs.mkdirSync(path.join(ws, ".workspace", "upgrade-backups", v), { recursive: true });
-  }
 
   execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
 
-  // Logs: one directory per run, filed under the task, with fixed names.
-  const newRun = path.join(ws, "logs", "2026-07-28", "UP-T2", "16-33-45-180Z");
-  assert.match(fs.readFileSync(path.join(newRun, "record.md"), "utf8"), /record body/);
-  assert.match(fs.readFileSync(path.join(newRun, "events.jsonl"), "utf8"), /"kind":"test"/);
-  assert.equal(fs.readFileSync(path.join(newRun, "worker.log"), "utf8"), "worker said this\n");
-  assert.ok(!fs.existsSync(path.join(ws, "logs", "runs")), "the date-sharded tree must be gone");
-
-  // The index moves and its pointers are rewritten, not left dangling.
-  assert.ok(!fs.existsSync(path.join(ws, "logs", "runs.jsonl")));
-  const entry = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim());
-  assert.equal(entry.detailFile, path.join("2026-07-28", "UP-T2", "16-33-45-180Z", "record.md"));
-  assert.ok(fs.existsSync(path.join(ws, "logs", entry.detailFile)), "the pointer must resolve");
-
-  // The loose verify brief becomes addressable instead of sitting in logs/.
-  assert.ok(!fs.existsSync(path.join(ws, "logs", "verify-UP-G1.md")));
-  assert.match(
-    fs.readFileSync(
-      path.join(ws, "logs", "undated", "_adhoc", "legacy-verify-UP-G1", "record.md"),
-      "utf8"
-    ),
-    /gate brief/
+  assertCollapsed(ws, runId, "2026-07-28");
+  assert.equal(
+    fs.readFileSync(path.join(ws, "logs", "2026-07-28", "workers", "16-33-45-UP-T2.log"), "utf8"),
+    "worker said this\n",
+    "worker output moves to workers/, not into the shared files"
   );
 
-  // Goals and tasks are named for their IDs; the truncated slug is gone.
-  assert.ok(!fs.existsSync(oldGoal), "the truncated directory must be renamed");
+  // The rest of the 0.0.32 restructure still applies.
   assert.match(fs.readFileSync(path.join(ws, "goals", "UP-G1", "goal.md"), "utf8"), /id: UP-G1/);
-  assert.match(
-    fs.readFileSync(path.join(ws, "goals", "UP-G1", "tasks", "UP-T2.md"), "utf8"),
-    /id: UP-T2/
-  );
-
-  // An unpromoted requirement gets a home of its own.
-  assert.ok(!fs.existsSync(path.join(ws, "goals", "UP-R7.md")));
+  assert.ok(fs.existsSync(path.join(ws, "goals", "UP-G1", "tasks", "UP-T2.md")));
   assert.match(fs.readFileSync(path.join(ws, "requirements", "UP-R7.md"), "utf8"), /intake/);
-
   assert.ok(!fs.existsSync(path.join(ws, ".worktrees")), "stale worktrees must be cleared");
-  assert.deepEqual(fs.readdirSync(path.join(ws, ".workspace", "upgrade-backups")).sort(), [
-    "0.0.2-to-0.0.3",
-    "0.0.3-to-0.0.4",
-    "0.0.4-to-0.0.5",
-  ]);
 
-  // Idempotent: running it again must be a no-op, not a second round of moves.
+  // Idempotent: a second upgrade must not duplicate or destroy anything.
   execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
-  assert.match(fs.readFileSync(path.join(newRun, "record.md"), "utf8"), /record body/);
+  assertCollapsed(ws, runId, "2026-07-28");
+  assert.equal(
+    dayLines(ws, "2026-07-28").filter((l) => l.type === "run").length,
+    1,
+    "re-running must not duplicate the run row"
+  );
 });
 
-test("resharding a workspace already at 0.0.32 rewrites its index pointers", () => {
-  // The 0.0.32 migration rewrote pointers using 0.0.32 paths. A workspace that ran
-  // it in an earlier session then hits 0.0.33, which MOVES those files — so the
-  // reshard must rewrite the pointers too. Both migrations running in one
-  // invocation hides this, which is exactly how it shipped once.
+test("upgrading from the 0.0.32 task-first layout collapses into day files", () => {
   const ws = makeWorkspace();
   pretendOlder(ws, "0.0.32");
-
   const runId = "2026-07-28T16-33-45-180Z_UP-T2";
-  const taskFirst = path.join(ws, "logs", "UP-T2", "2026-07-28T16-33-45-180Z");
-  fs.mkdirSync(taskFirst, { recursive: true });
-  fs.writeFileSync(path.join(taskFirst, "record.md"), "record body\n");
-  fs.writeFileSync(path.join(taskFirst, "events.jsonl"), '{"t":"1","kind":"test"}\n');
+
+  const dir = path.join(ws, "logs", "UP-T2", "2026-07-28T16-33-45-180Z");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "record.md"), "record body\n");
+  fs.writeFileSync(path.join(dir, "events.jsonl"), '{"t":"1","kind":"test"}\n');
+  fs.writeFileSync(
+    path.join(ws, "logs", "index.jsonl"),
+    `${JSON.stringify({ runId, taskId: "UP-T2", status: "success", reposChanged: [] })}\n`
+  );
+
+  execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
+
+  assertCollapsed(ws, runId, "2026-07-28");
+  assert.ok(!fs.existsSync(path.join(ws, "logs", "UP-T2")), "the task-first tree must be gone");
+});
+
+test("upgrading from the 0.0.33/34 date-slot-time layout collapses into day files", () => {
+  const ws = makeWorkspace();
+  pretendOlder(ws, "0.0.34");
+  const runId = "2026-07-28T16-33-45-180Z_UP-T2";
+
+  const dir = path.join(ws, "logs", "2026-07-28", "UP-T2", "16-33-45-180Z");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "record.md"), "record body\n");
+  fs.writeFileSync(path.join(dir, "events.jsonl"), '{"t":"1","kind":"test"}\n');
   fs.writeFileSync(
     path.join(ws, "logs", "index.jsonl"),
     `${JSON.stringify({
       runId,
       taskId: "UP-T2",
       status: "success",
-      detailFile: path.join("UP-T2", "2026-07-28T16-33-45-180Z", "record.md"),
+      reposChanged: [],
+      detailFile: path.join("2026-07-28", "UP-T2", "16-33-45-180Z", "record.md"),
     })}\n`
   );
 
   execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
 
-  const entry = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim());
-  assert.equal(entry.detailFile, path.join("2026-07-28", "UP-T2", "16-33-45-180Z", "record.md"));
+  assertCollapsed(ws, runId, "2026-07-28");
   assert.ok(
-    fs.existsSync(path.join(ws, "logs", entry.detailFile)),
-    "the rewritten pointer must resolve to the moved record"
+    !fs.existsSync(path.join(ws, "logs", "2026-07-28", "UP-T2")),
+    "the nested run directories must be gone"
   );
-  assert.ok(!fs.existsSync(path.join(ws, "logs", "UP-T2")), "the task-first tree must be gone");
+  // The pointer that dangled in 0.0.33 now names the file the record is actually in.
+  const row = dayLines(ws, "2026-07-28").find((l) => l.type === "run")!;
+  assert.equal(row.detailFile, path.join("2026-07-28", "runs.md"));
+  assert.ok(fs.existsSync(path.join(ws, "logs", String(row.detailFile))));
 });

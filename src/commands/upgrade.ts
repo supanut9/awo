@@ -3,7 +3,7 @@ import path from "path";
 import { simpleGit } from "simple-git";
 import { v7 as uuidv7 } from "uuid";
 import { findWorkspaceRoot } from "../workspace.js";
-import { detailFile, eventsFile, indexFile, workerLogFile } from "../runs.js";
+import { runSlot, workerLogFile, writeDetail, appendIndex, appendEvent, type RunIndexEntry, type RunEvent, type EventKind } from "../runs.js";
 import { readManifest, writeManifest, type Manifest } from "../manifest.js";
 import {
   buildLock,
@@ -28,31 +28,10 @@ interface Migration {
   apply: (ctx: { root: string; manifest: Manifest }) => Promise<boolean>;
 }
 
+// Kept in version order, and applied in that order (see planUpgrade). An entry
+// removed by accident is silent — a workspace simply never gets the fix — so the
+// suite asserts each one by name.
 const MIGRATIONS: Migration[] = [
-  {
-    version: "0.0.32",
-    description: "restructure logs, goals and requirements; clear stale worktrees",
-    apply: async ({ root }) => restructureWorkspace(root),
-  },
-  {
-    version: "0.0.33",
-    description: "shard logs by date again, with the task under it",
-    apply: async ({ root }) => reshardLogsByDate(root),
-  },
-  {
-    version: "0.0.34",
-    description: "repair index pointers left dangling by the 0.0.33 reshard",
-    apply: async ({ root }) => {
-      // 0.0.33 shipped without rewriting the index, so a workspace that had already
-      // run the 0.0.32 migration in an earlier session came out of it with every
-      // detailFile pointing at a path the reshard had just emptied. Repaired here
-      // rather than by asking anyone to re-run anything.
-      const before = await fs.readFile(indexFile(root), "utf8").catch(() => "");
-      if (!before.trim()) return false;
-      await rewriteIndexPointers(root);
-      return (await fs.readFile(indexFile(root), "utf8")) !== before;
-    },
-  },
   {
     version: "0.0.2",
     description: "backfill manifest.workspaceId (uuid v7)",
@@ -63,7 +42,161 @@ const MIGRATIONS: Migration[] = [
       return true;
     },
   },
+  {
+    version: "0.0.32",
+    description: "restructure logs, goals and requirements; clear stale worktrees",
+    apply: async ({ root }) => restructureWorkspace(root),
+  },
+  {
+    version: "0.0.35",
+    description: "collapse each day's runs into logs/<date>/{runs.jsonl,runs.md}",
+    apply: async ({ root }) => collapseLogsIntoDayFiles(root),
+  },
 ];
+
+/**
+ * 0.0.35 — every earlier log layout collapses into two files per day.
+ *
+ * Deliberately reads the filesystem directly instead of calling runs.ts helpers.
+ * The previous three migrations called them, and when the helpers' meaning changed
+ * those migrations silently started moving files to the *new* locations — which is
+ * how 0.0.33 left 24 index pointers dangling (§9 finding 61). A migration describes
+ * a layout that no longer exists; it has to spell that layout out itself.
+ *
+ * Handles, in order of precedence:
+ *   0.0.33/34  logs/<date>/<slot>/<time>/{record.md,events.jsonl,worker.log}
+ *   0.0.32     logs/<slot>/<stamp>/{...}
+ *   pre-0.0.32 logs/runs/<date>/<runId>.{md,events.jsonl,worker.log}
+ * plus the run rows in logs/index.jsonl or logs/runs.jsonl.
+ */
+async function collapseLogsIntoDayFiles(root: string): Promise<boolean> {
+  const logs = path.join(root, "logs");
+  if (!(await fs.pathExists(logs))) return false;
+
+  const isDate = (n: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(n);
+  const dirs = async (p: string): Promise<string[]> =>
+    (await fs.readdir(p, { withFileTypes: true }).catch(() => []))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+
+  /** Everything found on disk, keyed by runId. */
+  const found = new Map<string, { events: string; detail: string; worker: string }>();
+  const remove: string[] = [];
+  const put = (runId: string, part: "events" | "detail" | "worker", file: string): void => {
+    const at = found.get(runId) ?? { events: "", detail: "", worker: "" };
+    if (!at[part]) at[part] = file;
+    found.set(runId, at);
+  };
+
+  // 0.0.33/34 and 0.0.32 both nest run directories; tell them apart by whether the
+  // top-level name is a date.
+  for (const top of await dirs(logs)) {
+    if (top === "workers") continue;
+    if (isDate(top) && (await fs.pathExists(path.join(logs, top, "runs.jsonl")))) continue;
+
+    const level1 = path.join(logs, top);
+    for (const mid of await dirs(level1)) {
+      const level2 = path.join(level1, mid);
+      const inner = await dirs(level2);
+      if (isDate(top)) {
+        // <date>/<slot>/<time>/ — note the day directory is also where the new
+        // files go, so only the slot directory beneath it may be removed. Removing
+        // level1 here deleted the runs.jsonl and runs.md just written into it.
+        for (const time of inner.length > 0 ? inner : []) {
+          collect(path.join(level2, time), `${top}T${time}_${mid.replace(/^_/, "")}`);
+        }
+        if (inner.length === 0) collect(level2, `${top}T00-00-00_${mid.replace(/^_/, "")}`);
+        remove.push(level2);
+        continue;
+      } else if (top === "runs") {
+        // pre-0.0.32 files sit directly in runs/<date>/
+        continue;
+      } else {
+        // <slot>/<stamp>/
+        collect(level2, `${mid}_${top.replace(/^_/, "")}`);
+      }
+    }
+    if (!isDate(top)) remove.push(level1);
+  }
+
+  // pre-0.0.32: runs/<date>/<runId>.<ext>
+  const flat = path.join(logs, "runs");
+  for (const date of await dirs(flat)) {
+    for (const name of await fs.readdir(path.join(flat, date)).catch(() => [])) {
+      const runId = name.replace(/\.events\.jsonl$|\.worker\.log$|\.md$/, "");
+      const file = path.join(flat, date, name);
+      put(runId, name.endsWith(".events.jsonl") ? "events" : name.endsWith(".worker.log") ? "worker" : "detail", file);
+    }
+  }
+  if (await fs.pathExists(flat)) remove.push(flat);
+
+  function collect(dir: string, runId: string): void {
+    for (const [name, part] of [
+      ["events.jsonl", "events"],
+      ["record.md", "detail"],
+      ["brief.md", "detail"],
+      ["worker.log", "worker"],
+    ] as const) {
+      put(runId, part, path.join(dir, name));
+    }
+  }
+
+  // Run rows, from whichever global index this workspace has.
+  const rows = new Map<string, RunIndexEntry>();
+  for (const name of ["index.jsonl", "runs.jsonl"]) {
+    const file = path.join(logs, name);
+    if (!(await fs.pathExists(file))) continue;
+    for (const line of (await fs.readFile(file, "utf8")).split("\n").filter((l) => l.trim())) {
+      const row = JSON.parse(line) as RunIndexEntry;
+      rows.set(row.runId, row);
+    }
+    remove.push(file);
+  }
+
+  if (found.size === 0 && rows.size === 0) return false;
+
+  // Write in runId order so each day's files read chronologically.
+  for (const runId of [...new Set([...rows.keys(), ...found.keys()])].sort()) {
+    const at = found.get(runId);
+
+    for (const line of at && (await fs.pathExists(at.events))
+      ? (await fs.readFile(at!.events, "utf8")).split("\n").filter((l) => l.trim())
+      : []) {
+      const e = JSON.parse(line) as RunEvent;
+      const { t: _t, kind, ...rest } = e;
+      await appendEvent(root, runId, kind as EventKind, rest);
+    }
+
+    const detail = at && (await fs.pathExists(at.detail)) ? await fs.readFile(at.detail, "utf8") : "";
+    const row = rows.get(runId);
+    if (detail || row) {
+      await writeDetail(
+        root,
+        runId,
+        {
+          status: row?.status ?? "migrated",
+          agent: row?.agent ?? null,
+          model: row?.model,
+          tier: row?.tier,
+          effort: row?.effort,
+          repos: row?.reposChanged ?? [],
+        },
+        { summary: detail || "_record not found on disk_" }
+      );
+    }
+    if (row) await appendIndex(root, { ...row, detailFile: path.join(runSlot(runId).date, "runs.md") });
+
+    if (at && at.worker && (await fs.pathExists(at.worker))) {
+      const { date, slot, time } = runSlot(runId);
+      const to = path.join(logs, date, "workers", `${time}-${slot}.log`);
+      await fs.ensureDir(path.dirname(to));
+      await fs.move(at.worker, to, { overwrite: true });
+    }
+  }
+
+  for (const target of remove) await fs.remove(target);
+  return true;
+}
 
 /**
  * The 0.0.32 layout change, as a migration rather than file reconciliation because
@@ -74,58 +207,6 @@ const MIGRATIONS: Migration[] = [
  */
 async function restructureWorkspace(root: string): Promise<boolean> {
   let changed = false;
-  const logs = path.join(root, "logs");
-
-  // 1. logs/runs/<date>/<runId>.{md,events.jsonl,worker.log}
-  //      -> logs/<taskId|_adhoc>/<stamp>/{record.md,events.jsonl,worker.log}
-  const legacyRuns = path.join(logs, "runs");
-  if (await fs.pathExists(legacyRuns)) {
-    for (const shard of await fs.readdir(legacyRuns)) {
-      const shardDir = path.join(legacyRuns, shard);
-      if (!(await fs.stat(shardDir)).isDirectory()) continue;
-      for (const name of await fs.readdir(shardDir)) {
-        const runId = name.replace(/\.events\.jsonl$|\.worker\.log$|\.md$/, "");
-        const target = name.endsWith(".events.jsonl")
-          ? eventsFile(root, runId)
-          : name.endsWith(".worker.log")
-            ? workerLogFile(root, runId)
-            : detailFile(root, runId);
-        await fs.ensureDir(path.dirname(target));
-        await fs.move(path.join(shardDir, name), target, { overwrite: true });
-        changed = true;
-      }
-      await fs.remove(shardDir);
-    }
-    await fs.remove(legacyRuns);
-  }
-
-  // A verify record written straight into logs/ rather than through the run writer
-  // was invisible to `awo log list`. Give it a run directory so it is addressable.
-  for (const name of (await fs.pathExists(logs)) ? await fs.readdir(logs) : []) {
-    if (!name.endsWith(".md") || name === "README.md") continue;
-    const stem = name.slice(0, -3);
-    await fs.move(
-      path.join(logs, name),
-      path.join(logs, "_adhoc", `legacy-${stem}`, "record.md"),
-      { overwrite: true }
-    );
-    changed = true;
-  }
-
-  // 2. logs/runs.jsonl -> logs/index.jsonl, rewriting the detailFile pointers so
-  //    old entries resolve under the new layout instead of dangling.
-  const legacyIndex = path.join(logs, "runs.jsonl");
-  if ((await fs.pathExists(legacyIndex)) && !(await fs.pathExists(indexFile(root)))) {
-    const lines = (await fs.readFile(legacyIndex, "utf8")).split("\n").filter((l) => l.trim());
-    const rewritten = lines.map((line) => {
-      const entry = JSON.parse(line) as { runId: string; detailFile?: string };
-      entry.detailFile = path.relative(logs, detailFile(root, entry.runId));
-      return JSON.stringify(entry);
-    });
-    await fs.writeFile(indexFile(root), rewritten.length ? `${rewritten.join("\n")}\n` : "");
-    await fs.remove(legacyIndex);
-    changed = true;
-  }
 
   // 3. goals/<ID>-<truncated-slug>/ -> goals/<ID>/, and tasks/<ID>-<slug>.md ->
   //    tasks/<ID>.md. The slug was cut at 40 chars, so directory names ended
@@ -187,69 +268,7 @@ async function restructureWorkspace(root: string): Promise<boolean> {
   return changed;
 }
 
-/**
- * 0.0.33 — `logs/<slot>/<stamp>/` becomes `logs/<date>/<slot>/<time>/`.
- *
- * 0.0.32 filed runs under their task, which made "every attempt at T2" an `ls` but
- * gave up chronological browsing and let the top level of logs/ grow one directory
- * per task forever. Date first restores both; the index still answers per-task
- * questions, which is what it is for.
- *
- * Runs after 0.0.32's migration, so a workspace coming from any earlier version
- * arrives here already in the task-first shape.
- */
-async function reshardLogsByDate(root: string): Promise<boolean> {
-  const logs = path.join(root, "logs");
-  if (!(await fs.pathExists(logs))) return false;
-  let changed = false;
 
-  const isDate = (name: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(name);
-
-  for (const slot of await fs.readdir(logs)) {
-    // Already-sharded days and the index are left alone; this is idempotent.
-    if (isDate(slot) || !(await fs.stat(path.join(logs, slot))).isDirectory()) continue;
-
-    for (const stamp of await fs.readdir(path.join(logs, slot))) {
-      const from = path.join(logs, slot, stamp);
-      if (!(await fs.stat(from)).isDirectory()) continue;
-      // `<date>T<time>`, or a hand-made name like `legacy-verify-SHOP-G1` with no
-      // date in it at all — those keep their name and land under the epoch day so
-      // they stay addressable rather than being dropped.
-      const dated = /^(\d{4}-\d{2}-\d{2})T(.+)$/.exec(stamp);
-      const to = dated
-        ? path.join(logs, dated[1], slot, dated[2])
-        : path.join(logs, "undated", slot, stamp);
-      await fs.ensureDir(path.dirname(to));
-      await fs.move(from, to, { overwrite: true });
-      changed = true;
-    }
-    await fs.remove(path.join(logs, slot));
-  }
-
-  // The index's detailFile pointers are relative paths, so moving the files
-  // invalidates them. Rewriting them here rather than trusting 0.0.32's rewrite is
-  // the whole bug this block exists for: on a workspace that had already run the
-  // 0.0.32 migration in an earlier session, that rewrite happened at 0.0.32 paths
-  // and this migration then moved the files out from under it — 24 dangling
-  // pointers, invisible to `awo log list` because it resolves by runId.
-  if (changed) await rewriteIndexPointers(root);
-
-  return changed;
-}
-
-/** Point every index entry at wherever its record actually is now. */
-async function rewriteIndexPointers(root: string): Promise<void> {
-  const file = indexFile(root);
-  if (!(await fs.pathExists(file))) return;
-  const logs = path.join(root, "logs");
-  const lines = (await fs.readFile(file, "utf8")).split("\n").filter((l) => l.trim());
-  const rewritten = lines.map((line) => {
-    const entry = JSON.parse(line) as { runId: string; detailFile?: string };
-    entry.detailFile = path.relative(logs, detailFile(root, entry.runId));
-    return JSON.stringify(entry);
-  });
-  await fs.writeFile(file, rewritten.length ? `${rewritten.join("\n")}\n` : "");
-}
 
 /** `.workspace/manifest.json` is owned by migrations, never file reconciliation. */
 const NOT_RECONCILED = new Set([".workspace/manifest.json", ".workspace/template.lock"]);

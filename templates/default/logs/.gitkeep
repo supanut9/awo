@@ -1,3 +1,6 @@
-# Run logs land here (gitignored): index.jsonl for queries, and one directory per
-# run at <date>/<taskId|goalId|_adhoc>/<time>/ holding record.md, events.jsonl and
-# worker.log. Browse by day; ask per-task questions with `awo log list --task <id>`.
+# Run logs land here (gitignored). One folder per day, holding two files:
+#   runs.jsonl  every event and one row per run, append-only
+#   runs.md     every run's written record, one marked section each
+# Plus workers/ when a run was dispatched, holding that worker's raw output.
+# Never hand-edit runs.md: the <!-- awo:run … --> markers are how the record is
+# split per run, for `awo log show` and for the hosted dashboard.

@@ -3,55 +3,81 @@ import path from "path";
 import { type RunOutcome } from "./state.js";
 
 /**
- * §7.3 — `<ISO-timestamp>_<taskId>`: sortable, unique, human-readable.
+ * §7.3 — one folder per day, holding exactly two files.
  *
- * Milliseconds are kept deliberately. Truncating to seconds collided when the
- * same task was run twice inside one second: both runs shared a runId, appended
- * to the same events file, and wrote duplicate index entries — breaking the
- * uniqueness §7.3 relies on to link index, detail and state.
+ * The layout got here by three wrong turns, each fixing the last one's real
+ * problem and creating a new one:
+ *
+ *  - `logs/runs/<date>/<runId>.{md,events.jsonl,worker.log}` — one flat directory
+ *    per day with three filename variants per run: 39 files after a single day.
+ *  - `logs/<taskId>/<stamp>/` (0.0.32) — grouped by task, which made "every attempt
+ *    at T2" an `ls` but gave up chronological browsing and grew one top-level
+ *    directory per task forever.
+ *  - `logs/<date>/<slot>/<time>/` (0.0.33) — three levels of nesting before a file,
+ *    with `_adhoc`, task and goal directories mixed under each day, and machine
+ *    names like `16-33-45-180Z` as leaves.
+ *
+ * What all three share is that the *number of filesystem entries grows with the
+ * number of runs*. A day of real work is unreadable however you nest it. So a day
+ * is now two files that grow internally instead of many that multiply:
+ *
+ * ```
+ * logs/2026-07-28/runs.jsonl   every event and every run row, append-only
+ * logs/2026-07-28/runs.md      every run's written record, one marked section each
+ * logs/2026-07-28/workers/     raw worker stdout, only when one was dispatched
+ * ```
+ *
+ * `.jsonl` and not `.json`: a JSON document has to be read-parse-rewritten to add a
+ * row, so two workers finishing together silently lose one of the writes. Appending
+ * a line is atomic, and parallel workers are the normal case here, not an edge one.
+ *
+ * Worker output stays out of both files. It is the spawned CLI's raw stdout —
+ * unbounded, hundreds of KB, and interleaved nonsense if two workers share a file —
+ * where `runs.jsonl` and `runs.md` are what awo itself recorded.
  */
+
+/** `<date>T<HH-MM-SS>_<slot>` — sortable, readable, unique per second per slot. */
 export function newRunId(taskId: string, at: Date = new Date()): string {
-  return `${at.toISOString().replace(/[:.]/g, "-")}_${taskId}`;
+  return `${at.toISOString().slice(0, 19).replace(/[:.]/g, "-")}_${taskId}`;
 }
 
 /**
- * A runId splits into the date it happened, the slot it belongs to, and the time.
+ * A runId that no run in its day already holds.
  *
- * §7.3 first sharded by date alone — `logs/runs/<date>/<runId>.md` — which put
- * every run of every task in one flat directory: 39 files after a single day, and
- * four filename variants per run to parse. 0.0.32 filed by task instead, which
- * fixed that but lost the thing date-sharding was good at, namely "show me what
- * happened on Tuesday" and a directory that stays small as the project ages.
- *
- * So: date first, then the task under it. Browsing is chronological, each day's
- * directory holds only that day's work, and a day's runs are already grouped by
- * the task they belong to rather than interleaved by timestamp.
- *
- * The cost, stated plainly: every run of one task is no longer a single `ls` —
- * it spans the days it ran on. `awo log list --task <id>` answers that from the
- * index, which is what an index is for, and the index never moved.
- *
- * Work with no task — intake, planning, audits — files under `_adhoc`. A
- * goal-level artefact (the QA gate brief) files under its goal, so a goal keeps
- * every gate it went through instead of the newest overwriting the last.
- *
- * The runId itself is UNCHANGED, so index entries, state and already-published
- * Mongo documents keep their keys; only the path derived from it moves.
+ * Milliseconds used to be carried in the runId purely to avoid collisions when a
+ * task ran twice inside one second — which happened, and produced two runs sharing
+ * an id, one events stream and a duplicate index row. Now that a run's identity is
+ * checked against the day it lands in, the id can stay readable and uniqueness is
+ * enforced where it actually matters: at allocation.
  */
+export async function allocateRunId(
+  workspaceRoot: string,
+  taskId: string,
+  at: Date = new Date()
+): Promise<string> {
+  const taken = new Set((await readDayLines(workspaceRoot, at.toISOString().slice(0, 10))).map((l) => l.runId));
+  const when = new Date(at.getTime());
+  for (let bump = 0; bump < 120; bump += 1) {
+    const candidate = newRunId(taskId, when);
+    if (!taken.has(candidate)) return candidate;
+    when.setSeconds(when.getSeconds() + 1);
+  }
+  // 120 runs of one task inside two minutes is a runaway loop, not a real workload.
+  throw new Error(`could not allocate a runId for ${taskId}: 120 consecutive seconds are taken`);
+}
+
+/** The day a runId belongs to, the slot it is for, and its time of day. */
 export function runSlot(runId: string): { date: string; slot: string; time: string } {
   const cut = runId.indexOf("_");
   const stamp = cut < 0 ? runId : runId.slice(0, cut);
   const suffix = cut < 0 ? "" : runId.slice(cut + 1);
   return {
     date: stamp.slice(0, 10),
-    slot: /^[A-Za-z][A-Za-z0-9]*-[GT]\d+$/.test(suffix) ? suffix : ADHOC_SLOT,
-    // The date is already the parent directory, so it is not repeated here.
-    time: stamp.slice(11) || stamp,
+    slot: suffix || "adhoc",
+    // Tolerates the old `15-48-08-430Z` form as well as `15-48-08`.
+    time: stamp.slice(11, 19) || stamp,
   };
 }
-
-/** Leading underscore so it sorts away from real task IDs and can never collide. */
-const ADHOC_SLOT = "_adhoc";
 
 export type EventKind =
   | "run.start"
@@ -73,84 +99,65 @@ function logsRoot(workspaceRoot: string): string {
   return path.join(workspaceRoot, "logs");
 }
 
-/** `logs/<date>/<taskId|goalId|_adhoc>/<time>/` — one directory per run. */
-export function runDir(workspaceRoot: string, runId: string): string {
-  const { date, slot, time } = runSlot(runId);
-  return path.join(logsRoot(workspaceRoot), date, slot, time);
+export function dayDir(workspaceRoot: string, runId: string): string {
+  return path.join(logsRoot(workspaceRoot), runSlot(runId).date);
 }
 
-// Fixed names inside the run directory. The runId is the directory now, so it no
-// longer has to be repeated in every filename — and a new artefact is a new file
-// rather than a new suffix to parse.
-export function eventsFile(workspaceRoot: string, runId: string): string {
-  return path.join(runDir(workspaceRoot, runId), "events.jsonl");
+/** The day's structured data: every event, and one row per completed run. */
+export function dayDataFile(workspaceRoot: string, runId: string): string {
+  return path.join(dayDir(workspaceRoot, runId), "runs.jsonl");
 }
 
+/** The day's prose: every run's record, each behind a machine-readable marker. */
+export function dayRecordFile(workspaceRoot: string, runId: string): string {
+  return path.join(dayDir(workspaceRoot, runId), "runs.md");
+}
+
+/** Where a run's record lives. The file is shared; the section inside is not. */
 export function detailFile(workspaceRoot: string, runId: string): string {
-  return path.join(runDir(workspaceRoot, runId), "record.md");
+  return dayRecordFile(workspaceRoot, runId);
 }
 
-/** stdout+stderr of a dispatched worker. Absent when a human drove the run. */
+/** Raw stdout+stderr of a dispatched worker. Absent when a human drove the run. */
 export function workerLogFile(workspaceRoot: string, runId: string): string {
-  return path.join(runDir(workspaceRoot, runId), "worker.log");
+  const { slot, time } = runSlot(runId);
+  return path.join(dayDir(workspaceRoot, runId), "workers", `${time}-${slot}.log`);
 }
 
-export function indexFile(workspaceRoot: string): string {
-  return path.join(logsRoot(workspaceRoot), "index.jsonl");
+/** The marker `publish` and `log show` split the day's records on. */
+export function recordMarker(runId: string): string {
+  return `<!-- awo:run ${runId} -->`;
 }
 
-/**
- * Every earlier location, newest first, so a workspace that has not run
- * `awo upgrade` still shows its history instead of appearing to have lost it.
- */
-export function legacyPaths(
-  workspaceRoot: string,
-  runId: string
-): { events: string; detail: string; worker: string }[] {
-  const { date, slot, time } = runSlot(runId);
-  const stamp = `${date}T${time}`;
-  return [
-    // 0.0.32: task first, no date shard.
-    {
-      events: path.join(logsRoot(workspaceRoot), slot, stamp, "events.jsonl"),
-      detail: path.join(logsRoot(workspaceRoot), slot, stamp, "record.md"),
-      worker: path.join(logsRoot(workspaceRoot), slot, stamp, "worker.log"),
-    },
-    // pre-0.0.32: date shard, runId repeated in every filename.
-    {
-      events: path.join(logsRoot(workspaceRoot), "runs", date, `${runId}.events.jsonl`),
-      detail: path.join(logsRoot(workspaceRoot), "runs", date, `${runId}.md`),
-      worker: path.join(logsRoot(workspaceRoot), "runs", date, `${runId}.worker.log`),
-    },
-  ];
+// ---------------------------------------------------------------------------
+// day file I/O
+// ---------------------------------------------------------------------------
+
+interface DayLine {
+  type: "event" | "run";
+  runId: string;
+  [key: string]: unknown;
 }
 
-export function legacyIndexFile(workspaceRoot: string): string {
-  return path.join(logsRoot(workspaceRoot), "runs.jsonl");
+async function readDayLines(workspaceRoot: string, date: string): Promise<DayLine[]> {
+  const file = path.join(logsRoot(workspaceRoot), date, "runs.jsonl");
+  if (!(await fs.pathExists(file))) return [];
+  return (await fs.readFile(file, "utf8"))
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as DayLine);
 }
 
-/** The current path if it exists, else the legacy one, else the current path. */
-export async function resolveRunFile(
-  workspaceRoot: string,
-  runId: string,
-  which: "events" | "detail" | "worker"
-): Promise<string> {
-  const current =
-    which === "events"
-      ? eventsFile(workspaceRoot, runId)
-      : which === "detail"
-        ? detailFile(workspaceRoot, runId)
-        : workerLogFile(workspaceRoot, runId);
-  if (await fs.pathExists(current)) return current;
-  for (const layout of legacyPaths(workspaceRoot, runId)) {
-    if (await fs.pathExists(layout[which])) return layout[which];
-  }
-  return current;
+async function appendDayLine(workspaceRoot: string, runId: string, line: DayLine): Promise<void> {
+  const file = dayDataFile(workspaceRoot, runId);
+  await fs.ensureDir(path.dirname(file));
+  await fs.appendFile(file, `${JSON.stringify(line)}\n`);
 }
 
 /**
- * §7.4 — append-only progress stream. One line per meaningful step, written
- * DURING the run; this is what makes progress observable at all.
+ * §7.4 — append-only progress stream, written DURING the run. This is what makes
+ * progress observable at all, and why the day file is line-appended rather than
+ * rewritten: an event must survive the process that wrote it dying.
  */
 export async function appendEvent(
   workspaceRoot: string,
@@ -159,19 +166,17 @@ export async function appendEvent(
   fields: Record<string, unknown> = {}
 ): Promise<RunEvent> {
   const event: RunEvent = { t: new Date().toISOString(), kind, ...fields };
-  await fs.ensureDir(runDir(workspaceRoot, runId));
-  await fs.appendFile(eventsFile(workspaceRoot, runId), `${JSON.stringify(event)}\n`);
+  await appendDayLine(workspaceRoot, runId, { type: "event", runId, ...event });
   return event;
 }
 
 export async function readEvents(workspaceRoot: string, runId: string): Promise<RunEvent[]> {
-  const file = await resolveRunFile(workspaceRoot, runId, "events");
-  if (!(await fs.pathExists(file))) return [];
-  const raw = await fs.readFile(file, "utf8");
-  return raw
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as RunEvent);
+  const { date } = runSlot(runId);
+  const own = (await readDayLines(workspaceRoot, date))
+    .filter((l) => l.type === "event" && l.runId === runId)
+    .map(({ type: _type, runId: _runId, ...rest }) => rest as unknown as RunEvent);
+  if (own.length > 0) return own;
+  return readLegacyEvents(workspaceRoot, runId);
 }
 
 export interface RunIndexEntry {
@@ -180,9 +185,8 @@ export interface RunIndexEntry {
   agent: string | null;
   /**
    * §12 — what actually ran, so the log can answer "do low-effort runs fail or
-   * retry more often?". Without these the tier/effort mapping stays a guess:
-   * the policy is a hypothesis and the index is the only place the evidence can
-   * accumulate.
+   * retry more often?". Without these the tier/effort mapping stays a guess: the
+   * policy is a hypothesis and the index is the only place evidence accumulates.
    */
   tier?: string;
   model?: string;
@@ -196,61 +200,195 @@ export interface RunIndexEntry {
   detailFile: string;
 }
 
-/** §7.3 — the query index. Append-only; one line per completed run. */
-export async function appendIndex(
-  workspaceRoot: string,
-  entry: RunIndexEntry
-): Promise<void> {
-  await fs.ensureDir(logsRoot(workspaceRoot));
-  await fs.appendFile(indexFile(workspaceRoot), `${JSON.stringify(entry)}\n`);
+/** §7.3 — one row per completed run, in its day's file. */
+export async function appendIndex(workspaceRoot: string, entry: RunIndexEntry): Promise<void> {
+  await appendDayLine(workspaceRoot, entry.runId, { type: "run", ...entry });
 }
 
+/**
+ * Every run ever recorded, newest last.
+ *
+ * Reads each day's file rather than one global index. A global index duplicated
+ * what the day files already hold, and duplication is how they drift: 0.0.33 moved
+ * the files and left 24 index pointers dangling (§9 finding 61). One writer, one
+ * copy.
+ */
 export async function readIndex(workspaceRoot: string): Promise<RunIndexEntry[]> {
-  let file = indexFile(workspaceRoot);
-  if (!(await fs.pathExists(file))) file = legacyIndexFile(workspaceRoot);
-  if (!(await fs.pathExists(file))) return [];
-  const raw = await fs.readFile(file, "utf8");
-  return raw
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as RunIndexEntry);
+  const root = logsRoot(workspaceRoot);
+  const entries: RunIndexEntry[] = [];
+  for (const name of (await fs.readdir(root).catch(() => [])) as string[]) {
+    if (!(await fs.stat(path.join(root, name)).catch(() => null))?.isDirectory()) continue;
+    for (const line of await readDayLines(workspaceRoot, name)) {
+      if (line.type === "run") {
+        const { type: _type, ...rest } = line;
+        entries.push(rest as unknown as RunIndexEntry);
+      }
+    }
+  }
+  if (entries.length > 0) return entries.sort((a, b) => a.runId.localeCompare(b.runId));
+  return readLegacyIndex(workspaceRoot);
 }
 
-/** §7.3 — the readable record, written once at the end of a run. */
+/**
+ * §7.3 — the readable record, written once at the end of a run, appended to its
+ * day as a marked section. Replaces its own section if one already exists, so a
+ * re-closed run updates rather than duplicating.
+ */
 export async function writeDetail(
   workspaceRoot: string,
   runId: string,
   frontmatter: Record<string, unknown>,
   sections: { prompt?: string; interpreted?: string; summary?: string; notes?: string[] }
 ): Promise<string> {
-  const yaml = Object.entries(frontmatter)
-    .map(([k, v]) => {
-      if (Array.isArray(v)) {
-        return v.length === 0 ? `${k}: []` : `${k}:\n${v.map((i) => `  - ${i}`).join("\n")}`;
-      }
-      return `${k}: ${v === null ? "null" : v}`;
-    })
+  const meta = Object.entries(frontmatter)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `- **${k}:** ${Array.isArray(v) ? v.join(", ") || "none" : v === null ? "—" : v}`)
     .join("\n");
 
-  const body = [
-    "## User prompt",
+  const { time, slot } = runSlot(runId);
+  const section = [
+    recordMarker(runId),
+    `## ${time.replace(/-/g, ":")} · ${slot}`,
+    "",
+    meta,
+    "",
+    "### User prompt",
     sections.prompt?.trim() || "_not recorded_",
     "",
-    "## Interpreted intent",
+    "### Interpreted intent",
     sections.interpreted?.trim() || "_not recorded_",
     "",
-    "## Summary of changes",
+    "### Summary of changes",
     sections.summary?.trim() || "_not recorded_",
     "",
-    "## Notes / follow-ups",
+    "### Notes / follow-ups",
     sections.notes && sections.notes.length > 0
       ? sections.notes.map((n) => `- ${n}`).join("\n")
       : "- none",
     "",
   ].join("\n");
 
-  const file = detailFile(workspaceRoot, runId);
+  const file = dayRecordFile(workspaceRoot, runId);
   await fs.ensureDir(path.dirname(file));
-  await fs.writeFile(file, `---\n${yaml}\n---\n\n${body}`);
+  const existing = (await fs.readFile(file, "utf8").catch(() => "")) as string;
+
+  if (existing.includes(recordMarker(runId))) {
+    await fs.writeFile(file, replaceSection(existing, runId, section));
+  } else {
+    const header = existing.trim() === "" ? `# Runs on ${runSlot(runId).date}\n\n` : "";
+    await fs.appendFile(file, `${header}${section}\n`);
+  }
   return file;
+}
+
+/** One run's record, extracted from its day. */
+export async function readDetail(workspaceRoot: string, runId: string): Promise<string> {
+  const file = dayRecordFile(workspaceRoot, runId);
+  const text = (await fs.readFile(file, "utf8").catch(() => "")) as string;
+  const found = extractSection(text, runId);
+  if (found) return found;
+  return readLegacyDetail(workspaceRoot, runId);
+}
+
+function sectionBounds(text: string, runId: string): { start: number; end: number } | null {
+  const start = text.indexOf(recordMarker(runId));
+  if (start < 0) return null;
+  const next = text.indexOf("<!-- awo:run ", start + 1);
+  return { start, end: next < 0 ? text.length : next };
+}
+
+function extractSection(text: string, runId: string): string {
+  const at = sectionBounds(text, runId);
+  return at ? text.slice(at.start, at.end).trim() : "";
+}
+
+function replaceSection(text: string, runId: string, section: string): string {
+  const at = sectionBounds(text, runId);
+  if (!at) return `${text}${section}\n`;
+  return `${text.slice(0, at.start)}${section}\n${text.slice(at.end)}`;
+}
+
+// ---------------------------------------------------------------------------
+// earlier layouts, still read
+// ---------------------------------------------------------------------------
+
+/**
+ * Every location a run's files have ever lived, newest layout first, so a
+ * workspace that has not run `awo upgrade` still shows its history rather than
+ * appearing to have lost it.
+ */
+function legacyCandidates(
+  workspaceRoot: string,
+  runId: string
+): { events: string; detail: string; worker: string }[] {
+  const logs = logsRoot(workspaceRoot);
+  const { date, slot, time } = runSlot(runId);
+  const cut = runId.indexOf("_");
+  const stamp = cut < 0 ? runId : runId.slice(0, cut);
+  const stampSlot = cut < 0 ? "_adhoc" : runId.slice(cut + 1);
+  const dirs = [
+    // 0.0.33/0.0.34: <date>/<slot>/<time>/
+    path.join(logs, date, stampSlot, stamp.slice(11) || time),
+    // 0.0.32: <slot>/<stamp>/
+    path.join(logs, stampSlot, stamp),
+  ];
+  return [
+    ...dirs.map((dir) => ({
+      events: path.join(dir, "events.jsonl"),
+      detail: path.join(dir, "record.md"),
+      worker: path.join(dir, "worker.log"),
+    })),
+    // pre-0.0.32: runs/<date>/<runId>.<ext>
+    {
+      events: path.join(logs, "runs", date, `${runId}.events.jsonl`),
+      detail: path.join(logs, "runs", date, `${runId}.md`),
+      worker: path.join(logs, "runs", date, `${runId}.worker.log`),
+    },
+  ];
+}
+
+async function readLegacyEvents(workspaceRoot: string, runId: string): Promise<RunEvent[]> {
+  for (const layout of legacyCandidates(workspaceRoot, runId)) {
+    if (!(await fs.pathExists(layout.events))) continue;
+    return (await fs.readFile(layout.events, "utf8"))
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as RunEvent);
+  }
+  return [];
+}
+
+async function readLegacyDetail(workspaceRoot: string, runId: string): Promise<string> {
+  for (const layout of legacyCandidates(workspaceRoot, runId)) {
+    if (await fs.pathExists(layout.detail)) return fs.readFile(layout.detail, "utf8");
+  }
+  return "";
+}
+
+async function readLegacyIndex(workspaceRoot: string): Promise<RunIndexEntry[]> {
+  for (const name of ["index.jsonl", "runs.jsonl"]) {
+    const file = path.join(logsRoot(workspaceRoot), name);
+    if (!(await fs.pathExists(file))) continue;
+    return (await fs.readFile(file, "utf8"))
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as RunIndexEntry);
+  }
+  return [];
+}
+
+/** The current path if it exists, else the newest earlier one that does. */
+export async function resolveRunFile(
+  workspaceRoot: string,
+  runId: string,
+  which: "events" | "detail" | "worker"
+): Promise<string> {
+  const current =
+    which === "worker" ? workerLogFile(workspaceRoot, runId) : dayRecordFile(workspaceRoot, runId);
+  if (which !== "detail" && (await fs.pathExists(current))) return current;
+  if (which === "detail" && (await fs.pathExists(current))) return current;
+  for (const layout of legacyCandidates(workspaceRoot, runId)) {
+    if (await fs.pathExists(layout[which])) return layout[which];
+  }
+  return current;
 }
