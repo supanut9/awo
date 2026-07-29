@@ -3,6 +3,7 @@ import path from "path";
 import { simpleGit } from "simple-git";
 import { v7 as uuidv7 } from "uuid";
 import { findWorkspaceRoot } from "../workspace.js";
+import { regenerateCodeWorkspace } from "../vscode-workspace.js";
 import { runSlot, workerLogFile, writeDetail, appendIndex, appendEvent, type RunIndexEntry, type RunEvent, type EventKind } from "../runs.js";
 import { readManifest, writeManifest, type Manifest } from "../manifest.js";
 import {
@@ -503,6 +504,14 @@ export async function runUpgrade(
   fresh.libraryVersion = plan.to;
   await writeManifest(root, fresh);
   await writeLock(root, await buildLock(root, manifest.projectKey, plan.to));
+
+  // Derived artifacts are regenerated on every upgrade, unconditionally.
+  //
+  // The .code-workspace is generated from the manifest but was only rewritten by
+  // add/connect/remove/sync — so when 0.0.38 changed WHERE its settings have to live,
+  // an upgraded workspace kept a stale file and Git Graph still saw nothing until
+  // someone happened to run `awo sync`. A fix nobody receives is not a fix.
+  await regenerateCodeWorkspace(root);
 
   return {
     ...plan,
