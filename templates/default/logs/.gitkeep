@@ -1,2 +1,3 @@
 # Run logs land here (gitignored): index.jsonl for queries, and one directory per
-# run at <taskId|_adhoc>/<timestamp>/ holding record.md, events.jsonl, worker.log.
+# run at <date>/<taskId|goalId|_adhoc>/<time>/ holding record.md, events.jsonl and
+# worker.log. Browse by day; ask per-task questions with `awo log list --task <id>`.

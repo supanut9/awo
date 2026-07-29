@@ -379,9 +379,12 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   assert.ok(!/--add-dir/.test(v.stdout), "a read-only run needs no write grants");
 
   // The brief is filed as its own run directory, not loose in logs/.
-  const briefDirs = fs.readdirSync(path.join(ws, "logs", "PL-G1"));
+  const day = fs.readdirSync(path.join(ws, "logs")).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+  assert.equal(day.length, 1, "one day of runs");
+  const goalDayDir = path.join(ws, "logs", day[0], "PL-G1");
+  const briefDirs = fs.readdirSync(goalDayDir);
   assert.equal(briefDirs.length, 1, "verify must file one brief under its goal");
-  const brief = fs.readFileSync(path.join(ws, "logs", "PL-G1", briefDirs[0], "brief.md"), "utf8");
+  const brief = fs.readFileSync(path.join(goalDayDir, briefDirs[0], "brief.md"), "utf8");
   assert.match(brief, /Judge the goal AS A WHOLE/);
   assert.match(brief, /CONTRACTS BETWEEN them/);
   assert.match(brief, /feature\/PL-T1/);

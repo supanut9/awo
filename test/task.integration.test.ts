@@ -67,12 +67,13 @@ function readState(ws: string): {
   );
 }
 
-/** logs/<taskId|_adhoc>/<timestamp>/<file> — the 0.0.32 layout. */
+/** logs/<date>/<taskId|_adhoc>/<time>/<file> — the 0.0.33 layout. */
 function runFile(ws: string, runId: string, file: string): string {
   const cut = runId.indexOf("_");
+  const stamp = cut < 0 ? runId : runId.slice(0, cut);
   const suffix = cut < 0 ? "" : runId.slice(cut + 1);
-  const slot = /^[A-Za-z][A-Za-z0-9]*-T\d+$/.test(suffix) ? suffix : "_adhoc";
-  return path.join(ws, "logs", slot, cut < 0 ? runId : runId.slice(0, cut), file);
+  const slot = /^[A-Za-z][A-Za-z0-9]*-[GT]\d+$/.test(suffix) ? suffix : "_adhoc";
+  return path.join(ws, "logs", stamp.slice(0, 10), slot, stamp.slice(11), file);
 }
 
 test("task list reads authored frontmatter status before any state exists", () => {

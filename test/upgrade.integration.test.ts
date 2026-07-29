@@ -340,7 +340,7 @@ test("the 0.0.32 restructure moves logs, goals and requirements without losing c
   execFileSync(process.execPath, [CLI, "upgrade"], { cwd: ws, encoding: "utf8" });
 
   // Logs: one directory per run, filed under the task, with fixed names.
-  const newRun = path.join(ws, "logs", "UP-T2", "2026-07-28T16-33-45-180Z");
+  const newRun = path.join(ws, "logs", "2026-07-28", "UP-T2", "16-33-45-180Z");
   assert.match(fs.readFileSync(path.join(newRun, "record.md"), "utf8"), /record body/);
   assert.match(fs.readFileSync(path.join(newRun, "events.jsonl"), "utf8"), /"kind":"test"/);
   assert.equal(fs.readFileSync(path.join(newRun, "worker.log"), "utf8"), "worker said this\n");
@@ -349,13 +349,16 @@ test("the 0.0.32 restructure moves logs, goals and requirements without losing c
   // The index moves and its pointers are rewritten, not left dangling.
   assert.ok(!fs.existsSync(path.join(ws, "logs", "runs.jsonl")));
   const entry = JSON.parse(fs.readFileSync(path.join(ws, "logs", "index.jsonl"), "utf8").trim());
-  assert.equal(entry.detailFile, path.join("UP-T2", "2026-07-28T16-33-45-180Z", "record.md"));
+  assert.equal(entry.detailFile, path.join("2026-07-28", "UP-T2", "16-33-45-180Z", "record.md"));
   assert.ok(fs.existsSync(path.join(ws, "logs", entry.detailFile)), "the pointer must resolve");
 
   // The loose verify brief becomes addressable instead of sitting in logs/.
   assert.ok(!fs.existsSync(path.join(ws, "logs", "verify-UP-G1.md")));
   assert.match(
-    fs.readFileSync(path.join(ws, "logs", "_adhoc", "legacy-verify-UP-G1", "record.md"), "utf8"),
+    fs.readFileSync(
+      path.join(ws, "logs", "undated", "_adhoc", "legacy-verify-UP-G1", "record.md"),
+      "utf8"
+    ),
     /gate brief/
   );
 

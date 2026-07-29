@@ -1584,7 +1584,7 @@ problems, all of them invisible until the directory had real content in it:
 requirements/<KEY>-R#.md
 goals/<KEY>-G#/{goal.md, requirement.md, state.json, tasks/<KEY>-T#.md}
 logs/index.jsonl
-logs/<taskId|goalId|_adhoc>/<timestamp>/{record.md, events.jsonl, worker.log, brief.md}
+logs/<date>/<taskId|goalId|_adhoc>/<time>/{record.md, events.jsonl, worker.log, brief.md}
 repos/.worktrees/<repo>/<taskId>
 ```
 
@@ -1597,8 +1597,14 @@ frontmatter, where the CLI and both dashboards read them from.
 **A run is a directory, not a filename prefix.** The runId is the directory, so
 filenames inside are fixed (`record.md`, `events.jsonl`, `worker.log`) and a new
 artefact is a new file rather than another suffix for every reader to parse.
-Filing by task also bounds the directory naturally — a task has a handful of runs
-where a date has all of them.
+
+**Shard by day, then by task.** 0.0.32 filed runs under their task with no date
+shard, which made "every attempt at T2" an `ls` but gave up chronological browsing
+and let the top of `logs/` grow one directory per task forever. 0.0.33 puts the
+date back on top with the task under it: a day's directory holds only that day's
+work, already grouped by task rather than interleaved by timestamp. The cost is
+that one task's history now spans the days it ran on — which `awo log list --task`
+answers from the index. That is what an index is for, and it never moved.
 
 ### 14.2 What did not change
 
@@ -1631,3 +1637,11 @@ has not upgraded shows its history rather than appearing to have lost it.
     outside the gate, and outside the log's `reposChanged`. The rail is real but
     it is keyed on the declaration: a repo an agent can *read* is a repo it can
     *write* unless something stops it. Prose is not a declaration.
+
+60. **Two good properties can trade against each other, and the index is the
+    tiebreak.** Date-sharding gives chronological browsing and bounded
+    directories; task-filing gives "every attempt at this task" as one `ls`. 0.0.32
+    took the second and lost the first. The resolution was not to pick harder but
+    to notice that only one of them needs to be a *path* — the other is a query,
+    and `logs/index.jsonl` already answers it. Structure the tree for browsing;
+    leave lookup to the index.

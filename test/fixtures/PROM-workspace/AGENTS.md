@@ -28,7 +28,8 @@ requirements/PROM-R1.md          intake, not yet planned
 goals/PROM-G1/goal.md            the objective and its definition of done
                     /requirement.md         the ask it came from
                     /tasks/PROM-T1.md   executable units
-logs/PROM-T1/<timestamp>/record.md · events.jsonl · worker.log
+logs/<date>/PROM-T1/<time>/      record.md · events.jsonl · worker.log
+logs/<date>/PROM-G1/<time>/      brief.md — each QA gate
 logs/index.jsonl                            queryable index of every run
 ```
 

@@ -15,30 +15,38 @@ export function newRunId(taskId: string, at: Date = new Date()): string {
 }
 
 /**
- * A runId splits into the slot it files under and its timestamp.
+ * A runId splits into the date it happened, the slot it belongs to, and the time.
  *
- * §7.3 originally sharded by date — `logs/runs/<YYYY-MM-DD>/<runId>.md` — which
- * put every run of every task in one flat directory, four filename variants deep
- * (`.md`, `.events.jsonl`, `.worker.log`). One day of real work produced 39 files
- * there, and answering "show me every attempt at SHOP-T2" meant globbing a date
- * you had to already know.
+ * §7.3 first sharded by date alone — `logs/runs/<date>/<runId>.md` — which put
+ * every run of every task in one flat directory: 39 files after a single day, and
+ * four filename variants per run to parse. 0.0.32 filed by task instead, which
+ * fixed that but lost the thing date-sharding was good at, namely "show me what
+ * happened on Tuesday" and a directory that stays small as the project ages.
  *
- * Filing by task instead makes that an `ls`, and bounds the directory naturally: a
- * task has a handful of runs, where a date has all of them. Work with no task —
- * intake, planning, audits — files under `_adhoc`. A goal-level artefact (the QA
- * gate brief) files under its goal, so `logs/<KEY>-G1/` holds every gate it went
- * through instead of only the most recent overwriting the last.
+ * So: date first, then the task under it. Browsing is chronological, each day's
+ * directory holds only that day's work, and a day's runs are already grouped by
+ * the task they belong to rather than interleaved by timestamp.
+ *
+ * The cost, stated plainly: every run of one task is no longer a single `ls` —
+ * it spans the days it ran on. `awo log list --task <id>` answers that from the
+ * index, which is what an index is for, and the index never moved.
+ *
+ * Work with no task — intake, planning, audits — files under `_adhoc`. A
+ * goal-level artefact (the QA gate brief) files under its goal, so a goal keeps
+ * every gate it went through instead of the newest overwriting the last.
  *
  * The runId itself is UNCHANGED, so index entries, state and already-published
  * Mongo documents keep their keys; only the path derived from it moves.
  */
-export function runSlot(runId: string): { slot: string; stamp: string } {
+export function runSlot(runId: string): { date: string; slot: string; time: string } {
   const cut = runId.indexOf("_");
-  if (cut < 0) return { slot: ADHOC_SLOT, stamp: runId };
-  const suffix = runId.slice(cut + 1);
+  const stamp = cut < 0 ? runId : runId.slice(0, cut);
+  const suffix = cut < 0 ? "" : runId.slice(cut + 1);
   return {
+    date: stamp.slice(0, 10),
     slot: /^[A-Za-z][A-Za-z0-9]*-[GT]\d+$/.test(suffix) ? suffix : ADHOC_SLOT,
-    stamp: runId.slice(0, cut),
+    // The date is already the parent directory, so it is not repeated here.
+    time: stamp.slice(11) || stamp,
   };
 }
 
@@ -65,10 +73,10 @@ function logsRoot(workspaceRoot: string): string {
   return path.join(workspaceRoot, "logs");
 }
 
-/** `logs/<taskId|_adhoc>/<timestamp>/` — one directory per run. */
+/** `logs/<date>/<taskId|goalId|_adhoc>/<time>/` — one directory per run. */
 export function runDir(workspaceRoot: string, runId: string): string {
-  const { slot, stamp } = runSlot(runId);
-  return path.join(logsRoot(workspaceRoot), slot, stamp);
+  const { date, slot, time } = runSlot(runId);
+  return path.join(logsRoot(workspaceRoot), date, slot, time);
 }
 
 // Fixed names inside the run directory. The runId is the directory now, so it no
@@ -92,22 +100,33 @@ export function indexFile(workspaceRoot: string): string {
 }
 
 /**
- * Pre-0.0.32 locations, still read so a workspace that has not run `awo upgrade`
- * can still show its history instead of appearing to have lost it.
+ * Every earlier location, newest first, so a workspace that has not run
+ * `awo upgrade` still shows its history instead of appearing to have lost it.
  */
-export function legacyPaths(workspaceRoot: string, runId: string): {
-  events: string;
-  detail: string;
-  worker: string;
-  index: string;
-} {
-  const dir = path.join(logsRoot(workspaceRoot), "runs", runId.slice(0, 10));
-  return {
-    events: path.join(dir, `${runId}.events.jsonl`),
-    detail: path.join(dir, `${runId}.md`),
-    worker: path.join(dir, `${runId}.worker.log`),
-    index: path.join(logsRoot(workspaceRoot), "runs.jsonl"),
-  };
+export function legacyPaths(
+  workspaceRoot: string,
+  runId: string
+): { events: string; detail: string; worker: string }[] {
+  const { date, slot, time } = runSlot(runId);
+  const stamp = `${date}T${time}`;
+  return [
+    // 0.0.32: task first, no date shard.
+    {
+      events: path.join(logsRoot(workspaceRoot), slot, stamp, "events.jsonl"),
+      detail: path.join(logsRoot(workspaceRoot), slot, stamp, "record.md"),
+      worker: path.join(logsRoot(workspaceRoot), slot, stamp, "worker.log"),
+    },
+    // pre-0.0.32: date shard, runId repeated in every filename.
+    {
+      events: path.join(logsRoot(workspaceRoot), "runs", date, `${runId}.events.jsonl`),
+      detail: path.join(logsRoot(workspaceRoot), "runs", date, `${runId}.md`),
+      worker: path.join(logsRoot(workspaceRoot), "runs", date, `${runId}.worker.log`),
+    },
+  ];
+}
+
+export function legacyIndexFile(workspaceRoot: string): string {
+  return path.join(logsRoot(workspaceRoot), "runs.jsonl");
 }
 
 /** The current path if it exists, else the legacy one, else the current path. */
@@ -123,8 +142,10 @@ export async function resolveRunFile(
         ? detailFile(workspaceRoot, runId)
         : workerLogFile(workspaceRoot, runId);
   if (await fs.pathExists(current)) return current;
-  const legacy = legacyPaths(workspaceRoot, runId)[which];
-  return (await fs.pathExists(legacy)) ? legacy : current;
+  for (const layout of legacyPaths(workspaceRoot, runId)) {
+    if (await fs.pathExists(layout[which])) return layout[which];
+  }
+  return current;
 }
 
 /**
@@ -186,7 +207,7 @@ export async function appendIndex(
 
 export async function readIndex(workspaceRoot: string): Promise<RunIndexEntry[]> {
   let file = indexFile(workspaceRoot);
-  if (!(await fs.pathExists(file))) file = legacyPaths(workspaceRoot, "x").index;
+  if (!(await fs.pathExists(file))) file = legacyIndexFile(workspaceRoot);
   if (!(await fs.pathExists(file))) return [];
   const raw = await fs.readFile(file, "utf8");
   return raw

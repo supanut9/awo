@@ -111,14 +111,15 @@ goals/<KEY>-G1/goal.md                the objective and its definition of done
               /requirement.md         the ask it came from
               /tasks/<KEY>-T1.md      executable units
 logs/index.jsonl                      queryable index of every run
-logs/<KEY>-T1/<timestamp>/            one directory per run:
+logs/<date>/<KEY>-T1/<time>/          one directory per run:
     record.md · events.jsonl · worker.log
-logs/<KEY>-G1/<timestamp>/brief.md    each QA gate the goal went through
+logs/<date>/<KEY>-G1/<time>/brief.md  each QA gate the goal went through
 ```
 
 Paths are named for **IDs, never titles** — an ID is permanent, so renaming a goal
-never moves its directory. Runs file under the task they belong to, which makes
-"every attempt at `<KEY>-T2`" an `ls` rather than a glob over dates.
+never moves its directory. Runs shard by **day first, then by the task they belong
+to**, so browsing is chronological and a day's directory holds only that day's
+work. Per-task questions come from the index: `awo log list --task <KEY>-T2`.
 
 Definitions are tracked markdown with YAML frontmatter. **State is separate**:
 lifecycle status lives in a gitignored `state.json`, and each run appends to an

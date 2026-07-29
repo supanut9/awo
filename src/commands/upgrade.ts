@@ -35,6 +35,11 @@ const MIGRATIONS: Migration[] = [
     apply: async ({ root }) => restructureWorkspace(root),
   },
   {
+    version: "0.0.33",
+    description: "shard logs by date again, with the task under it",
+    apply: async ({ root }) => reshardLogsByDate(root),
+  },
+  {
     version: "0.0.2",
     description: "backfill manifest.workspaceId (uuid v7)",
     apply: async ({ root, manifest }) => {
@@ -163,6 +168,48 @@ async function restructureWorkspace(root: string): Promise<boolean> {
       await fs.remove(path.join(backups, old));
       changed = true;
     }
+  }
+
+  return changed;
+}
+
+/**
+ * 0.0.33 — `logs/<slot>/<stamp>/` becomes `logs/<date>/<slot>/<time>/`.
+ *
+ * 0.0.32 filed runs under their task, which made "every attempt at T2" an `ls` but
+ * gave up chronological browsing and let the top level of logs/ grow one directory
+ * per task forever. Date first restores both; the index still answers per-task
+ * questions, which is what it is for.
+ *
+ * Runs after 0.0.32's migration, so a workspace coming from any earlier version
+ * arrives here already in the task-first shape.
+ */
+async function reshardLogsByDate(root: string): Promise<boolean> {
+  const logs = path.join(root, "logs");
+  if (!(await fs.pathExists(logs))) return false;
+  let changed = false;
+
+  const isDate = (name: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(name);
+
+  for (const slot of await fs.readdir(logs)) {
+    // Already-sharded days and the index are left alone; this is idempotent.
+    if (isDate(slot) || !(await fs.stat(path.join(logs, slot))).isDirectory()) continue;
+
+    for (const stamp of await fs.readdir(path.join(logs, slot))) {
+      const from = path.join(logs, slot, stamp);
+      if (!(await fs.stat(from)).isDirectory()) continue;
+      // `<date>T<time>`, or a hand-made name like `legacy-verify-SHOP-G1` with no
+      // date in it at all — those keep their name and land under the epoch day so
+      // they stay addressable rather than being dropped.
+      const dated = /^(\d{4}-\d{2}-\d{2})T(.+)$/.exec(stamp);
+      const to = dated
+        ? path.join(logs, dated[1], slot, dated[2])
+        : path.join(logs, "undated", slot, stamp);
+      await fs.ensureDir(path.dirname(to));
+      await fs.move(from, to, { overwrite: true });
+      changed = true;
+    }
+    await fs.remove(path.join(logs, slot));
   }
 
   return changed;

@@ -28,7 +28,8 @@ requirements/{{PROJECT_KEY}}-R1.md          intake, not yet planned
 goals/{{PROJECT_KEY}}-G1/goal.md            the objective and its definition of done
                     /requirement.md         the ask it came from
                     /tasks/{{PROJECT_KEY}}-T1.md   executable units
-logs/{{PROJECT_KEY}}-T1/<timestamp>/record.md · events.jsonl · worker.log
+logs/<date>/{{PROJECT_KEY}}-T1/<time>/      record.md · events.jsonl · worker.log
+logs/<date>/{{PROJECT_KEY}}-G1/<time>/      brief.md — each QA gate
 logs/index.jsonl                            queryable index of every run
 ```
 
