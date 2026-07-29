@@ -137,6 +137,16 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
   const noRun = await fetch(`${ui.url}/api/events`);
   assert.equal(noRun.status, 400);
 
+  // §12.9 — the tiering hypothesis has to be testable from the workspace's own
+  // history, so the snapshot carries per-tier outcomes.
+  assert.ok(Array.isArray(after.stats.byTier), "analytics must be in the snapshot");
+  assert.equal(typeof after.stats.untestedSuccesses, "number");
+  const tierRow = after.stats.byTier[0];
+  assert.ok(tierRow.runs >= 1);
+  assert.ok(tierRow.avgAttempts >= 1, "attempts is what shows a cheap tier giving the saving back");
+  assert.equal(tierRow.succeeded, 1);
+  assert.equal(tierRow.successRate, 1);
+
   // Task detail: definition body + state, for the drawer.
   const detail = await (await fetch(`${ui.url}/api/task?id=UI-T1`)).json();
   assert.equal(detail.id, "UI-T1");

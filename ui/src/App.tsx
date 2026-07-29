@@ -5,7 +5,7 @@ import TaskDrawer from "./components/TaskDrawer";
 import Timeline from "./components/Timeline";
 import Markdown from "./components/Markdown";
 
-type Tab = "board" | "runs" | "repos";
+type Tab = "board" | "runs" | "repos" | "analytics";
 
 export default function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -81,7 +81,7 @@ export default function App() {
         <span className="text-xs text-neutral-500">awo {project.libraryVersion}</span>
 
         <nav className="ml-4 flex gap-1">
-          {(["board", "runs", "repos"] as Tab[]).map((t) => (
+          {(["board", "runs", "repos", "analytics"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -165,6 +165,7 @@ export default function App() {
                         <th className="px-4 py-2 text-left">Run</th>
                         <th className="px-4 py-2 text-left">Task</th>
                         <th className="px-4 py-2 text-left">Outcome</th>
+                        <th className="px-4 py-2 text-left">Tier</th>
                         <th className="px-4 py-2 text-left">Duration</th>
                         <th className="px-4 py-2 text-left">Repos</th>
                       </tr>
@@ -179,6 +180,11 @@ export default function App() {
                           <td className="px-4 py-2 font-mono">{r.runId}</td>
                           <td className="px-4 py-2 font-mono">{r.taskId ?? "—"}</td>
                           <td className="px-4 py-2">{r.status}</td>
+                          <td className="px-4 py-2 text-neutral-500">
+                            {r.tier ?? "—"}
+                            {r.effort ? ` / ${r.effort}` : ""}
+                            {r.attempts && r.attempts > 1 ? ` ×${r.attempts}` : ""}
+                          </td>
                           <td className="px-4 py-2">{r.durationSec === null ? "—" : `${r.durationSec}s`}</td>
                           <td className="px-4 py-2 text-neutral-500">{r.reposChanged.join(", ") || "—"}</td>
                         </tr>
@@ -186,6 +192,80 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+              )}
+            </>
+          )}
+
+          {tab === "analytics" && (
+            <>
+              <h2 className="border-b border-neutral-200 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-neutral-500 dark:border-neutral-800">
+                Does the tier distinction pay for itself?
+              </h2>
+              {stats.byTier.length === 0 ? (
+                <div className="p-8 text-center text-sm text-neutral-500">
+                  No finished runs yet.
+                </div>
+              ) : (
+                <>
+                  <table className="w-full text-xs">
+                    <thead className="text-[10px] uppercase tracking-wide text-neutral-500">
+                      <tr className="border-b border-neutral-200 dark:border-neutral-800">
+                        <th className="px-4 py-2 text-left">tier / effort</th>
+                        <th className="px-4 py-2 text-right">runs</th>
+                        <th className="px-4 py-2 text-right">success</th>
+                        <th className="px-4 py-2 text-right">avg attempts</th>
+                        <th className="px-4 py-2 text-right">avg duration</th>
+                        <th className="px-4 py-2 text-right">total time</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stats.byTier.map((t) => (
+                        <tr
+                          key={t.key}
+                          className="border-b border-neutral-100 last:border-0 dark:border-neutral-800/60"
+                        >
+                          <td className="px-4 py-2 font-mono">{t.key}</td>
+                          <td className="px-4 py-2 text-right">{t.runs}</td>
+                          <td
+                            className={`px-4 py-2 text-right ${
+                              t.successRate < 0.7 ? "text-red-600 dark:text-red-400" : ""
+                            }`}
+                          >
+                            {Math.round(t.successRate * 100)}%
+                          </td>
+                          <td
+                            className={`px-4 py-2 text-right ${
+                              t.avgAttempts > 1.5 ? "text-amber-600 dark:text-amber-400" : ""
+                            }`}
+                          >
+                            {t.avgAttempts.toFixed(1)}
+                          </td>
+                          <td className="px-4 py-2 text-right">
+                            {t.avgDurationSec === null ? "—" : `${t.avgDurationSec}s`}
+                          </td>
+                          <td className="px-4 py-2 text-right">{t.totalDurationSec}s</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="border-t border-neutral-200 px-4 py-3 text-[11px] leading-relaxed text-neutral-500 dark:border-neutral-800">
+                    A lower tier with <strong>more attempts</strong> than a higher one is the
+                    cheap model giving back what it saved — judge it here rather than
+                    assuming. Attempts count reruns of the same task, so environmental
+                    failures inflate them too: read a high number as "look at these runs",
+                    not as proof about the model.
+                    {stats.untestedSuccesses > 0 && (
+                      <>
+                        {" "}
+                        <strong className="text-amber-600 dark:text-amber-400">
+                          {stats.untestedSuccesses} success{stats.untestedSuccesses === 1 ? "" : "es"} had no
+                          test evidence
+                        </strong>{" "}
+                        — each one is an exemption someone chose.
+                      </>
+                    )}
+                  </p>
+                </>
               )}
             </>
           )}

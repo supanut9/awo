@@ -41,11 +41,27 @@ export interface RunIndexEntry {
   runId: string;
   taskId: string | null;
   agent: string | null;
+  tier?: string;
+  model?: string;
+  effort?: string;
+  attempts?: number;
   status: string;
   startedAt: string;
   finishedAt: string | null;
   durationSec: number | null;
   reposChanged: string[];
+}
+
+export interface TierStat {
+  key: string;
+  tier: string;
+  effort: string | null;
+  runs: number;
+  succeeded: number;
+  successRate: number;
+  avgAttempts: number;
+  avgDurationSec: number | null;
+  totalDurationSec: number;
 }
 
 export interface Snapshot {
@@ -60,6 +76,8 @@ export interface Snapshot {
     successRate: number | null;
     avgDurationSec: number | null;
     openRuns: number;
+    untestedSuccesses: number;
+    byTier: TierStat[];
   };
 }
 

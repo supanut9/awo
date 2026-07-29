@@ -62,7 +62,7 @@ awo ui                                    # local dashboard on 127.0.0.1
 | `awo context [--json]` | Compact orientation digest — run this first in a new session instead of scanning. |
 | `awo doctor` | Version skew, broken links, bad targets, abandoned runs, work claimed without evidence. |
 | `awo upgrade [--dry-run] [--force]` | Adopt the installed awo version: run migrations, reconcile scaffolding, never overwrite your edits. |
-| `awo ui [--port]` | Local dashboard: board, run timeline, repos, runs, stats. |
+| `awo ui [--port]` | Local dashboard: board, run timeline, repos, runs, and analytics by tier/effort. |
 
 **Repos**
 
