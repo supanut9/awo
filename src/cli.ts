@@ -82,10 +82,34 @@ program
   .command("init")
   .description("Scaffold a new awo workspace in the current directory.")
   .requiredOption("--key <key>", "short, permanent project code (2-5 uppercase letters, e.g. PROM)")
-  .action(async (opts: { key: string }) => {
+  .option(
+    "--adopt",
+    "add awo to a directory that already has a project: keeps every existing file, discovers repos"
+  )
+  .action(async (opts: { key: string; adopt?: boolean }) => {
     try {
-      await runInit({ key: opts.key });
+      const r = await runInit({ key: opts.key, adopt: opts.adopt });
       console.log(`awo workspace initialized with project key ${opts.key}.`);
+
+      if (r.adoptedRepos.length > 0) {
+        console.log(`\nAdopted ${r.adoptedRepos.length} repo(s) into repos/:`);
+        for (const repo of r.adoptedRepos) console.log(`  ${repo.name} -> ${repo.path}`);
+        console.log(`Declare how each one verifies itself:  awo test-command <repo> "<cmd>"`);
+      }
+
+      if (r.kept.length > 0) {
+        // Named individually rather than counted: the whole promise of --adopt is
+        // that nothing of yours was touched, and a number does not demonstrate that.
+        console.log(`\nKept your existing ${r.kept.length} file(s), wrote nothing over them:`);
+        for (const f of r.kept) console.log(`  ${f}`);
+        if (r.kept.includes("CLAUDE.md")) {
+          console.log(
+            `\nYour CLAUDE.md was kept as-is, so it does not yet point at AGENTS.md.\n` +
+              `Add this line near the top so every runtime reads the same instructions:\n` +
+              `  > Process and workflow: see AGENTS.md in this directory. It is canonical.`
+          );
+        }
+      }
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

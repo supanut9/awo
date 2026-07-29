@@ -1949,3 +1949,17 @@ A `.new` now means what it says — **the same lines moved on both sides** — a
     `--prompt`. `--instruction` carries the orchestrator's own words into the same
     place. Making it automatic beat asking people to remember, which had a 0% hit
     rate across 28 attempts.
+
+79. **"Run it in an empty directory" is the wrong answer for every real adoption.**
+    The guard was correct for a greenfield hub and made awo unusable for the case that
+    matters: a project worked on for months already HAS a hub — symlinked repos, a
+    284-line CLAUDE.md holding the rules people actually follow, dozens of decision
+    docs. Telling that user to start elsewhere means abandoning the material or
+    maintaining two hubs. `--adopt` writes only what is missing, names every file it
+    kept, and discovers the repos rather than asking for nine `connect` calls.
+80. **`fs.copy` with `overwrite: false` throws on the first collision instead of
+    skipping it.** Adopting has to copy file by file, or the first existing file
+    aborts the run and leaves a half-scaffolded workspace. Related: the
+    `gitignore` -> `.gitignore` rename then failed because the adopt path had already
+    written the dotted name, which aborted the adopt *after* it had written most of
+    the tree — the worst possible place to stop.

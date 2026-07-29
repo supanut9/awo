@@ -52,14 +52,16 @@ skipped`) — work can be in review while its last build failed.
 
 ## 2. Setting up a workspace
 
+There are two ways in, depending on whether the project already exists.
+
+### A fresh hub
+
 ```sh
 mkdir my-workspace && cd my-workspace
 npx @supanut9/awo@latest init --key SHOP
 ```
 
-`--key` prefixes every ID (`SHOP-R1`, `SHOP-G1`, `SHOP-T1`) and is **permanent**.
-
-Link your repos. `connect` symlinks a checkout you already have; `add` clones one:
+Then link your repos — `connect` symlinks a checkout you already have, `add` clones:
 
 ```sh
 awo connect ../learn-shop-online-server
@@ -67,7 +69,54 @@ awo add https://github.com/me/web.git --ref main
 awo list
 ```
 
-**Then declare how each repo verifies itself.** Do this now, not later:
+### Adopting a project you already have
+
+Most real projects already have a hub: symlinked repos, a `CLAUDE.md` carrying the
+rules people actually follow, and a pile of decision docs. You do not have to abandon
+any of it or maintain two hubs.
+
+```sh
+cd ~/projects/atlas-shop        # your existing root, files and all
+awo init --key SHOP --adopt
+```
+
+`--adopt`:
+
+- **writes only what is missing.** Every file you already have is kept and listed by
+  name, because a count doesn't demonstrate that nothing was touched.
+- **discovers your repos.** Symlinks at the top level move under `repos/` (same
+  target); a real checkout inside the hub is linked to rather than relocated. Nothing
+  is deleted.
+- **leaves your docs alone.** Loose markdown, spreadsheets, reports — untouched.
+
+Two things to do straight after adopting:
+
+**1. Point your `CLAUDE.md` at `AGENTS.md`.** awo would normally generate `CLAUDE.md`
+as a one-line pointer, but yours has real content so it was kept. Add near the top:
+
+```markdown
+> Process and workflow: see AGENTS.md in this directory. It is canonical.
+```
+
+**2. Move project-wide directives into rules.** If your `CLAUDE.md` says things like
+"deploys go through the Cloud Build trigger, never `gcloud builds submit`" or "staging
+is read-only", those are *always-on policy*. They belong in `rules/`, where every agent
+reads them and `awo doctor` can see them:
+
+```sh
+awo rule new deploy-via-cloud-build \
+  --summary "deploys go through the Cloud Build trigger, never gcloud builds submit"
+```
+
+Leave codebase knowledge (stack, layout, conventions) where it is. The split that
+works: **`rules/` is process the workspace enforces; `CLAUDE.md` is knowledge about
+the code.**
+
+### Either way
+
+`--key` prefixes every ID (`SHOP-R1`, `SHOP-G1`, `SHOP-T1`) and is **permanent**.
+
+**Declare how each repo verifies itself.** Do this now, not later:
 
 ```sh
 awo test-command learn-shop-online-server "npx jest --silent"
@@ -75,8 +124,8 @@ awo test-command web "npm test"
 ```
 
 Without it, every measurement carries an inline command, so each agent invents its
-own — and an agent choosing the verification is the same failure as an agent
-asserting the result. `awo doctor` reminds you until it's set.
+own — and an agent choosing the verification is the same failure as an agent asserting
+the result. `awo doctor` reminds you until it's set.
 
 Open the generated `SHOP.code-workspace` in VS Code rather than the folder: it carries
 the git settings that make Source Control and Git Graph see every linked repo.

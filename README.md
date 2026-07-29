@@ -3,8 +3,12 @@
 Scaffolds and orchestrates AI-agent development workspaces.
 
 ```sh
+# a fresh hub
 mkdir my-workspace && cd my-workspace
 npx @supanut9/awo@latest init --key PROM
+
+# or add awo to a project you already have, keeping every existing file
+cd ~/projects/my-project && npx @supanut9/awo@latest init --key PROM --adopt
 ```
 
 `init` lays down an orchestration hub — agent roles, always-on rules, invokable
@@ -137,6 +141,7 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | Command | Purpose |
 |---|---|
 | `awo init --key <KEY>` | Scaffold a workspace. `<KEY>` prefixes every ID and is permanent. |
+| `awo init --key <KEY> --adopt` | Add awo to a directory that already has a project: keeps every existing file, discovers and registers existing repos. |
 | `awo context [--json]` | Compact orientation digest — run this first in a new session instead of scanning. |
 | `awo doctor` | Version skew, broken links, bad targets, abandoned runs, work claimed without evidence. |
 | `awo upgrade [--dry-run] [--force]` | Adopt the installed awo version: run migrations, three-way merge template changes around your edits, never overwrite them. |

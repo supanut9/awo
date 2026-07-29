@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -160,4 +160,84 @@ test("awo init rejects an invalid --key", () => {
   });
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("init refuses a non-empty directory, and says how to adopt it instead", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "awo-adopt-"));
+  fs.writeFileSync(path.join(dir, "ANALYTICS_SPEC.md"), "spec\n");
+
+  let code = 0;
+  let stderr = "";
+  try {
+    execFileSync(process.execPath, [CLI, "init", "--key", "SHOP"], { cwd: dir, stdio: "pipe" });
+  } catch (err) {
+    const e = err as { status?: number; stderr?: Buffer };
+    code = e.status ?? 1;
+    stderr = e.stderr?.toString() ?? "";
+  }
+  assert.equal(code, 1);
+  assert.match(stderr, /is not empty/);
+  assert.match(stderr, /awo init --key SHOP --adopt/, "it must name the way forward");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("adopt adds awo to an existing project without touching a single existing file", () => {
+  // The shape a real hand-rolled hub has: symlinked repos, a CLAUDE.md carrying the
+  // rules people actually follow, and a pile of decision docs.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "awo-adoptroot-"));
+  const hub = path.join(root, "hub");
+  fs.mkdirSync(hub);
+
+  const repo = path.join(root, "api");
+  fs.mkdirSync(repo);
+  execSync("git init -q . && git add -A && git commit -qm base --allow-empty", {
+    cwd: repo,
+    stdio: "ignore",
+    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "a@b.c", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "a@b.c" },
+  });
+  fs.symlinkSync(repo, path.join(hub, "api"), "dir");
+
+  const claude = "# CLAUDE.md\n\n## Deploys — use the Cloud Build trigger, NOT gcloud builds submit\n";
+  fs.writeFileSync(path.join(hub, "CLAUDE.md"), claude);
+  fs.writeFileSync(path.join(hub, "ANALYTICS_SPEC.md"), "spec\n");
+
+  const out = execFileSync(process.execPath, [CLI, "init", "--key", "SHOP", "--adopt"], {
+    cwd: hub,
+    encoding: "utf8",
+  });
+
+  // Nothing of the user's was overwritten, and it says so file by file.
+  assert.equal(fs.readFileSync(path.join(hub, "CLAUDE.md"), "utf8"), claude);
+  assert.equal(fs.readFileSync(path.join(hub, "ANALYTICS_SPEC.md"), "utf8"), "spec\n");
+  assert.match(out, /Kept your existing 1 file\(s\)/);
+  assert.match(out, /CLAUDE\.md/);
+  assert.match(out, /does not yet point at AGENTS\.md/, "the collision must be explained");
+
+  // The scaffolding that was missing did land.
+  assert.ok(fs.existsSync(path.join(hub, "AGENTS.md")));
+  assert.ok(fs.existsSync(path.join(hub, "rules", "tests-must-pass.md")));
+  assert.ok(fs.existsSync(path.join(hub, ".workspace", "manifest.json")));
+  assert.ok(fs.existsSync(path.join(hub, ".gitignore")), "the un-dotted gitignore still lands");
+
+  // The existing repo was discovered and moved under repos/, not re-linked by hand.
+  assert.match(out, /Adopted 1 repo\(s\)/);
+  assert.ok(!fs.existsSync(path.join(hub, "api")), "the root symlink is moved, not duplicated");
+  assert.equal(fs.realpathSync(path.join(hub, "repos", "api")), fs.realpathSync(repo));
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(hub, ".workspace", "manifest.json"), "utf8"));
+  assert.deepEqual(
+    manifest.repos.map((r: { name: string; type: string }) => [r.name, r.type]),
+    [["api", "local"]]
+  );
+
+  // Adopting twice is an error with a useful next step, not a mess.
+  let stderr = "";
+  try {
+    execFileSync(process.execPath, [CLI, "init", "--key", "SHOP", "--adopt"], { cwd: hub, stdio: "pipe" });
+  } catch (err) {
+    stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? "";
+  }
+  assert.match(stderr, /already an awo workspace/);
+  assert.match(stderr, /awo upgrade/);
+  fs.rmSync(root, { recursive: true, force: true });
 });
