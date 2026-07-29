@@ -1,15 +1,15 @@
 {
-  "libraryVersion": "0.0.22",
+  "libraryVersion": "0.0.25",
   "files": {
     ".gitignore": "sha256-b4088683c36ba56d0e287ced962d27ce4fd5fb582f876c0f33bc35667b61a8aa",
     ".vscode/settings.json": "sha256-e840a4fd9901e647654b323b9d4945b720a052ab8f4b6166e3e93adfbd12f260",
     ".workspace/connectors.json": "sha256-3d34cd29227263d3f8b2355cd9c67c87d747ae6c2f581a5ab52ab831d8d803f6",
     ".workspace/credentials/README.md": "sha256-aef0575f4480f67d859290124e87dab06295f7e6e63118555a8f5153bf31f9db",
-    ".workspace/manifest.json": "sha256-b928a336bf166f4f46e34bdf397e5f660511029c7939b262db10d033e963c7db",
+    ".workspace/manifest.json": "sha256-b0a9b2d11b29897f31721cf7a6aad2f3a4fea7ed1af46acf3ec4994c86602a91",
     "AGENTS.md": "sha256-9488e749d505fbe864e68cfb57ce0ff7989da3734116a5d3e47f8e82d87e7a36",
     "CLAUDE.md": "sha256-4f8734db558e89e8960237c3b9890b2b7075c5e751428916dbb1c525b73d1e65",
     "GEMINI.md": "sha256-9a8a2e391feb60d8d69f4fe7579275aef53fef51af3804bf13103b53057a2cad",
-    "README.md": "sha256-db5d04ed464820d623c762cfa4a0fa13ed932125fb780d0daa901ad6cc90a88b",
+    "README.md": "sha256-8cbc3b5d4c8400816d4fc52a14b8a3e9850287bb9b41ce0bf8d43fac0ad33bd6",
     "agents/code-reviewer.md": "sha256-3297610a72dca871505edc345d13e2f75e1f3e32d3add811e26e19366e1f3bf6",
     "agents/product-manager.md": "sha256-fb78fc544349ff82e6004af2cd3a7660e2607427c468d02265c89cb3f516855d",
     "agents/qa-engineer.md": "sha256-7d8e3c58719b36f600b7904c02f107d4dd1eeaeac81193c460264e05081d4872",

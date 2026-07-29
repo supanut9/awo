@@ -1,6 +1,18 @@
 # awo — AI Workflow Orchestration Library — Project Plan
 
 > **Name:** `awo` (locked) · **npm package:** `@supanut9/awo` (unscoped `awo` was taken — see §9 item 1) · **Distribution:** npm (`npx @supanut9/awo …`), binary is `awo`
+>
+> **Status (2026-07-29):** published and used. Phase 1 is complete apart from
+> `connector add` (deliberately uncut — no connector has been needed). Phase 2 is
+> built: `awo ui`, `awo context`, `awo doctor`, `awo upgrade`, model tiering, the QA
+> gate as a command. Phase 3 has begun: `awo publish` writes a MongoDB projection and
+> [`awo-dashboard`](https://github.com/supanut9/awo-dashboard) reads it.
+>
+> A full multi-agent dogfood has run: a requirement taken through intake, planning,
+> six implementation tasks across two repos by Codex workers, and a high-tier QA gate
+> that found the composed feature broken. **§9 now holds 50+ findings from real use** —
+> read it before adding anything, because most of the enforcement in this design
+> exists because something failed first.
 
 ---
 
