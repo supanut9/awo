@@ -1033,6 +1033,15 @@ pr
       const rows = await runPrPreflight(opts);
       for (const row of rows) {
         console.log(`${row.repo}\tauthenticated\tpermission=${row.permission}\tdefault=${row.defaultBranch}`);
+        if (row.requiredAccount && row.activeAccount !== row.requiredAccount) {
+          console.log(
+            `  ! ${row.repo} must be acted on as ${row.requiredAccount}, but gh is active as ` +
+              `${row.activeAccount ?? "unknown"} — gh auth switch --user ${row.requiredAccount}`
+          );
+          process.exitCode = 1;
+        } else if (row.requiredAccount) {
+          console.log(`  account ${row.activeAccount} — as required by ${row.repo}`);
+        }
       }
     } catch (err) {
       console.error((err as Error).message);

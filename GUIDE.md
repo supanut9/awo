@@ -293,6 +293,60 @@ turns out to be red at the branch point, the run is `skipped` and the task is le
 
 ---
 
+### Two GitHub accounts: personal workspace, company repos
+
+The normal case, not an edge one: the workspace is on your own account, the working
+repos belong to your employer. Three separate mechanisms, and only one of them is
+awo's:
+
+**Commits** — per-repo git identity. Set it once in each working repo, or automate it
+by directory in `~/.gitconfig`:
+
+```gitconfig
+[includeIf "gitdir:~/projects/atlas/"]
+    path = ~/.gitconfig-company
+```
+
+```gitconfig
+# ~/.gitconfig-company
+[user]
+    name = supanutOn
+    email = 157715560+supanutOn@users.noreply.github.com
+```
+
+**Push** — an SSH host alias in `~/.ssh/config`, so each remote uses the right key:
+
+```
+Host github.com-supanutOn
+    HostName github.com
+    IdentityFile ~/.ssh/id_company
+```
+
+with the remote as `git@github.com-supanutOn:org/repo.git`.
+
+**`gh`** — this is the one that bites. `gh` keeps **one active account per host**, so
+`gh pr …` uses whoever is active, whatever repo you are in. Declare the account each
+repo requires:
+
+```jsonc
+// .workspace/manifest.json
+{ "name": "learn-shop-online-server", "type": "local", "path": "…",
+  "githubAccount": "supanutOn" }
+```
+
+Then every PR command checks before acting:
+
+```
+$ awo pr link SHOP-T3 --repo learn-shop-online-server --number 412
+learn-shop-online-server must be acted on as "supanutOn", but gh is active as "supanut9".
+  Switch:  gh auth switch --user supanutOn
+```
+
+awo refuses rather than proceeding, because an assignment, review or merge attributed
+to the wrong identity in a company repo is not something you can quietly undo.
+`awo pr preflight` **reports** the mismatch for every repo instead of throwing, so one
+misconfigured repo doesn't hide the state of the other eight.
+
 ### Pull requests: assignee and labels
 
 A PR should say whose it is and what it belongs to, so link records both:

@@ -7,6 +7,15 @@ export interface GitRepoEntry {
   url: string;
   ref: string;
   testCommand?: string;
+  /**
+   * The `gh` account this repo must be acted on as.
+   *
+   * A workspace on a personal account whose repos belong to a company is the normal
+   * case, not an edge one — and `gh` keeps one active account per host, so the wrong
+   * identity is one `gh auth switch` away at all times. Declaring it here lets awo
+   * refuse instead of opening a PR as the wrong person, which is not undoable.
+   */
+  githubAccount?: string;
 }
 
 export interface LocalRepoEntry {
@@ -14,6 +23,8 @@ export interface LocalRepoEntry {
   type: "local";
   path: string;
   testCommand?: string;
+  /** See GitRepoEntry.githubAccount. */
+  githubAccount?: string;
 }
 
 export type RepoEntry = GitRepoEntry | LocalRepoEntry;

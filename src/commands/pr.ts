@@ -50,6 +50,44 @@ async function runGh(cwd: string, args: string[]): Promise<string> {
   }
 }
 
+/**
+ * §18.4 — refuse to act as the wrong GitHub identity.
+ *
+ * `gh` holds one active account per host. So a workspace on a personal account whose
+ * working repos belong to a company will, sooner or later, run `gh pr` as the wrong
+ * person — and an assignment, a review or a merge attributed to the wrong identity in
+ * a company repo is not something you can quietly undo.
+ *
+ * git already solves its half per-repo (`user.email`, an SSH host alias). This is the
+ * `gh` half: when a repo declares `githubAccount`, every PR command checks it first
+ * and stops with the exact switch command rather than proceeding.
+ */
+export async function assertGithubAccount(
+  root: string,
+  repo: string,
+  expected: string | undefined
+): Promise<string | null> {
+  if (!expected) return null;
+  const actual = (await runGh(repoPath(root, repo), ["api", "user", "--jq", ".login"]).catch(
+    () => ""
+  )).trim();
+  if (!actual) {
+    throw new Error(
+      `Cannot determine the active gh account, and ${repo} requires "${expected}".\n` +
+        `  Check with:  gh auth status`
+    );
+  }
+  if (actual !== expected) {
+    throw new Error(
+      `${repo} must be acted on as "${expected}", but gh is active as "${actual}".\n` +
+        `  Switch:  gh auth switch --user ${expected}\n` +
+        `  (declared as githubAccount on ${repo} in .workspace/manifest.json — awo refuses\n` +
+        `   rather than open a PR as the wrong person, which is not undoable.)`
+    );
+  }
+  return actual;
+}
+
 function checkStatus(rollup: GhPullRequest["statusCheckRollup"]): PullRequestCheckStatus {
   if (!rollup || rollup.length === 0) return "unknown";
   let pending = false;
@@ -102,6 +140,12 @@ async function linkedTask(taskId: string, cwd?: string) {
   if (!taskState.pullRequest) {
     throw new Error(`${taskId} is not linked to a PR. Use \`awo pr link ${taskId} --repo <repo> --number <n>\`.`);
   }
+  const manifest = await readManifest(root);
+  await assertGithubAccount(
+    root,
+    taskState.pullRequest.repo,
+    manifest.repos.find((r) => r.name === taskState.pullRequest!.repo)?.githubAccount
+  );
   return { root, ...located, taskState };
 }
 
@@ -213,6 +257,12 @@ export async function runPrLink(options: {
   if (!task.targets.includes(options.repo)) {
     throw new Error(`${options.taskId} does not target "${options.repo}"; link a PR only to a repo this task owns.`);
   }
+  await assertGithubAccount(
+    root,
+    options.repo,
+    manifest.repos.find((r) => r.name === options.repo)?.githubAccount
+  );
+
   const pr = await viewPr(root, options.repo, options.number);
   await mutateState(goal.dir, goal.id, (state) => {
     const taskState = (state.tasks[task.id] ??= newTaskState(task.authoredStatus));
@@ -245,6 +295,9 @@ export async function runPrStatus(taskId: string, options: { cwd?: string } = {}
 }
 
 export interface PreflightResult {
+  /** The account this repo must be acted on as, when it declares one. */
+  requiredAccount?: string;
+  activeAccount?: string;
   repo: string;
   authenticated: boolean;
   permission: string;
@@ -261,11 +314,19 @@ export async function runPrPreflight(options: { repo?: string; cwd?: string } = 
     await runGh(repoPath(root, repo.name), ["auth", "status"]);
     const raw = await runGh(repoPath(root, repo.name), ["repo", "view", "--json", "nameWithOwner,viewerPermission,defaultBranchRef"]);
     const data = JSON.parse(raw) as { viewerPermission?: string; defaultBranchRef?: { name?: string } | null };
+    // Reported, not enforced: preflight exists to tell you the state of things, and a
+    // diagnostic that throws on the first repo cannot report the other eight.
+    const active = (
+      await runGh(repoPath(root, repo.name), ["api", "user", "--jq", ".login"]).catch(() => "")
+    ).trim();
+
     results.push({
       repo: repo.name,
       authenticated: true,
       permission: data.viewerPermission ?? "UNKNOWN",
       defaultBranch: data.defaultBranchRef?.name ?? "UNKNOWN",
+      ...(repo.githubAccount ? { requiredAccount: repo.githubAccount } : {}),
+      ...(active ? { activeAccount: active } : {}),
     });
   }
   return results;

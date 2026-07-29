@@ -256,3 +256,44 @@ test("pr meta re-applies metadata, and warns when the PR never names its task", 
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("a repo can require a gh account, and awo refuses to act as anyone else", () => {
+  const workspace = makeWorkspace();
+  const github = fakeGithub();
+  try {
+    // The fake gh authenticates as supanut9; declare the repo as the company account.
+    const manifestPath = path.join(workspace, ".workspace", "manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest.repos = manifest.repos.map((r: { name: string }) =>
+      r.name === "api" ? { ...r, githubAccount: "supanutOn" } : r
+    );
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+    const linked = awo(workspace, ["pr", "link", "TEST-T1", "--repo", "api", "--number", "42"], github.env);
+    assert.equal(linked.code, 1, "linking as the wrong identity must fail");
+    assert.match(linked.stderr, /must be acted on as "supanutOn", but gh is active as "supanut9"/);
+    assert.match(linked.stderr, /gh auth switch --user supanutOn/, "it must give the fix");
+    assert.match(linked.stderr, /not undoable/);
+
+    // Nothing was linked, and no PR was touched.
+    const calls = fs.readFileSync(github.env.GH_LOG as string, "utf8");
+    assert.ok(!/pr edit/.test(calls), "a wrong-identity run must not edit the PR");
+
+    // preflight REPORTS instead of throwing, so it can still cover every repo.
+    const pre = awo(workspace, ["pr", "preflight"], github.env);
+    assert.match(pre.stdout, /must be acted on as supanutOn, but gh is active as supanut9/);
+    assert.equal(pre.code, 1, "preflight exits non-zero on a mismatch");
+
+    // Matching account: everything proceeds.
+    const ok = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    ok.repos = ok.repos.map((r: { name: string }) =>
+      r.name === "api" ? { ...r, githubAccount: "supanut9" } : r
+    );
+    fs.writeFileSync(manifestPath, JSON.stringify(ok, null, 2));
+    const good = awo(workspace, ["pr", "link", "TEST-T1", "--repo", "api", "--number", "42"], github.env);
+    assert.equal(good.code, 0, good.stderr);
+  } finally {
+    github.cleanup();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});

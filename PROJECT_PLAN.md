@@ -2006,3 +2006,22 @@ something durable for something cosmetic.
     said "pushed v0.1.6", because that line echoed a shell variable rather than
     anything git reported. Two lessons: prefer `npm version` (annotated), and never
     print a success message that the tool did not actually confirm.
+
+### 18.4 Two accounts, three mechanisms
+
+A workspace on a personal account with company working repos is normal. git solves
+its half per-repo (`user.email`, plus an SSH host alias for the key). `gh` does not:
+it keeps **one active account per host**, so `gh pr` uses whoever is active regardless
+of which repo the command runs in.
+
+So a repo may declare `githubAccount`, and every PR command verifies it before acting.
+awo refuses on a mismatch — an assignment, review or merge attributed to the wrong
+identity in a company repo cannot be quietly undone. `pr preflight` is the exception:
+it *reports* the mismatch for every repo rather than throwing, because a diagnostic
+that dies on the first repo cannot tell you about the other eight.
+
+83. **A guard is only as good as the commands that call it.** The check went into a
+    helper and into `pr link`, but `linkedTask` — the shared entry for `status`,
+    `reconcile`, `finalize` and `meta` — had to be wired separately or four of the six
+    PR commands would still have acted as the wrong person. Shared entry points are
+    where guards belong, not individual commands.
