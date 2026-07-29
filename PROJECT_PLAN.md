@@ -1622,3 +1622,12 @@ has not upgraded shows its history rather than appearing to have lost it.
 58. **Anything that writes outside the run writer becomes invisible.** The verify
     brief proved it: it was real work, on disk, and absent from every view. The
     fix is not "remember to log it" but "there is one writer".
+
+59. **Worktree isolation only covers repos listed in `targets:`.** SHOP-T6's body
+    named `repos/learn-service-ui` in prose — to say it had *no* relevant code —
+    while `targets:` listed only `learn-shop-online-ui`. No worktree was created
+    for the mentioned repo, so when a worker went looking there it wrote five
+    files straight into the symlinked checkout on `develop`, outside any branch,
+    outside the gate, and outside the log's `reposChanged`. The rail is real but
+    it is keyed on the declaration: a repo an agent can *read* is a repo it can
+    *write* unless something stops it. Prose is not a declaration.
