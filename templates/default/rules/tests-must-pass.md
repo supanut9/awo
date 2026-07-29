@@ -3,6 +3,7 @@ id: tests-must-pass
 name: Tests must pass before shipping
 appliesTo: [task_completion, pull_request]
 severity: required
+summary: a task/PR can't proceed with failing or unverified tests.
 ---
 
 A task MUST NOT be marked `success`, and a PR MUST NOT be opened via

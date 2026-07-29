@@ -3,6 +3,7 @@ id: record-every-run
 name: Every piece of work leaves a log entry
 appliesTo: [task_completion, requirement, goal, audit]
 severity: required
+summary: every piece of work leaves a log entry; non-task work uses `awo log add`.
 ---
 
 Work that is not recorded did not happen, as far as the audit trail is

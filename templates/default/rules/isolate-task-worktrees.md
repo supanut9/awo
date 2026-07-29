@@ -3,6 +3,7 @@ id: isolate-task-worktrees
 name: Isolate concurrent tasks with git worktrees
 appliesTo: [task_execution]
 severity: required
+summary: concurrent tasks on the same repo never share a working tree.
 ---
 
 When a task's `targets` include a repo, the agent MUST NOT work directly in

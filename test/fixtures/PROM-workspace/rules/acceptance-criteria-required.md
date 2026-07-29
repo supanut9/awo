@@ -3,6 +3,7 @@ id: acceptance-criteria-required
 name: Acceptance criteria required before a goal is done
 appliesTo: [goal_completion]
 severity: required
+summary: a goal needs QA sign-off, not just passing tasks, before `done`.
 ---
 
 A goal MUST NOT be marked `done` on the sole basis of its tasks reporting

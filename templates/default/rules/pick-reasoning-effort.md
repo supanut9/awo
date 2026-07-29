@@ -3,6 +3,7 @@ id: pick-reasoning-effort
 name: Match reasoning effort to the work
 appliesTo: [delegation, task_run]
 severity: required
+summary: match thinking budget to the work; `medium` is the default.
 ---
 
 Reasoning effort is **how long the model should think**, not a different level of

@@ -4,6 +4,7 @@ name: Plan a goal
 description: Sequence for turning a refined requirement into planned tasks
 owner: tech-lead
 appliesTo: [{{PROJECT_KEY}}-G]
+summary: Plan a goal
 ---
 
 Sequence for `awo goal plan {{PROJECT_KEY}}-G#`, owned by `tech-lead` (preceded by

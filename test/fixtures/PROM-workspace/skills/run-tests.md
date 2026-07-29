@@ -5,6 +5,7 @@ description: Detect and run each target repo's test suite; report pass/fail
 requires:
   connectors: []
   rules: [tests-must-pass]
+summary: run each target repo's declared test command; report pass/fail.
 ---
 
 ## When to use

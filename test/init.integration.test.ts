@@ -47,7 +47,11 @@ test("awo init --key PROM matches the PROM-workspace reference", () => {
 
   execFileSync(process.execPath, [CLI, "init", "--key", "PROM"], { cwd: tmpDir });
 
-  const actualFiles = listFilesRecursive(tmpDir);
+  // .workspace/template-base/ is a pristine copy of the template itself, kept for
+  // three-way merges (§17.2). Comparing it against the fixture would duplicate every
+  // template file in the fixture for no added coverage.
+  const derived = (f: string): boolean => f.startsWith(path.join(".workspace", "template-base"));
+  const actualFiles = listFilesRecursive(tmpDir).filter((f) => !derived(f));
   const expectedFiles = listFilesRecursive(FIXTURE);
   assert.deepEqual(actualFiles, expectedFiles, "generated file tree must match the fixture exactly");
 

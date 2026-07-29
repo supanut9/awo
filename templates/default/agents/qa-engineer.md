@@ -6,6 +6,7 @@ skills: [run-tests, verify-acceptance-criteria, file-bug]
 tier: high
 connectors: []
 rules: [stay-in-scope, acceptance-criteria-required]
+summary: verifies a goal's definition-of-done as a whole; files gaps as new requirements.
 ---
 
 ## Responsibilities

@@ -3,6 +3,7 @@ id: full-workflow
 name: Full workflow — idea to done
 description: The canonical end-to-end sequence a goal moves through; stitches capture-requirement, plan-a-goal, and ship-a-change together
 appliesTo: [{{PROJECT_KEY}}-G]
+summary: Full workflow — idea to done
 ---
 
 This is the master sequence — the other instructions are its stages, not

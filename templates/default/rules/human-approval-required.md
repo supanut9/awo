@@ -3,6 +3,7 @@ id: human-approval-required
 name: PR approval and merge authority
 appliesTo: [pull_request, review, merge]
 severity: required
+summary: AI never approves a PR; merge authority follows `pullRequests.mergePolicy` and GitHub's required checks/reviews.
 ---
 
 An AI worker may create a pull request, inspect checks and review feedback,

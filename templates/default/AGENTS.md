@@ -36,6 +36,21 @@ logs/<date>/workers/                        raw worker output, when dispatched
 **See `instructions/full-workflow.md` for the canonical end-to-end sequence**
 — intake → plan → build & ship (per task) → QA gate → done.
 
+## Adding your own
+Drop a file in the directory and awo picks it up — the lists below are generated
+from `rules/`, `skills/` and `agents/`, so there is nothing to register:
+
+- **a rule** (always-on policy) → `rules/<id>.md`, or `awo rule new <id>`
+- **a skill** (an invokable procedure) → `skills/<id>.md`
+- **a role** → `agents/<id>.md`, or `awo agent add <name>` from the catalog
+- **workflow glue** → `instructions/<name>.md`
+- **project conventions** → anywhere in this file OUTSIDE the generated markers.
+  `awo upgrade` merges template changes around your edits; it only asks when the
+  same lines changed on both sides.
+
+Each file needs `id:` and `summary:` in its frontmatter — `summary` is the line that
+appears in the generated list.
+
 ## Scaffolding primitives
 - **rules/** — always-on policy you MUST follow (not invoked; ambient).
 - **skills/** — invokable procedures ("how to …").
@@ -44,19 +59,8 @@ logs/<date>/workers/                        raw worker output, when dispatched
 - **connectors** — external systems (declared in `.workspace/connectors.json`).
 
 ## Always-on rules (apply to all work)
-- `conventional-commits` — commit messages follow Conventional Commits.
-- `no-push-to-main` — never commit/push directly to `main`; use a PR.
-- `pr-requirements` — every PR needs description, testing section, linked task.
-- `human-approval-required` — AI never approves a PR; merge authority follows
-  `pullRequests.mergePolicy` and GitHub's required checks/reviews.
-- `stay-in-scope` — only touch repos declared as a task's `targets`.
-- `isolate-task-worktrees` — concurrent tasks on the same repo never share a working tree.
-- `tests-must-pass` — a task/PR can't proceed with failing or unverified tests.
-- `evidence-not-claims` — never write "the suite passes"; have awo run it with
-  `awo task event <id> test --run "<cmd>" --baseline`. Only a measured pass closes a task.
-- `acceptance-criteria-required` — a goal needs QA sign-off, not just passing tasks, before `done`.
-- `record-every-run` — every piece of work leaves a log entry; non-task work uses `awo log add`.
-- `pick-reasoning-effort` — match thinking budget to the work; `medium` is the default.
+<!-- awo:generated rules -->
+<!-- /awo:generated -->
 
 ## Choosing a role — you usually don't need to be told
 Every artifact already says who owns the work. Adopt the role yourself, in this
@@ -76,23 +80,12 @@ Read that role's file in `agents/` before acting, and stay inside its
 boundaries. A human naming a role explicitly always overrides the above.
 
 ## Available skills
-- `refine-requirement` — turn a raw ask into a clear, scoped requirement.
-- `create-commit` — stage + commit with a conventional message.
-- `open-pr` — branch, push, open a PR from the template.
-- `resolve-pr` — address review feedback, then follow configured merge authority.
-- `sync-repos` — reconcile `repos/` with the manifest before starting work.
-- `create-task-worktree` — give a task its own isolated git worktree + branch.
-- `run-tests` — run each target repo's declared test command; report pass/fail.
-- `verify-acceptance-criteria` — check a goal's definition-of-done as a whole.
-- `file-bug` — turn a QA-found gap into a new requirement.
+<!-- awo:generated skills -->
+<!-- /awo:generated -->
 
 ## Agents
-- `product-manager` — owns intake: raw ask → refined requirement → goal.
-- `tech-lead` — decomposes a goal into runnable tasks.
-- `software-engineer` — writes the code for a task and verifies it via tests.
-- `qa-engineer` — verifies a goal's definition-of-done as a whole; files gaps as new requirements.
-- `release-engineer` — takes a verified task through its configured PR outcome.
-- `code-reviewer` — reviews PRs and reports readiness; it never approves.
+<!-- awo:generated agents -->
+<!-- /awo:generated -->
 
 > This is the **default baseline** installed at init — domain-agnostic, just
 > enough for the link → plan → work → ship loop to function. Anything

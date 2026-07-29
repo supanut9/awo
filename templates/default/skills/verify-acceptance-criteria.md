@@ -5,6 +5,7 @@ description: Check a goal's definition-of-done as a whole, beyond individual tas
 requires:
   connectors: []
   rules: [acceptance-criteria-required]
+summary: check a goal's definition-of-done as a whole.
 ---
 
 ## When to use

@@ -3,6 +3,7 @@ id: pr-requirements
 name: Pull request requirements
 appliesTo: [pull_request]
 severity: required
+summary: every PR needs description, testing section, linked task.
 ---
 
 Every pull request MUST include:

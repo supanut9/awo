@@ -4,6 +4,7 @@ name: PM requirement to human-approved PR
 description: The operating playbook for turning a PM request into a validated PR with configured merge authority
 owner: product-manager
 appliesTo: [PROM-R]
+summary: PM requirement to human-approved PR
 ---
 
 Use this instruction when a product manager gives a feature request and the

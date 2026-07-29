@@ -4,6 +4,7 @@ name: Capture a requirement
 description: Sequence for turning a raw ask into a scoped, plannable goal
 owner: product-manager
 appliesTo: [PROM-R]
+summary: Capture a requirement
 ---
 
 Sequence for a new ask (`awo req new`), owned by `product-manager`:

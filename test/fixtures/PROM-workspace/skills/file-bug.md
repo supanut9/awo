@@ -4,6 +4,7 @@ name: File a bug as a new requirement
 description: Turn a QA-found gap into a new requirement, re-entering the pipeline
 requires:
   connectors: []
+summary: turn a QA-found gap into a new requirement.
 ---
 
 ## When to use

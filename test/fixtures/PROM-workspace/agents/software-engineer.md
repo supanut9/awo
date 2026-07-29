@@ -6,6 +6,7 @@ skills: [sync-repos, create-task-worktree, run-tests]
 tier: low
 connectors: []
 rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]
+summary: writes the code for a task and verifies it via tests.
 ---
 
 ## Responsibilities

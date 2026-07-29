@@ -1,11 +1,16 @@
 import fs from "fs-extra";
 import path from "path";
 import { v7 as uuidv7 } from "uuid";
+import { refreshManagedBlocks } from "../managed-blocks.js";
+import { recordBase } from "./resolve.js";
 import {
   TEMPLATE_DIR,
   buildLock,
   readLibraryVersion,
   renderTemplate,
+  templateFiles,
+  templateSourcePath,
+  toWorkspacePath,
   walkFiles,
   writeLock,
 } from "../template.js";
@@ -64,6 +69,22 @@ export async function runInit(options: InitOptions): Promise<void> {
     const original = await fs.readFile(file, "utf8");
     const updated = renderTemplate(original, values);
     if (updated !== original) await fs.writeFile(file, updated, "utf8");
+  }
+
+  // §17 — generate the rules/skills/agents lists from what was actually laid down,
+  // so they are correct by construction rather than by someone remembering.
+  await refreshManagedBlocks(targetDir);
+
+  // §17.2 — keep the pristine rendered template. A later upgrade needs this third
+  // point to merge template changes around your edits instead of asking about both.
+  for (const rel of await templateFiles()) {
+    const onDisk = path.join(targetDir, ...toWorkspacePath(rel).split("/"));
+    if (await fs.pathExists(onDisk)) {
+      await recordBase(targetDir, toWorkspacePath(rel), renderTemplate(
+        await fs.readFile(templateSourcePath(rel), "utf8"),
+        values
+      ));
+    }
   }
 
   // §11.2 — the baseline a later `awo upgrade` reconciles against.

@@ -1852,3 +1852,67 @@ before anything spawns.
     shipped in 0.0.36 as a required rule and was absent from `AGENTS.md`'s always-on
     list for four versions — present on disk, ambient in name only. `doctor` now
     reports any `rules/*.md` that `AGENTS.md` never mentions.
+
+
+## 17. Customising a workspace without fighting the upgrade
+
+`AGENTS.md.new` appeared on every upgrade of a workspace whose AGENTS.md had ever
+been touched, and the churn had two independent causes.
+
+### 17.1 The lists were derived data, maintained by hand
+
+The always-on rules list is a listing of `rules/`. Hand-maintaining it produced both
+possible failures within a week: `evidence-not-claims` shipped as a required rule and
+was missing from the list for four versions (present on disk, ambient in name only,
+finding 71), and anyone who added a rule line marked the file user-edited and earned
+a conflict file forever after.
+
+So the three lists live in blocks awo owns:
+
+```
+<!-- awo:generated rules -->
+- `no-db-migrations` — write migration files, never execute them.
+<!-- /awo:generated -->
+```
+
+Regenerated on init, on upgrade, on `agent add`/`skill add`, and on `rule new`, from
+each file's `summary:` frontmatter. **Adding a rule is dropping a file in `rules/`** —
+there is nothing to register, so there is nothing to forget.
+
+Critically, `template.lock` hashes the content with those blocks **emptied**
+(`hashForLock`). Otherwise installing one catalog agent would make AGENTS.md look
+edited and reintroduce the churn through the back door.
+
+### 17.2 Two-way comparison cannot tell an addition from a change
+
+Upgrade compared yours against the template's. With two points, "the user added a
+line" and "the template changed a line" are the same observation, so any edit meant a
+conflict. Keeping the pristine rendered template at `.workspace/template-base/` adds
+the third point, and `git merge-file` then resolves the common case silently: you
+appended a section, the template reworded a different paragraph, nothing overlaps.
+
+A `.new` now means what it says — **the same lines moved on both sides** — and
+`awo resolve` shows the diff and takes a side, so nobody hand-diffs again.
+
+### 17.3 Where a user adds things
+
+| what | where | registration |
+|---|---|---|
+| a rule | `rules/<id>.md` or `awo rule new <id>` | none — generated |
+| a skill | `skills/<id>.md` | none — generated |
+| a role | `agents/<id>.md` or `awo agent add` | none — generated |
+| workflow glue | `instructions/<name>.md` | referenced by name |
+| project conventions | anywhere in AGENTS.md **outside** the markers | merged on upgrade |
+
+### 17.4 Findings
+
+72. **`git merge-file` has no `--label`, only `-L`, and it exits with the number of
+    conflicts.** Passing the long form exits 129, which the handler read as "129
+    conflicts" and then merged nothing — every merge silently degraded to a conflict
+    file while looking like it had run. Exit codes that encode a count need their
+    range bounded (`0 < code < 128`), or an error becomes data.
+73. **Two of the upgrade tests asserted a conflict that the merge now resolves, and
+    both were unrealistic rather than wrong.** One edited only the user's side, which
+    is by definition mergeable; the other deleted `template.lock` to simulate an old
+    workspace while leaving `template-base/` in place, a state no real workspace has
+    been in. A test that simulates a situation has to simulate all of it.

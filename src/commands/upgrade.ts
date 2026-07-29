@@ -4,11 +4,13 @@ import { simpleGit } from "simple-git";
 import { v7 as uuidv7 } from "uuid";
 import { findWorkspaceRoot } from "../workspace.js";
 import { regenerateCodeWorkspace } from "../vscode-workspace.js";
+import { refreshManagedBlocks } from "../managed-blocks.js";
+import { basePath, recordBase, threeWayMerge } from "./resolve.js";
 import { runSlot, workerLogFile, writeDetail, appendIndex, appendEvent, type RunIndexEntry, type RunEvent, type EventKind } from "../runs.js";
 import { readManifest, writeManifest, type Manifest } from "../manifest.js";
 import {
   buildLock,
-  hashContent,
+  hashForLock,
   readLibraryVersion,
   readLock,
   renderTemplate,
@@ -300,6 +302,8 @@ export interface UpgradeResult extends UpgradePlan {
   applied: boolean;
   backupDir: string | null;
   conflictFiles: string[];
+  /** Template changes merged into a file you had edited, with no conflict. */
+  mergedFiles: string[];
   migrationsRun: string[];
   /** True when the workspace isn't a git repo, so §11.4's review gate can't apply. */
   unreviewable: boolean;
@@ -341,7 +345,7 @@ async function planFiles(
       await fs.readFile(templateSourcePath(rel), "utf8"),
       { projectKey }
     );
-    const newHash = hashContent(rendered);
+    const newHash = hashForLock(rendered);
     const lockHash = lock?.files[rel];
 
     if (!(await fs.pathExists(onDisk))) {
@@ -350,7 +354,7 @@ async function planFiles(
       continue;
     }
 
-    const currentHash = hashContent(await fs.readFile(onDisk));
+    const currentHash = hashForLock(await fs.readFile(onDisk));
 
     if (currentHash === newHash) {
       plans.push({ path: rel, action: "unchanged" });
@@ -438,6 +442,7 @@ export async function runUpgrade(
     backupDir: null,
     conflictFiles: [],
     migrationsRun: [],
+    mergedFiles: [],
     unreviewable: !isRepo,
   };
 
@@ -464,6 +469,7 @@ export async function runUpgrade(
   const manifest = await readManifest(root);
   const backupDir = path.join(root, ".workspace", "upgrade-backups", `${plan.from}-to-${plan.to}`);
   const conflictFiles: string[] = [];
+  const mergedFiles: string[] = [];
   let touchedAnything = false;
 
   for (const file of plan.files) {
@@ -476,8 +482,27 @@ export async function runUpgrade(
     );
 
     if (file.action === "conflict") {
-      // §11.2 — never overwrite a user-edited file. Put the new version
-      // alongside it and let a human decide.
+      // §17.2 — try a three-way merge before asking. Two-way comparison cannot tell
+      // "the user added a line" from "the template changed a line", so any edit at
+      // all used to mean a conflict file on every upgrade thereafter.
+      const ours = await fs.readFile(onDisk, "utf8");
+      const base = (await fs.readFile(basePath(root, file.path), "utf8").catch(() => null)) as
+        | string
+        | null;
+      const outcome = await threeWayMerge(ours, base, rendered);
+
+      if (outcome.merged !== null && outcome.conflicts === 0) {
+        await fs.ensureDir(path.dirname(path.join(backupDir, file.path)));
+        await fs.copy(onDisk, path.join(backupDir, file.path));
+        await fs.writeFile(onDisk, outcome.merged, "utf8");
+        await recordBase(root, file.path, rendered);
+        mergedFiles.push(file.path);
+        touchedAnything = true;
+        continue;
+      }
+
+      // Genuinely overlapping, or no base to merge from. Never overwrite; write the
+      // new version alongside and let `awo resolve` deal with it.
       await fs.writeFile(`${onDisk}.new`, rendered, "utf8");
       conflictFiles.push(`${file.path}.new`);
       touchedAnything = true;
@@ -490,6 +515,8 @@ export async function runUpgrade(
     }
     await fs.ensureDir(path.dirname(onDisk));
     await fs.writeFile(onDisk, rendered, "utf8");
+    // Whatever the template said this time is the base for next time.
+    await recordBase(root, file.path, rendered);
     touchedAnything = true;
   }
 
@@ -512,6 +539,7 @@ export async function runUpgrade(
   // an upgraded workspace kept a stale file and Git Graph still saw nothing until
   // someone happened to run `awo sync`. A fix nobody receives is not a fix.
   await regenerateCodeWorkspace(root);
+  await refreshManagedBlocks(root);
 
   return {
     ...plan,
@@ -519,6 +547,7 @@ export async function runUpgrade(
     applied: true,
     backupDir: touchedAnything && (await fs.pathExists(backupDir)) ? path.relative(root, backupDir) : null,
     conflictFiles,
+    mergedFiles,
     migrationsRun,
   };
 }

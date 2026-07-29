@@ -108,7 +108,9 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | `awo init --key <KEY>` | Scaffold a workspace. `<KEY>` prefixes every ID and is permanent. |
 | `awo context [--json]` | Compact orientation digest — run this first in a new session instead of scanning. |
 | `awo doctor` | Version skew, broken links, bad targets, abandoned runs, work claimed without evidence. |
-| `awo upgrade [--dry-run] [--force]` | Adopt the installed awo version: run migrations, reconcile scaffolding, never overwrite your edits. |
+| `awo upgrade [--dry-run] [--force]` | Adopt the installed awo version: run migrations, three-way merge template changes around your edits, never overwrite them. |
+| `awo resolve [file] [--theirs\|--yours]` | Show the remaining conflicts as a diff and take a side. |
+| `awo rule new <id> --summary <text>` | Add an always-on rule. The AGENTS.md list regenerates itself. |
 | `awo ui [--port]` | Local dashboard: board, run timeline, repos, runs, and analytics by tier/effort. |
 
 **Repos**
@@ -272,6 +274,23 @@ created on every publish. How much travels is your choice:
 goal's definition-of-done, the requirement behind it, and every run's record and event
 stream — everything the local dashboard shows. It is opt-in because that prose
 describes your code and your prompts.
+
+## Customising it
+
+The always-on rules, skills and agents lists in `AGENTS.md` are **generated** from
+those directories, inside markers awo owns:
+
+```
+<!-- awo:generated rules -->
+- `deploy-via-cloud-build` — deploys go through Cloud Build, never `gcloud run deploy`
+<!-- /awo:generated -->
+```
+
+So adding a rule is dropping a file in `rules/` (or `awo rule new`) — nothing to
+register. Write project conventions anywhere in `AGENTS.md` **outside** the markers:
+`awo upgrade` keeps the pristine template at `.workspace/template-base/` and
+three-way merges its changes around your edits. It only asks when the same lines
+moved on both sides, and then `awo resolve` shows the diff and takes a side.
 
 ## Development
 

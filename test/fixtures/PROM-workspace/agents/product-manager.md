@@ -6,6 +6,7 @@ skills: [refine-requirement]
 tier: high
 connectors: []
 rules: []
+summary: "owns intake: raw ask → refined requirement → goal."
 ---
 
 ## Responsibilities

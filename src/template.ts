@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import path from "path";
 import { createHash } from "crypto";
+import { stripManagedBlocks } from "./managed-blocks.js";
 import { fileURLToPath } from "url";
 
 // dist/template.js -> package root is one level up.
@@ -46,6 +47,17 @@ export function toWorkspacePath(templateRelPath: string): string {
 
 export function hashContent(content: string | Buffer): string {
   return `sha256-${createHash("sha256").update(content).digest("hex")}`;
+}
+
+/**
+ * The hash `template.lock` and `awo upgrade` compare on.
+ *
+ * Generated blocks are emptied first, so a workspace that installed an agent from
+ * the catalog does not read as "user-edited" and start earning a conflict file on
+ * every upgrade — which is the problem generated blocks exist to remove.
+ */
+export function hashForLock(content: string | Buffer): string {
+  return hashContent(stripManagedBlocks(content.toString()));
 }
 
 export async function walkFiles(dir: string): Promise<string[]> {
@@ -113,13 +125,13 @@ export async function buildLock(
   for (const rel of await templateFiles()) {
     if (PER_WORKSPACE.has(rel)) {
       const onDisk = path.join(workspaceRoot, ...rel.split("/"));
-      if (await fs.pathExists(onDisk)) files[rel] = hashContent(await fs.readFile(onDisk));
+      if (await fs.pathExists(onDisk)) files[rel] = hashForLock(await fs.readFile(onDisk));
       continue;
     }
     const rendered = renderTemplate(await fs.readFile(templateSourcePath(rel), "utf8"), {
       projectKey,
     });
-    files[rel] = hashContent(rendered);
+    files[rel] = hashForLock(rendered);
   }
   return { libraryVersion, files };
 }

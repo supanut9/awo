@@ -5,6 +5,7 @@ description: Create a branch, push, and open a PR from the template
 requires:
   connectors: [github]
   rules: [no-push-to-main, pr-requirements, conventional-commits, human-approval-required]
+summary: branch, push, open a PR from the template.
 ---
 
 ## Steps

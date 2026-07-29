@@ -12,6 +12,8 @@ import {
   runReqRefine,
 } from "./commands/intake.js";
 import { runAuto } from "./commands/autorun.js";
+import { listConflicts, runResolve } from "./commands/resolve.js";
+import { runRuleNew } from "./commands/catalog.js";
 import { runInit } from "./commands/init.js";
 import { runAdd } from "./commands/add.js";
 import { runConnect } from "./commands/connect.js";
@@ -270,8 +272,18 @@ program
         if (action === "unchanged") continue;
         console.log(`  ${action}: ${n}`);
       }
+      // "conflict" is the PLAN's word for "you edited this"; whether it actually
+      // conflicted is only known after the merge is attempted.
       for (const f of r.files.filter((f) => f.action === "conflict")) {
-        console.log(`    ! ${f.path} — customized, new version written alongside`);
+        const merged = !opts.dryRun && r.mergedFiles.includes(f.path);
+        const asked = r.conflictFiles.includes(`${f.path}.new`);
+        console.log(
+          merged
+            ? `    ~ ${f.path} — you edited it; template changes merged in cleanly`
+            : asked
+              ? `    ! ${f.path} — you edited the same lines the template changed`
+              : `    ! ${f.path} — customized`
+        );
       }
 
       if (opts.dryRun) {
@@ -280,7 +292,7 @@ program
       }
       if (r.backupDir) console.log(`\nReplaced files backed up to ${r.backupDir}`);
       if (r.conflictFiles.length > 0) {
-        console.log(`Review and merge: ${r.conflictFiles.join(", ")}`);
+        console.log(`${r.conflictFiles.length} conflict(s) need you: awo resolve`);
       }
       console.log(`Workspace is now at ${r.to}.`);
     } catch (err) {
@@ -433,6 +445,56 @@ for (const [name, flag] of [
       }
     });
 }
+
+program
+  .command("resolve [file]")
+  .description("Show unresolved upgrade conflicts (*.new) and take one side.")
+  .option("--theirs", "take the template's version")
+  .option("--yours", "keep yours and delete the .new")
+  .action(async (file: string | undefined, opts: { theirs?: boolean; yours?: boolean }) => {
+    try {
+      const r = await runResolve({ file, ...opts });
+      for (const done of r.resolved) {
+        console.log(`${done.path} — took ${done.took}`);
+      }
+      if (r.remaining.length === 0) {
+        console.log(r.resolved.length > 0 ? "Nothing left to resolve." : "No conflicts.");
+        return;
+      }
+      for (const c of r.remaining) {
+        console.log(`\n${c.path} — ${c.changedLines} changed line(s)`);
+        console.log(c.diff.split("\n").slice(4).join("\n"));
+      }
+      console.log(
+        `Take one side:  awo resolve <file> --theirs   |   --yours\n` +
+          `Or edit ${r.remaining[0].path} by hand and delete ${r.remaining[0].newPath}.`
+      );
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+const rule = program.command("rule").description("Always-on policy files in rules/.");
+
+rule
+  .command("new <id>")
+  .description("Scaffold a rule. The AGENTS.md list regenerates itself — nothing to register.")
+  .requiredOption("--summary <text>", "the one line that appears in AGENTS.md")
+  .option("--severity <level>", "required | recommended (default: required)")
+  .option("--applies-to <areas>", "comma-separated, e.g. task_execution,pr")
+  .action(
+    async (id: string, opts: { summary: string; severity?: string; appliesTo?: string }) => {
+      try {
+        const r = await runRuleNew(id, opts);
+        console.log(`${r.id} created at ${r.file}`);
+        console.log(`Listed in AGENTS.md automatically. Write the policy body in that file.`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    }
+  );
 
 program
   .command("run")

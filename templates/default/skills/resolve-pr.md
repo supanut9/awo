@@ -5,6 +5,7 @@ description: Address review comments and finish according to the configured merg
 requires:
   connectors: [github]
   rules: [conventional-commits, human-approval-required]
+summary: address review feedback, then follow configured merge authority.
 ---
 
 ## Steps

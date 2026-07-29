@@ -3,6 +3,7 @@ id: evidence-not-claims
 name: Evidence is measured, never asserted
 appliesTo: [task_completion, audit]
 severity: required
+summary: never write "the suite passes"; have awo run it with `awo task event <id> test --run "<cmd>" --baseline`. Only a measured pass closes a task.
 ---
 
 Do not write "the suite passes". Have awo run it:

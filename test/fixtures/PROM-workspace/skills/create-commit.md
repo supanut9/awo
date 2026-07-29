@@ -5,6 +5,7 @@ description: Stage changes and commit with a Conventional Commits message
 requires:
   connectors: [github]
   rules: [conventional-commits]
+summary: stage + commit with a conventional message.
 ---
 
 ## When to use

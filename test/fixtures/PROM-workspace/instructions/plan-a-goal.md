@@ -4,6 +4,7 @@ name: Plan a goal
 description: Sequence for turning a refined requirement into planned tasks
 owner: tech-lead
 appliesTo: [PROM-G]
+summary: Plan a goal
 ---
 
 Sequence for `awo goal plan PROM-G#`, owned by `tech-lead` (preceded by

@@ -4,6 +4,7 @@ name: Refine a requirement
 description: Turn a raw ask into a clear requirement via intake interview
 requires:
   connectors: []
+summary: turn a raw ask into a clear, scoped requirement.
 ---
 
 ## When to use

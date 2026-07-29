@@ -3,6 +3,7 @@ id: conventional-commits
 name: Conventional Commits
 appliesTo: [commit]
 severity: required
+summary: commit messages follow Conventional Commits.
 ---
 
 Commit messages MUST follow Conventional Commits:

@@ -128,14 +128,15 @@ test("an unmodified scaffolding file is replaced; a customized one is never over
     !fs.readFileSync(untouched, "utf8").includes("stale line"),
     "an unmodified file must be replaced by the template version"
   );
-  // Customized file: untouched, new version alongside.
+  // Customized file: the edit survives AND the template's changes merge in. The
+  // user appended a line; the template changed other lines; nothing overlaps, so
+  // there is nothing to ask about (§17.2).
   assert.ok(
     fs.readFileSync(customized, "utf8").includes("Always rebase."),
     "a customized file must never be overwritten"
   );
-  assert.ok(fs.existsSync(`${customized}.new`), "the new version must be written as .new");
-  assert.ok(!fs.readFileSync(`${customized}.new`, "utf8").includes("Always rebase."));
-  assert.match(out.stdout, /Review and merge: AGENTS\.md\.new/);
+  assert.ok(!fs.existsSync(`${customized}.new`), "a non-overlapping edit needs no conflict file");
+  assert.match(out.stdout, /~ AGENTS\.md — you edited it; template changes merged in cleanly/);
 
   // Replaced files are backed up (§11.4).
   const backup = path.join(ws, ".workspace", "upgrade-backups", `0.0.1-to-${INSTALLED}`);
@@ -204,6 +205,9 @@ test("a workspace with no template.lock is upgraded conservatively", () => {
   const ws = makeWorkspace();
   pretendOlder(ws, "0.0.1");
   fs.rmSync(path.join(ws, ".workspace", "template.lock"));
+  // Such a workspace predates the stored template base too, so there is nothing to
+  // three-way merge against and every changed file must be asked about.
+  fs.rmSync(path.join(ws, ".workspace", "template-base"), { recursive: true, force: true });
 
   // Edit a file so it differs from the template; with no baseline, upgrade
   // cannot prove anything is unmodified, so it must not overwrite.
@@ -490,4 +494,70 @@ test("upgrade regenerates derived artifacts, so a config fix actually reaches a 
   const after = JSON.parse(fs.readFileSync(file, "utf8")) as { settings: Record<string, unknown> };
   assert.deepEqual(after.settings["git.scanRepositories"], [repo], "upgrade must regenerate it");
   assert.equal(after.settings["git-graph.maxDepthOfRepoSearch"], 2);
+});
+
+test("an overlapping edit still asks, and awo resolve settles it", () => {
+  const ws = makeWorkspace();
+  const file = path.join(ws, "AGENTS.md");
+
+  // A true overlap needs BOTH sides to have moved the same line: the user edits it,
+  // and the base records the template saying something different again. Editing only
+  // the user's side is what a three-way merge resolves silently, by design.
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("## Project\n", "## Project — Acme\n"));
+  const base = path.join(ws, ".workspace", "template-base", "AGENTS.md");
+  fs.writeFileSync(base, fs.readFileSync(base, "utf8").replace("## Project\n", "## Project (older)\n"));
+  const lock = readLock(ws);
+  lock.files["AGENTS.md"] = hash("what an older template shipped");
+  writeLock(ws, lock);
+  pretendOlder(ws, "0.0.1");
+
+  const out = awo(ws, ["upgrade"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /! AGENTS\.md — you edited the same lines the template changed/);
+  assert.match(out.stdout, /awo resolve/);
+  assert.ok(fs.existsSync(`${file}.new`));
+
+  // `resolve` with no side shows the diff rather than guessing.
+  const shown = awo(ws, ["resolve"]);
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.match(shown.stdout, /AGENTS\.md — \d+ changed line\(s\)/);
+  assert.match(shown.stdout, /Acme/, "the diff must show what actually differs");
+
+  const took = awo(ws, ["resolve", "AGENTS.md", "--theirs"]);
+  assert.equal(took.code, 0, took.stderr);
+  assert.match(took.stdout, /took theirs/);
+  assert.ok(!fs.existsSync(`${file}.new`), "the conflict file is consumed");
+  assert.ok(!fs.readFileSync(file, "utf8").includes("Acme"));
+
+  // Taking the template's raw file would have left the generated lists empty.
+  const rules = /<!-- awo:generated rules -->([\s\S]*?)<!-- \/awo:generated -->/.exec(
+    fs.readFileSync(file, "utf8")
+  );
+  assert.ok(rules && rules[1].includes("tests-must-pass"), "generated lists must be refilled");
+
+  assert.equal(awo(ws, ["resolve"]).stdout.trim(), "No conflicts.");
+});
+
+test("adding a rule needs no AGENTS.md edit, and does not make it look customized", () => {
+  const ws = makeWorkspace();
+
+  const created = awo(ws, [
+    "rule", "new", "deploy-via-cloud-build",
+    "--summary", "deploys go through Cloud Build, never gcloud run deploy",
+  ]);
+  assert.equal(created.code, 0, created.stderr);
+  assert.ok(fs.existsSync(path.join(ws, "rules", "deploy-via-cloud-build.md")));
+
+  const agents = fs.readFileSync(path.join(ws, "AGENTS.md"), "utf8");
+  assert.match(agents, /- `deploy-via-cloud-build` — deploys go through Cloud Build/);
+
+  // The whole point: a generated list changing must not mark the file user-edited,
+  // or every workspace that installs anything starts earning conflict files.
+  const plan = awo(ws, ["upgrade", "--dry-run"]);
+  assert.ok(!/conflict: /.test(plan.stdout), plan.stdout);
+
+  // And an installed catalog agent self-registers the same way.
+  awo(ws, ["agent", "add", "data-engineer"]);
+  assert.match(fs.readFileSync(path.join(ws, "AGENTS.md"), "utf8"), /- `data-engineer`/);
+  assert.ok(!/conflict: /.test(awo(ws, ["upgrade", "--dry-run"]).stdout));
 });

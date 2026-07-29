@@ -4,6 +4,7 @@ name: Ship a change
 description: End-to-end workflow from code to a PR ready for human approval for one task
 owner: software-engineer
 appliesTo: [{{PROJECT_KEY}}-T]
+summary: Ship a change
 ---
 
 Sequence for delivering a task (`{{PROJECT_KEY}}-T#`):

@@ -6,6 +6,7 @@ skills: [create-commit, open-pr, resolve-pr]
 tier: low
 connectors: [github]
 rules: [conventional-commits, no-push-to-main, pr-requirements, isolate-task-worktrees, human-approval-required]
+summary: takes a verified task through its configured PR outcome.
 ---
 
 ## Responsibilities

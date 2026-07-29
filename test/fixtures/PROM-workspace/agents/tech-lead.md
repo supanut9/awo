@@ -6,6 +6,7 @@ skills: [sync-repos]
 tier: high
 connectors: []
 rules: [stay-in-scope]
+summary: decomposes a goal into runnable tasks.
 ---
 
 ## Responsibilities

@@ -5,6 +5,7 @@ description: Give a task its own git worktree + branch so concurrent tasks on th
 requires:
   connectors: []
   rules: [isolate-task-worktrees]
+summary: give a task its own isolated git worktree + branch.
 ---
 
 ## When to use

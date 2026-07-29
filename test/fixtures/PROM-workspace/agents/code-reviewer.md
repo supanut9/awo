@@ -6,6 +6,7 @@ skills: [resolve-pr]
 tier: high
 connectors: [github]
 rules: [conventional-commits, pr-requirements, human-approval-required]
+summary: reviews PRs and reports readiness; it never approves.
 ---
 
 ## Responsibilities

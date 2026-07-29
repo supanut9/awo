@@ -4,6 +4,7 @@ name: Sync linked repos
 description: Reconcile repos/ with .workspace/manifest.json before starting work
 requires:
   connectors: []
+summary: reconcile `repos/` with the manifest before starting work.
 ---
 
 ## When to use

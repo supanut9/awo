@@ -23,5 +23,9 @@ node_modules/
 # invents its own path must not be able to commit a checkout into the workspace
 /.worktrees/
 
+# The pristine rendered template, kept so `awo upgrade` can three-way merge your
+# edits instead of asking about every one (§17.2). Derived, and regenerated.
+/.workspace/template-base/
+
 # Upgrade backups — copies of scaffolding replaced by `awo upgrade` (§11.4)
 /.workspace/upgrade-backups/

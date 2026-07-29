@@ -3,6 +3,7 @@ id: stay-in-scope
 name: Stay in scope
 appliesTo: [task_execution]
 severity: required
+summary: only touch repos declared as a task's `targets`.
 ---
 
 An agent executing a task (`PROM-T#`) MUST only read/write within the repos
