@@ -3,6 +3,7 @@ import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest } from "../manifest.js";
 import { FileReader } from "../ui/reader.js";
+import { eventsFile } from "../runs.js";
 
 /**
  * §7.6 — optional publishing of a workspace's state to MongoDB, so a hosted
@@ -264,9 +265,10 @@ export async function runPublish(
   const events: Record<string, unknown>[] = [];
   if (full) {
     for (const r of snapshot.runs) {
-      const [stream, markdown] = await Promise.all([
+      const [stream, markdown, workerLog] = await Promise.all([
         reader.runEvents(r.runId).catch(() => []),
         reader.runDetail(r.runId).catch(() => ""),
+        readWorkerLog(root, r.runId),
       ]);
       events.push({
         _id: `${wid}:${r.runId}`,
@@ -275,6 +277,10 @@ export async function runPublish(
         taskId: r.taskId,
         events: stream,
         markdown: config.redact.prompts ? stripPrompt(markdown) : markdown,
+        // A dispatched worker's stdout is the only record of *how* it reached its
+        // answer, and the first thing you want when a run went wrong. Absent for
+        // runs a human drove.
+        ...(workerLog ? { workerLog } : {}),
       });
     }
   }
@@ -342,6 +348,27 @@ export async function runPublish(
  * Remove the verbatim request from a run record. The prompt is the most likely
  * place for something the author would not choose to send to a shared cluster.
  */
+/**
+ * The tail of a dispatched worker's output, capped.
+ *
+ * Capped rather than complete because a chatty worker can emit megabytes and
+ * Mongo's document limit is 16MB — one run must never be able to fail the whole
+ * publish. The tail is the useful end: it holds the failure and the summary.
+ */
+const WORKER_LOG_MAX = 256 * 1024;
+
+async function readWorkerLog(root: string, runId: string): Promise<string> {
+  const file = eventsFile(root, runId).replace(/\.events\.jsonl$/, ".worker.log");
+  try {
+    const { size } = await fs.stat(file);
+    const text = await fs.readFile(file, "utf8");
+    if (size <= WORKER_LOG_MAX) return text;
+    return `[…truncated — showing the last ${Math.round(WORKER_LOG_MAX / 1024)}KB of ${Math.round(size / 1024)}KB]\n\n${text.slice(-WORKER_LOG_MAX)}`;
+  } catch {
+    return "";
+  }
+}
+
 function stripPrompt(markdown: string): string {
   return markdown.replace(
     /## User prompt\n[\s\S]*?(?=\n## )/,
