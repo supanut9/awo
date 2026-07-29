@@ -26,6 +26,7 @@ import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
 import { formatContext, runContext } from "./commands/context.js";
 import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
+import { credentialPath, runPublish } from "./commands/publish.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -113,6 +114,29 @@ program
       }
       for (const r of results) {
         console.log(`${r.name}\t${r.type}\t${r.status}`);
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("publish")
+  .description(
+    "Push a projection of this workspace to MongoDB for a hosted dashboard (§7.6). Off unless .workspace/credentials/mongo.env exists."
+  )
+  .option("--dry-run", "show what would be sent, without connecting")
+  .action(async (opts: { dryRun?: boolean }) => {
+    try {
+      const r = await runPublish(opts);
+      console.log(
+        `${r.dryRun ? "would publish" : "published"} workspace ${r.workspaceId}` +
+          `${r.uriHost ? ` -> ${r.uriHost}/${r.database}` : ""}`
+      );
+      console.log(`  goals ${r.counts.goals} · tasks ${r.counts.tasks} · runs ${r.counts.runs}`);
+      if (r.dryRun && !r.uriHost) {
+        console.log(`  no credentials yet — add MONGO_URI to .workspace/credentials/mongo.env`);
       }
     } catch (err) {
       console.error((err as Error).message);

@@ -50,6 +50,16 @@ export interface Manifest {
   createdAt: string;
   /** §12 — model tiering policy. Absent means built-in defaults apply. */
   models?: ModelPolicyEntry;
+  /**
+   * §7.6 — optional publishing of a projection to MongoDB. Absent means no
+   * publishing and no network calls; the connection string never lives here, only
+   * in .workspace/credentials/mongo.env (gitignored, per-machine).
+   */
+  publish?: {
+    database?: string;
+    collectionPrefix?: string;
+    redact?: { prompts?: boolean; filePaths?: boolean };
+  };
   repos: RepoEntry[];
 }
 

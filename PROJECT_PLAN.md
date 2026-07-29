@@ -277,6 +277,21 @@ Design notes: `git` entries fully reconstitute on a fresh clone via `sync`; `loc
 | `awo publish --token <t>` | Store a scoped publish token in `.workspace/credentials/`; enables publishing for this workspace. |
 | `awo publish --off` | Drop the token and stop publishing. Local state is unaffected. |
 
+**Built in v0.0.25**, with one deviation from §7.6 as written: the user chose
+**BYO-database** over a scoped token — the connection string is theirs, in
+`.workspace/credentials/mongo.env` (gitignored, per-machine), and `awo publish`
+writes four collections directly. The token model's argument still stands and is
+recorded above; the caveat that matters in practice is that a URI grants far more
+than "write these four collections", so it should be a least-privilege user scoped
+to one database. Absent that file, publishing is off and no network call is made.
+
+The consumer is **`awo-dashboard`** (`github.com/supanut9/awo-dashboard`): Next.js
+App Router, read-only, keyed on `workspaceId`. It reuses the projection rather than
+the files, and its most useful screen is the one this plan could not build locally —
+success rate and average attempts **per tier and effort**, which turns §12.9's
+open question into a table. Authentication and multi-tenancy are **not** built, and
+its README says so plainly rather than implying otherwise.
+
 ---
 
 ## 7. Feature Modules
