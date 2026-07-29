@@ -974,6 +974,8 @@ Everything here is a design decision made on paper, not something that's been pr
 
 49. **`tests-must-pass` was a rule nothing could enforce, so it was enforced.** A task could close as `success` having recorded no evidence that anything ran — which is precisely how six tasks each "passed" and composed into a broken feature (§9 item 47). `task complete --outcome success` now requires a `test` event in the run, or `--untested "<why>"`, which is recorded in the run log as `UNTESTED: …` so the exemption is visible to whoever reads it later. Failure needs no evidence: a failed run is allowed to have run nothing. `doctor` gained the cheap version of the same check — any task `done`/`in-review` whose run recorded no `commit`/`repo.diff`, or no `test`. Lessons: **an always-on rule with no checkable artefact is a wish**; and the right shape for enforcement is *demand evidence or demand a reason*, never simply block — the escape hatch is what keeps the gate honest instead of encouraging people to fake a test event.
 
+52. **`awo task dispatch` closes the orchestration loop, and its design is almost entirely made of previous findings.** Blocking until the worker exits comes from item 35 (a one-shot orchestrator deferred to a turn that never came, stranding uncommitted work). Failing loudly on a missing runtime comes from item 41 (a Codex orchestrator silently became the worker). Keeping the worker's raw stdout comes from every occasion a summary was insufficient to explain what went wrong. Building argv rather than a shell string avoids the quoting bugs that already cost two restarts. Closing stdin comes from the 20 minutes lost to a worker waiting on input. And recording a dispatched success as `--untested` rather than synthesising a `test` event is item 49's rule applied to itself. The lesson is about sequencing rather than any one mechanism: **a feature deferred until its prerequisites exist arrives mostly written**, because each prerequisite was a failure that taught what the feature must not do.
+
 51. **The QA gate was the most load-bearing step and the least supported — now it is a command.** Item 47 established that the goal-level review is what makes parallel low-tier work safe. Yet running it meant assembling everything by hand: locating each task's worktree, extracting commits and file lists, pasting the definition-of-done and acceptance criteria, choosing a model, remembering read-only, and then hand-writing the verdict into the log. Every one of those steps was a chance to do the gate badly or skip it. `awo goal verify` now assembles the brief — including flagging tasks that closed **without test evidence**, which is exactly what a reviewer should distrust first — resolves the **high** tier regardless of what the tasks used, and prints a **read-only** invocation. `awo goal verdict --pass|--gap` records it: pass verifies the in-review tasks (rolling the goal to `done` via §7.4), gap files a new requirement per `file-bug` instead of a silent fix.
 
     Two design points worth keeping. The command **assembles but does not execute**, consistent with §9 item 2 — the same boundary as `task run`. And read-only is enforced per runtime (`-s read-only` for codex, plan mode for claude, which is the one place plan mode is exactly right per §12.7): **a reviewer that can edit is a reviewer that fixes instead of reporting**, and a fix that arrives that way has no requirement, no task and no log entry.
@@ -1422,9 +1424,41 @@ Plan mode is a **human-approval mechanism for an interactive session**, not a pr
 
 This turned out to be necessary rather than ornamental: a ChatGPT-account Codex exposes only `gpt-5.4-mini`, so there is no second model to tier *with*. Effort makes tiering work on a single model — same model, more thinking — and is emitted as `-c model_reasoning_effort=<effort>` (§9 item 38).
 
-### 12.6 What is deliberately NOT built
+### 12.6 `awo task dispatch` — built in v0.0.27
 
-`awo task dispatch` — actually spawning the worker, piping its output into `task event`, closing the run on exit. Deferred for two reasons: awo would become an agent runtime, and `isolate-task-worktrees` is still honour-system, so a spawned worker would edit the real checkouts. The declarative layer is a prerequisite either way, so nothing is wasted by waiting. See §9 items 30–31.
+Long deferred, because it makes awo an agent runtime and a runaway worker in a linked
+repo is a bad afternoon. The prerequisites named here are now met: `task run` creates
+the worktree (branched from the dependency, dependencies linked), the sandbox grant is
+narrowed to `<repo>/.git`, and a task cannot close as `success` without test evidence.
+
+```sh
+awo task dispatch SHOP-T3                 # opens the run, spawns the worker, waits
+awo task dispatch SHOP-T3 --dry-run       # model + command, no state touched
+awo task dispatch SHOP-T3 --timeout 20 --no-complete
+```
+
+Two dogfood failures shaped it, and both are handled **by construction rather than by
+instruction**:
+
+- **It blocks until the worker exits.** §9 item 35: a one-shot orchestrator ended its
+  turn saying it would "continue when the worker reports back", which killed the child
+  and stranded 9 files of uncommitted work. An orchestrator cannot be trusted to wait;
+  the command waits.
+- **A spawn failure fails the task loudly.** §9 item 41: when a Codex orchestrator
+  could not spawn a Codex worker, it quietly did the work itself — the expensive
+  coordinator doing cheap work, the exact failure §12 exists to prevent. A missing
+  runtime now exits 127 and blocks the task.
+
+Also deliberate: the worker's **own stdout is kept** beside the run as
+`<runId>.worker.log`, because a one-line summary cannot diagnose a worker that went
+wrong; the command is built as **argv, not a shell string**, so there are no quoting
+bugs and no injection through a task name; **stdin is closed**, since a worker waiting
+on input it will never receive hangs forever; and a dispatched success is recorded as
+`--untested "dispatched worker did not record a test event"` rather than faking
+evidence the worker never produced.
+
+`task run` remains for when you want to invoke the model yourself — dispatch is the
+convenience, not the replacement.
 
 ---
 

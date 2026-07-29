@@ -27,6 +27,7 @@ import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/cata
 import { formatContext, runContext } from "./commands/context.js";
 import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
 import { credentialPath, runPublish } from "./commands/publish.js";
+import { runDispatch } from "./commands/dispatch.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -508,6 +509,40 @@ task
       console.log(
         `\nRecord progress with \`awo task event ${r.taskId} <kind> --label "…"\`, then close with \`awo task complete ${r.taskId} --outcome success\`.`
       );
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+task
+  .command("dispatch <taskId>")
+  .description(
+    "Open a run AND spawn the resolved worker, blocking until it exits (§12.6). Use `task run` if you want to invoke the model yourself."
+  )
+  .option("--dry-run", "show the model and command without opening a run")
+  .option("--timeout <minutes>", "kill the worker after this long (default 45)", (v) => parseInt(v, 10))
+  .option("--instruction <text>", "extra guidance appended to the worker's prompt")
+  .option("--no-complete", "leave the run open instead of closing it from the exit code")
+  .action(async (taskId: string, opts: { dryRun?: boolean; timeout?: number; instruction?: string; complete?: boolean }) => {
+    try {
+      const r = await runDispatch(taskId, {
+        dryRun: opts.dryRun,
+        timeoutMinutes: opts.timeout,
+        instruction: opts.instruction,
+        noComplete: opts.complete === false,
+      });
+      if (r.exitCode === null && r.runId.startsWith("(none")) {
+        console.log(`would dispatch ${r.taskId} to ${r.model}`);
+        console.log(`  ${r.command}`);
+        return;
+      }
+      console.log(`${r.taskId} run ${r.runId} — ${r.model}`);
+      console.log(`worker:  ${r.timedOut ? "TIMED OUT" : `exited ${r.exitCode}`} -> ${r.outcome}`);
+      console.log(`output:  ${r.outputPath}`);
+      if (r.completed) console.log(`run closed as ${r.outcome}.`);
+      else console.log(`run left open — close it with \`awo task complete ${r.taskId} --outcome <o>\``);
+      if (r.outcome !== "success") process.exitCode = 1;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

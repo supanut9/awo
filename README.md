@@ -83,6 +83,7 @@ awo ui                                    # local dashboard on 127.0.0.1
 | `awo goal list` · `goal verify` · `goal verdict` | Progress · assemble the QA gate · record its outcome. |
 | `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`. |
 | `awo task run <id>` | Open a run: resolve dependencies, create the isolated worktree, resolve the model. |
+| `awo task dispatch <id>` | Open a run **and spawn** the resolved worker, blocking until it exits. |
 | `awo task event <id> <kind>` | Record progress during a run. |
 | `awo task complete <id> --outcome <o>` | Close it. `--gate` routes success to review. |
 | `awo task verify <id> [--reject]` | QA gate on one task. |

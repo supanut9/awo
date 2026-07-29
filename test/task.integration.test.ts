@@ -703,3 +703,40 @@ test("a task cannot close as success without test evidence", () => {
   assert.match(detail, /UNTESTED: no database available/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+test("dispatch spawns the worker, blocks, and fails loudly when the runtime is missing", () => {
+  const ws = makeWorkspace();
+  const manifestPath = path.join(ws, ".workspace", "manifest.json");
+  const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  // A runtime that does not exist: dispatch must fail the task, never quietly do
+  // the work some other way (§9 item 41).
+  m.models = { tiers: { low: { runtime: "codex", model: "definitely-not-installed-xyz" } } };
+  fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+
+  const dry = awo(ws, ["task", "dispatch", "TEST-T1", "--dry-run"]);
+  assert.equal(dry.code, 0, dry.stderr);
+  assert.match(dry.stdout, /would dispatch TEST-T1 to codex:definitely-not-installed-xyz/);
+  // A dry run must leave no state behind.
+  assert.ok(!fs.existsSync(path.join(ws, "goals", "TEST-G1-demo", "state.json")));
+
+  const out = awo(ws, ["task", "dispatch", "TEST-T1", "--timeout", "1"]);
+  assert.equal(out.code, 1, "a failed worker must be a non-zero exit");
+  assert.match(out.stdout, /worker: {2}exited/);
+  assert.match(out.stdout, /run closed as failed/);
+
+  // The task is blocked, not left dangling in `running` (§9 item 35).
+  assert.equal(readState(ws).tasks["TEST-T1"].status, "blocked");
+
+  // The worker's own output is captured beside the run, not just summarised.
+  const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
+  const workerLog = path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.worker.log`);
+  assert.ok(fs.existsSync(workerLog), "the worker's output must be retained for diagnosis");
+
+  // The dispatch is visible in the event stream, command included.
+  const events = fs
+    .readFileSync(path.join(ws, "logs", "runs", runId.slice(0, 10), `${runId}.events.jsonl`), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(events.some((e) => String(e.label ?? "").includes("dispatching to codex")));
+  assert.ok(events.some((e) => e.kind === "step.end" && e.ok === false));
+  fs.rmSync(ws, { recursive: true, force: true });
+});
