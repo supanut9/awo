@@ -849,6 +849,22 @@ The token is scoped to one `workspaceId`, write-only, and revocable as a single 
 
 **Config placement follows the existing tracked-vs-secret split exactly** (§3.7): the *declaration* that this workspace publishes (endpoint, redaction settings) lives in a tracked file alongside `connectors.json`; the *token* lives in `.workspace/credentials/publish.env`, gitignored, re-supplied per machine. "No credentials → no publishing" therefore falls out as the default, and a fresh `git clone` publishes nothing until someone opts in again.
 
+#### Manual and auto sync (built in v0.0.29)
+
+```sh
+awo publish              # manual — push the current projection
+awo publish --watch      # auto — push on every change, debounced 2s
+awo publish --dry-run    # what would go, without connecting
+```
+
+`--watch` is a **watcher, not a hook inside the commands**, and that placement is the
+whole point of §3.8: nothing in `task run` or `task complete` waits on the network, so
+a dead connection or an expired credential degrades the dashboard and never the work.
+It debounces because one run writes `state.json`, an event line and an index line
+within a second of each other, and it refuses to overlap itself — a slow push must not
+let a burst of edits become a pile of concurrent connections. A failed push is
+reported and the watcher keeps running.
+
 #### The outbox — how publishing stays non-blocking
 
 ```
@@ -976,6 +992,8 @@ Everything here is a design decision made on paper, not something that's been pr
 46. **The linked `node_modules` had to be writable, or the test run failed as a permission error.** Vitest writes `node_modules/.vite-temp`; with the link pointing into the repo and the sandbox granting only the git dir, the suite died on permissions rather than on a test. Granted alongside the git dir — caches and dependencies, never source, which is the distinction item 42 was about. The first task able to actually run tests was `SHOP-T5`, five tasks in.
 
 49. **`tests-must-pass` was a rule nothing could enforce, so it was enforced.** A task could close as `success` having recorded no evidence that anything ran — which is precisely how six tasks each "passed" and composed into a broken feature (§9 item 47). `task complete --outcome success` now requires a `test` event in the run, or `--untested "<why>"`, which is recorded in the run log as `UNTESTED: …` so the exemption is visible to whoever reads it later. Failure needs no evidence: a failed run is allowed to have run nothing. `doctor` gained the cheap version of the same check — any task `done`/`in-review` whose run recorded no `commit`/`repo.diff`, or no `test`. Lessons: **an always-on rule with no checkable artefact is a wish**; and the right shape for enforcement is *demand evidence or demand a reason*, never simply block — the escape hatch is what keeps the gate honest instead of encouraging people to fake a test event.
+
+54. **"Always use the latest version" and "it must build" collided, and the collision was worth resolving rather than dodging.** `typescript@7` is the native rewrite and no longer exposes the compiler API Next's build worker used, so `next build` failed outright with a working `tsc --noEmit`. The two obvious moves were to pin back to TypeScript 6 or to abandon the standing preference. The third — enabling `experimental.useTypeScriptCli` so Next shells out to `tsc` — keeps both, and is the direction Next itself points. Lessons: **a typecheck passing is not a build passing** (different toolchains, different failure); and when a standing preference meets a hard constraint, look for the configuration that satisfies both before treating it as a choice between them. Recorded in the dashboard's config with the reason, so the next person does not "clean up" the flag.
 
 53. **The tiering evidence, once it was finally visible in one table, was not flattering to the cheap tier.** With outcomes grouped by tier/effort across the dogfood's 24 runs: `low / low` — **10 runs, 50% success, 4.1 average attempts**, against 1.0 attempts for the earlier untagged runs. That is the shape §12.9 predicted would matter — the saving handed back in retries. The honest caveat is recorded alongside it in the UI: most of those retries were *environmental* (an orphaned process, a sandbox that could not reach git, a sandbox that reached too far), not the model producing bad code, and the metric cannot tell those apart. So it is evidence worth acting on and not proof: **a number that mixes causes should be presented as a reason to look, never as a verdict** — which is also why the view names the limitation instead of leaving the reader to infer it.
 

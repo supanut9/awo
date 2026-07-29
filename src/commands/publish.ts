@@ -74,6 +74,62 @@ function hostOf(uri: string): string | null {
   }
 }
 
+/**
+ * Auto-sync. §3.8 requires publishing to be non-blocking, so this is a *watcher*
+ * rather than a hook inside the commands: nothing in `task run` or `task complete`
+ * waits on the network, and a dead connection degrades the dashboard, never the
+ * work. Changes are debounced because one run writes state.json, an event line and
+ * an index line within a second of each other.
+ */
+export async function runPublishWatch(options: {
+  cwd?: string;
+  debounceMs?: number;
+  onPublish?: (r: PublishResult | Error) => void;
+}): Promise<{ stop: () => Promise<void> }> {
+  const root = findWorkspaceRoot(options.cwd ?? process.cwd());
+  const { default: chokidar } = await import("chokidar");
+
+  const watcher = chokidar.watch(
+    [
+      path.join(root, "goals"),
+      path.join(root, "logs", "runs.jsonl"),
+      path.join(root, ".workspace", "manifest.json"),
+    ],
+    { ignoreInitial: true, ignored: /\.tmp$/ }
+  );
+
+  let pending: NodeJS.Timeout | null = null;
+  let inFlight = false;
+  const trigger = (): void => {
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(async () => {
+      // Never overlap: a slow publish must not queue up behind itself and turn a
+      // burst of edits into a pile of concurrent connections.
+      if (inFlight) {
+        trigger();
+        return;
+      }
+      inFlight = true;
+      try {
+        options.onPublish?.(await runPublish({ cwd: root }));
+      } catch (err) {
+        // A failed push is reported, never thrown: it must not kill the watcher.
+        options.onPublish?.(err as Error);
+      } finally {
+        inFlight = false;
+      }
+    }, options.debounceMs ?? 2000);
+  };
+
+  watcher.on("all", trigger);
+  return {
+    stop: async () => {
+      if (pending) clearTimeout(pending);
+      await watcher.close();
+    },
+  };
+}
+
 export async function runPublish(
   options: { cwd?: string; dryRun?: boolean } = {}
 ): Promise<PublishResult> {

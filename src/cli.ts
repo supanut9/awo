@@ -26,7 +26,7 @@ import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
 import { formatContext, runContext } from "./commands/context.js";
 import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
-import { credentialPath, runPublish } from "./commands/publish.js";
+import { credentialPath, runPublish, runPublishWatch } from "./commands/publish.js";
 import { runDispatch } from "./commands/dispatch.js";
 
 // dist/cli.js -> package root is one level up.
@@ -128,8 +128,31 @@ program
     "Push a projection of this workspace to MongoDB for a hosted dashboard (§7.6). Off unless .workspace/credentials/mongo.env exists."
   )
   .option("--dry-run", "show what would be sent, without connecting")
-  .action(async (opts: { dryRun?: boolean }) => {
+  .option("--watch", "keep syncing as the workspace changes (auto-sync)")
+  .action(async (opts: { dryRun?: boolean; watch?: boolean }) => {
     try {
+      if (opts.watch) {
+        const first = await runPublish({});
+        console.log(
+          `synced ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs` +
+            `${first.uriHost ? ` -> ${first.uriHost}/${first.database}` : ""}`
+        );
+        console.log("watching for changes — Ctrl+C to stop.");
+        const handle = await runPublishWatch({
+          onPublish: (r) => {
+            const at = new Date().toLocaleTimeString();
+            if (r instanceof Error) console.error(`${at}  sync failed: ${r.message}`);
+            else console.log(`${at}  synced ${r.counts.tasks} tasks · ${r.counts.runs} runs`);
+          },
+        });
+        const stop = async (): Promise<void> => {
+          await handle.stop();
+          process.exit(0);
+        };
+        process.on("SIGINT", stop);
+        process.on("SIGTERM", stop);
+        return;
+      }
       const r = await runPublish(opts);
       console.log(
         `${r.dryRun ? "would publish" : "published"} workspace ${r.workspaceId}` +

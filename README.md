@@ -154,10 +154,13 @@ for workspaces that are **not** on your machine. A workspace opts in:
 
 ```sh
 echo 'MONGO_URI=mongodb+srv://…' > .workspace/credentials/mongo.env   # gitignored
-awo publish
+awo publish              # manual sync
+awo publish --watch      # auto sync — pushes on every change, debounced
 ```
 
-Local stays canonical; the push is an opt-in projection, never a mirror.
+Local stays canonical; the push is an opt-in projection, never a mirror. `--watch` is
+a separate watcher rather than a hook inside the commands, so nothing in `task run`
+ever waits on the network.
 
 ## Development
 
