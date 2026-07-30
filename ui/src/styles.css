@@ -1,9 +1,43 @@
 @import "tailwindcss";
 
 @theme {
-  --color-ink: #1a1a18;
-  --color-muted: #6f6f68;
+  --color-ink: #18201f;
+  --color-paper: #f5f2ea;
+  --color-wash: #e8e2d4;
+  --color-moss: #31594c;
+  --color-moss-deep: #17382f;
+  --color-coral: #ba5a43;
+  --color-sun: #d89b32;
+  --color-cloud: #fffdf8;
+  --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --font-sans: "Avenir Next", "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
-/* The board scrolls horizontally on narrow screens; the page never does. */
-html, body { overflow-x: hidden; }
+html {
+  background: var(--color-paper);
+}
+
+body {
+  min-width: 320px;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 88% -10%, rgba(216, 155, 50, 0.18), transparent 32rem),
+    radial-gradient(circle at 5% 12%, rgba(49, 89, 76, 0.1), transparent 30rem),
+    var(--color-paper);
+  color: var(--color-ink);
+}
+
+button, input {
+  font: inherit;
+}
+
+button:focus-visible, input:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-sun) 65%, white);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: #d8bf7f;
+  color: #18201f;
+}

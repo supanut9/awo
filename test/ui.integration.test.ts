@@ -32,6 +32,21 @@ function awo(cwd: string, args: string[]): void {
   execFileSync(process.execPath, [CLI, ...args], { cwd, encoding: "utf8" });
 }
 
+test("publish projects intake requirements without needing MongoDB for a dry run", (t) => {
+  const ws = makeWorkspace();
+  t.after(() => fs.rmSync(ws, { recursive: true, force: true }));
+
+  awo(ws, ["req", "new", "--title", "Published requirement"]);
+  const output = execFileSync(process.execPath, [CLI, "publish", "--dry-run"], {
+    cwd: ws,
+    encoding: "utf8",
+  });
+
+  assert.match(output, /requirements 1/);
+  assert.match(output, /goals 1/);
+  assert.match(output, /would publish workspace/);
+});
+
 interface UiHandle {
   url: string;
   port: number;
@@ -161,6 +176,29 @@ test("ui serves a snapshot, the page, and a live stream; and writes go through t
   assert.match(log.markdown, /^<!-- awo:run /, "run log is the day record's marked section");
   assert.match(log.markdown, /\*\*taskId:\*\* UI-T1/);
   assert.equal((await fetch(`${ui.url}/api/run?id=nope`)).status, 404);
+
+  // Requirements are part of the dashboard snapshot both during intake and after
+  // planning moves requirement.md under a goal directory.
+  awo(ws, ["req", "new", "--title", "Show checkout error copy"]);
+  let requirements = await (await fetch(`${ui.url}/api/snapshot`)).json();
+  assert.deepEqual(
+    requirements.requirements.map((r: { id: string; status: string; goalId: string | null }) => [r.id, r.status, r.goalId]),
+    [["UI-R1", "draft", null]]
+  );
+  const requirementFile = path.join(ws, "requirements", "UI-R1.md");
+  fs.writeFileSync(
+    requirementFile,
+    fs.readFileSync(requirementFile, "utf8").replace("- _…_", "- Given a failed checkout, when the error is shown, then the copy is clear")
+  );
+  awo(ws, ["req", "propose", "UI-R1"]);
+  awo(ws, ["req", "approve", "UI-R1"]);
+  awo(ws, ["goal", "new", "--from", "UI-R1"]);
+  requirements = await (await fetch(`${ui.url}/api/snapshot`)).json();
+  assert.deepEqual(
+    requirements.requirements.map((r: { id: string; status: string; goalId: string | null; criteria: { total: number } }) => [r.id, r.status, r.goalId, r.criteria.total]),
+    [["UI-R1", "approved", "UI-G2", 1]],
+    "planned requirements remain visible and retain acceptance criteria"
+  );
 
   // Writes: only human lifecycle moves, and invalid ones are refused.
   const bad = await fetch(`${ui.url}/api/task/status`, {

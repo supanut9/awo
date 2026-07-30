@@ -59,25 +59,25 @@ export default function TaskDrawer({ taskId, onClose, onMove }: Props) {
   ] as const;
 
   return (
-    <aside className="fixed inset-y-0 right-0 z-20 flex w-full max-w-xl flex-col border-l border-neutral-200 bg-white shadow-xl dark:border-neutral-800 dark:bg-neutral-900">
-      <header className="flex items-start gap-3 border-b border-neutral-200 p-4 dark:border-neutral-800">
+    <aside className="fixed inset-y-0 right-0 z-20 flex w-full max-w-xl flex-col border-l border-ink/10 bg-cloud shadow-2xl">
+      <header className="flex items-start gap-3 border-b border-ink/10 p-5">
         <div className="min-w-0 flex-1">
-          <div className="font-mono text-sm font-semibold">{taskId}</div>
-          <div className="truncate text-sm text-neutral-500">{task?.name ?? "…"}</div>
+          <div className="font-mono text-sm font-bold text-moss-deep">{taskId}</div>
+          <div className="mt-1 truncate font-display text-xl">{task?.name ?? "…"}</div>
         </div>
         <button
           onClick={onClose}
-          className="rounded border border-neutral-300 px-2 py-0.5 text-xs hover:border-indigo-400 hover:text-indigo-600 dark:border-neutral-700"
+          className="rounded-full border border-ink/15 px-3 py-1 text-xs font-semibold text-ink/60 hover:border-moss hover:text-moss"
         >
           Esc
         </button>
       </header>
 
-      {error && <div className="p-4 text-sm text-red-600 dark:text-red-400">{error}</div>}
+      {error && <div className="p-5 text-sm text-coral">{error}</div>}
 
       {task && (
         <>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 border-b border-neutral-200 p-4 text-xs dark:border-neutral-800">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-3 border-b border-ink/10 p-5 text-xs">
             <Field label="Status" value={task.status} />
             <Field label="Goal" value={task.goalId} mono />
             <Field label="Agent" value={task.agent ?? "unassigned"} />
@@ -88,28 +88,28 @@ export default function TaskDrawer({ taskId, onClose, onMove }: Props) {
             {task.blockedReason && <Field label="Blocked" value={task.blockedReason} span danger />}
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5 border-b border-neutral-200 px-4 py-2 dark:border-neutral-800">
-            <span className="mr-1 text-[11px] uppercase tracking-wide text-neutral-500">Move to</span>
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-ink/10 px-5 py-3">
+            <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-ink/50">Move to</span>
             {TASK_STATUSES.filter((s) => s !== task.status).map((s) => (
               <button
                 key={s}
                 onClick={() => onMove(task.id, s)}
-                className="rounded border border-neutral-300 px-2 py-0.5 text-[11px] hover:border-indigo-400 hover:text-indigo-600 dark:border-neutral-700"
+                className="rounded-full border border-ink/15 px-2.5 py-1 text-[11px] font-semibold text-ink/65 hover:border-moss hover:text-moss"
               >
                 {s}
               </button>
             ))}
           </div>
 
-          <nav className="flex gap-1 border-b border-neutral-200 px-3 pt-2 dark:border-neutral-800">
+          <nav className="flex gap-1 border-b border-ink/10 px-4 pt-3">
             {tabs.map(([id, label]) => (
               <button
                 key={id}
                 onClick={() => setTab(id)}
                 className={`rounded-t px-3 py-1.5 text-xs font-medium ${
                   tab === id
-                    ? "border-b-2 border-indigo-500 text-indigo-600 dark:text-indigo-400"
-                    : "text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                    ? "border-b-2 border-moss text-moss"
+                    : "text-ink/50 hover:text-ink"
                 }`}
               >
                 {label}
@@ -117,7 +117,7 @@ export default function TaskDrawer({ taskId, onClose, onMove }: Props) {
             ))}
           </nav>
 
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-y-auto p-5">
             {tab === "definition" && (
               <>
                 <Markdown source={task.body || "_This task file has no body._"} />
@@ -129,7 +129,7 @@ export default function TaskDrawer({ taskId, onClose, onMove }: Props) {
               (runLog ? (
                 <Markdown source={runLog} />
               ) : (
-                <div className="text-sm text-neutral-500">
+                <div className="text-sm text-ink/55">
                   No run log yet — one is written when a run completes.
                 </div>
               ))}
@@ -155,10 +155,10 @@ function Field({
 }) {
   return (
     <div className={span ? "col-span-2" : ""}>
-      <div className="text-[10px] uppercase tracking-wide text-neutral-500">{label}</div>
+      <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-ink/45">{label}</div>
       <div
         className={`${mono ? "font-mono text-[11px]" : "text-xs"} ${
-          danger ? "text-red-600 dark:text-red-400" : ""
+          danger ? "text-coral" : ""
         } break-words`}
       >
         {value}

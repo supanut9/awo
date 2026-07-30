@@ -31,6 +31,16 @@ export interface GoalView {
   tasks: TaskView[];
 }
 
+export interface RequirementView {
+  id: string;
+  title: string;
+  status: "draft" | "proposed" | "approved" | "rejected";
+  source: string;
+  goalId: string | null;
+  file: string;
+  criteria: { total: number; covered: number; exceptions: number };
+}
+
 export interface RepoView {
   name: string;
   type: string;
@@ -66,6 +76,7 @@ export interface TierStat {
 
 export interface Snapshot {
   project: { workspaceId: string | null; projectKey: string; projectName: string; libraryVersion: string };
+  requirements: RequirementView[];
   goals: GoalView[];
   repos: RepoView[];
   runs: RunIndexEntry[];

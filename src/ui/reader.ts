@@ -4,7 +4,9 @@ import { runList, type RepoStatusEntry } from "../commands/list.js";
 import { findGoals, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
 import { newTaskState, readState, type GoalStatus, type TaskStatus } from "../state.js";
 import { readDetail, readEvents, readIndex, type RunEvent, type RunIndexEntry } from "../runs.js";
+import { findCriteria, listRequirements, REQ_STATUSES, type Requirement, type ReqStatus } from "../commands/intake.js";
 import fs from "fs-extra";
+import matter from "gray-matter";
 
 export interface ProjectSummary {
   workspaceId: string | null;
@@ -34,6 +36,17 @@ export interface GoalView {
   title: string;
   status: GoalStatus;
   tasks: TaskView[];
+}
+
+/** A requirement stays visible whether it is still in intake or has moved under a goal. */
+export interface RequirementView {
+  id: string;
+  title: string;
+  status: ReqStatus;
+  source: string;
+  goalId: string | null;
+  file: string;
+  criteria: { total: number; covered: number; exceptions: number };
 }
 
 /**
@@ -68,6 +81,7 @@ export interface Stats {
 
 export interface Snapshot {
   project: ProjectSummary;
+  requirements: RequirementView[];
   goals: GoalView[];
   repos: RepoStatusEntry[];
   runs: RunIndexEntry[];
@@ -90,6 +104,7 @@ export interface WorkspaceReader {
   project(): Promise<ProjectSummary>;
   task(taskId: string): Promise<TaskDetailView>;
   runDetail(runId: string): Promise<string>;
+  requirements(): Promise<RequirementView[]>;
   goals(): Promise<GoalView[]>;
   repos(): Promise<RepoStatusEntry[]>;
   runs(): Promise<RunIndexEntry[]>;
@@ -114,6 +129,32 @@ function toView(task: TaskDefinition, state: ReturnType<typeof newTaskState>): T
   };
 }
 
+function coverage(criteria: string[], state?: Awaited<ReturnType<typeof readState>>): RequirementView["criteria"] {
+  let covered = 0;
+  let exceptions = 0;
+  for (let i = 1; i <= criteria.length; i += 1) {
+    const evidence = state?.criteria?.[String(i)] ?? [];
+    if (evidence.some((item) => item.kind === "test" || item.kind === "manual")) covered += 1;
+    else if (evidence.some((item) => item.kind === "exception")) exceptions += 1;
+  }
+  return { total: criteria.length, covered, exceptions };
+}
+
+function requirementView(
+  requirement: Pick<Requirement, "id" | "title" | "status" | "source" | "goalId" | "file" | "body">,
+  state?: Awaited<ReturnType<typeof readState>>
+): RequirementView {
+  return {
+    id: requirement.id,
+    title: requirement.title,
+    status: requirement.status,
+    source: requirement.source,
+    goalId: requirement.goalId,
+    file: requirement.file,
+    criteria: coverage(findCriteria(requirement.body), state),
+  };
+}
+
 export class FileReader implements WorkspaceReader {
   constructor(private readonly root: string) {}
 
@@ -126,6 +167,37 @@ export class FileReader implements WorkspaceReader {
       libraryVersion: m.libraryVersion,
       root: path.basename(this.root),
     };
+  }
+
+  async requirements(): Promise<RequirementView[]> {
+    const intake = (await listRequirements(this.root)).map((requirement) => requirementView(requirement));
+    const planned: RequirementView[] = [];
+
+    for (const goal of await findGoals(this.root)) {
+      const file = path.join(goal.dir, "requirement.md");
+      if (!(await fs.pathExists(file))) continue;
+      const parsed = matter(await fs.readFile(file, "utf8"));
+      const data = parsed.data as Record<string, unknown>;
+      const status = String(data.status ?? "draft");
+      if (!(REQ_STATUSES as readonly string[]).includes(status)) continue;
+      const state = await readState(goal.dir, goal.id);
+      planned.push(
+        requirementView(
+          {
+            id: String(data.id ?? goal.id),
+            title: String(data.title ?? goal.title),
+            status: status as ReqStatus,
+            source: String(data.source ?? "unspecified"),
+            goalId: goal.id,
+            file: path.relative(this.root, file),
+            body: parsed.content,
+          },
+          state
+        )
+      );
+    }
+
+    return [...intake, ...planned].sort((a, b) => a.id.localeCompare(b.id));
   }
 
   async goals(): Promise<GoalView[]> {
@@ -188,8 +260,9 @@ export class FileReader implements WorkspaceReader {
   }
 
   async snapshot(): Promise<Snapshot> {
-    const [project, goals, repos, runs] = await Promise.all([
+    const [project, requirements, goals, repos, runs] = await Promise.all([
       this.project(),
+      this.requirements(),
       this.goals(),
       this.repos(),
       this.runs(),
@@ -234,6 +307,7 @@ export class FileReader implements WorkspaceReader {
 
     return {
       project,
+      requirements,
       goals,
       repos,
       runs,

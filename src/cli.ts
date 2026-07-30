@@ -179,7 +179,7 @@ program
       if (opts.watch) {
         const first = await runPublish({});
         console.log(
-          `synced ${first.detail} · ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs` +
+          `synced ${first.detail} · ${first.counts.requirements} requirements · ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs` +
             `${first.uriHost ? ` -> ${first.uriHost}/${first.database}` : ""}`
         );
         console.log("watching for changes — Ctrl+C to stop.");
@@ -187,7 +187,7 @@ program
           onPublish: (r) => {
             const at = new Date().toLocaleTimeString();
             if (r instanceof Error) console.error(`${at}  sync failed: ${r.message}`);
-            else console.log(`${at}  synced ${r.counts.tasks} tasks · ${r.counts.runs} runs`);
+            else console.log(`${at}  synced ${r.counts.requirements} requirements · ${r.counts.tasks} tasks · ${r.counts.runs} runs`);
           },
         });
         const stop = async (): Promise<void> => {
@@ -204,7 +204,7 @@ program
           `${r.uriHost ? ` -> ${r.uriHost}/${r.database}` : ""}`
       );
       console.log(
-        `  ${r.detail} · goals ${r.counts.goals} · tasks ${r.counts.tasks} · runs ${r.counts.runs}` +
+        `  ${r.detail} · requirements ${r.counts.requirements} · goals ${r.counts.goals} · tasks ${r.counts.tasks} · runs ${r.counts.runs}` +
           `${r.counts.events > 0 ? ` · events ${r.counts.events}` : ""}`
       );
       if (r.detail === "summary") {

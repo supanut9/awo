@@ -38,7 +38,7 @@ export interface PublishResult {
   workspaceId: string;
   database: string;
   detail: "summary" | "full";
-  counts: { goals: number; tasks: number; runs: number; events: number };
+  counts: { requirements: number; goals: number; tasks: number; runs: number; events: number };
   dryRun: boolean;
   uriHost: string | null;
 }
@@ -105,6 +105,7 @@ export async function runPublishWatch(options: {
   const watcher = chokidar.watch(
     [
       path.join(root, "goals"),
+      path.join(root, "requirements"),
       path.join(root, "logs", "runs.jsonl"),
       path.join(root, ".workspace", "manifest.json"),
     ],
@@ -212,6 +213,23 @@ export async function runPublish(
       : {}),
   }));
 
+  // Requirement state is useful to a hosted reviewer even with summary detail: it
+  // shows what is waiting for a human decision without publishing the criterion
+  // prose. The full body is an explicit opt-in, just like goal and task bodies.
+  const requirements = await Promise.all(
+    snapshot.requirements.map(async (r) => ({
+      _id: `${wid}:${r.id}`,
+      workspaceId: wid,
+      requirementId: r.id,
+      title: r.title,
+      status: r.status,
+      source: r.source,
+      goalId: r.goalId,
+      criteria: r.criteria,
+      ...(full ? { body: await fs.readFile(path.join(root, r.file), "utf8").catch(() => "") } : {}),
+    }))
+  );
+
   const tasks = snapshot.goals.flatMap((g) =>
     g.tasks.map((t) => ({
       _id: `${wid}:${t.id}`,
@@ -289,7 +307,13 @@ export async function runPublish(
     workspaceId: wid,
     database: config.database,
     detail: config.detail,
-    counts: { goals: goals.length, tasks: tasks.length, runs: runs.length, events: events.length },
+    counts: {
+      requirements: requirements.length,
+      goals: goals.length,
+      tasks: tasks.length,
+      runs: runs.length,
+      events: events.length,
+    },
     dryRun: Boolean(options.dryRun),
     uriHost: uri ? hostOf(uri) : null,
   };
@@ -311,6 +335,7 @@ export async function runPublish(
     // query is a collection scan, and nobody is going to run createIndex by hand.
     await Promise.all([
       db.collection(c("goals")).createIndex({ workspaceId: 1, goalId: 1 }),
+      db.collection(c("requirements")).createIndex({ workspaceId: 1, requirementId: 1 }),
       db.collection(c("tasks")).createIndex({ workspaceId: 1, status: 1 }),
       db.collection(c("runs")).createIndex({ workspaceId: 1, runId: -1 }),
       db.collection(c("events")).createIndex({ workspaceId: 1, runId: 1 }),
@@ -318,6 +343,7 @@ export async function runPublish(
     ]).catch(() => undefined);
 
     for (const [name, docs] of [
+      ["requirements", requirements],
       ["goals", goals],
       ["tasks", tasks],
       ["runs", runs],
@@ -337,6 +363,9 @@ export async function runPublish(
     await db
       .collection(c("goals"))
       .deleteMany({ workspaceId: wid, goalId: { $nin: goals.map((g) => g.goalId) } } as never);
+    await db
+      .collection(c("requirements"))
+      .deleteMany({ workspaceId: wid, requirementId: { $nin: requirements.map((r) => r.requirementId) } } as never);
   } finally {
     await client.close().catch(() => undefined);
   }
