@@ -16,9 +16,13 @@ interface RunResult {
   stderr: string;
 }
 
-function awo(cwd: string, args: string[]): RunResult {
+function awo(cwd: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}): RunResult {
   try {
-    const stdout = execFileSync(process.execPath, [CLI, ...args], { cwd, encoding: "utf8" });
+    const stdout = execFileSync(process.execPath, [CLI, ...args], {
+      cwd,
+      encoding: "utf8",
+      env: options.env,
+    });
     return { code: 0, stdout, stderr: "" };
   } catch (err) {
     const e = err as { status?: number; stdout?: string; stderr?: string };
@@ -781,7 +785,11 @@ test("dispatch spawns the worker, blocks, and fails loudly when the runtime is m
   // A dry run must leave no state behind.
   assert.ok(!fs.existsSync(path.join(ws, "goals", "TEST-G1-demo", "state.json")));
 
-  const out = awo(ws, ["task", "dispatch", "TEST-T1", "--timeout", "1"]);
+  const out = awo(ws, ["task", "dispatch", "TEST-T1", "--timeout", "1"], {
+    // Keep git available for task-run's worktree setup, but hide the locally
+    // installed Codex binary so this really exercises spawn failure.
+    env: { ...process.env, PATH: "/usr/bin:/bin" },
+  });
   assert.equal(out.code, 1, "a failed worker must be a non-zero exit");
   assert.match(out.stdout, /worker: {2}exited/);
   assert.match(out.stdout, /run closed as failed/);
