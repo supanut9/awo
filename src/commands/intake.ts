@@ -2,7 +2,7 @@ import fs from "fs-extra";
 import matter from "gray-matter";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
-import { invocationHint, resolveModel } from "../models.js";
+import { invocationHint, planModeApprovesInSession, resolveModel } from "../models.js";
 import { allocateRunId, writeDetail } from "../runs.js";
 
 /**
@@ -206,12 +206,17 @@ export interface RefineResult {
   briefRunId: string;
   model: string;
   invocation: string;
+  planMode: boolean;
+  /** False when the runtime cannot lift its sandbox on approval (codex, gemini). */
+  approvesInSession: boolean;
+  /** The follow-up command for a runtime that needs planning and writing split. */
+  executeInvocation: string | null;
 }
 
 /** Hand the requirement to the PM role to turn a wish into checkable criteria. */
 export async function runReqRefine(
   id: string,
-  options: { cwd?: string } = {}
+  options: { cwd?: string; plan?: boolean } = {}
 ): Promise<RefineResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const req = await readRequirement(root, id);
@@ -240,6 +245,15 @@ export async function runReqRefine(
     `That refuses to proceed if the criteria are missing or still placeholders.`,
     "",
     `Do NOT plan tasks, touch repos, or write code. Specification only.`,
+    ...(options.plan
+      ? [
+          "",
+          `You are in PLAN MODE: read the ask and whatever context you need, then`,
+          `present the criteria you intend to write and wait. Edit nothing until it is`,
+          `approved. Approval here is a permission in this session — it is NOT the`,
+          `human decision that \`awo req approve\` records, which still has to happen.`,
+        ]
+      : []),
   ].join("\n");
 
   const briefRunId = await allocateRunId(root, req.id);
@@ -254,9 +268,17 @@ export async function runReqRefine(
     id: req.id,
     briefRunId,
     model: `${model.runtime}:${model.model}${model.effort ? ` effort=${model.effort}` : ""}`,
+    planMode: Boolean(options.plan),
+    approvesInSession: planModeApprovesInSession(model.runtime),
     invocation: invocationHint(model, req.id, {
       cwd: ".",
+      planMode: options.plan,
       prompt: `$(awo log show ${briefRunId})`,
     }),
+    // Codex cannot lift `-s read-only` on approval, so executing is a second run.
+    executeInvocation:
+      options.plan && !planModeApprovesInSession(model.runtime)
+        ? invocationHint(model, req.id, { cwd: ".", prompt: `$(awo log show ${briefRunId})` })
+        : null,
   };
 }

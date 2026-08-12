@@ -31,7 +31,7 @@ import {
 } from "./commands/task.js";
 import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
-import { runGoalNew, runReqNew, runTaskNew } from "./commands/plan.js";
+import { runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
 import { runGoalTrace, runTaskEvidence } from "./commands/traceability.js";
 import {
   runPrFinalize,
@@ -42,13 +42,18 @@ import {
   runPrStatus,
 } from "./commands/pr.js";
 import { runSync, syncHadProblems } from "./commands/sync.js";
-import { doctorExitCode, runDoctor } from "./commands/doctor.js";
+import { doctorExitCode, groupFindings, runDoctor } from "./commands/doctor.js";
+import { listWorktrees, pruneWorktrees, unsafeReason } from "./worktrees.js";
+import { readManifest } from "./manifest.js";
+import { findAllTasks } from "./tasks.js";
+import { newTaskState, readState } from "./state.js";
 import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
 import { formatContext, runContext } from "./commands/context.js";
 import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
 import { credentialPath, runPublish, runPublishWatch } from "./commands/publish.js";
 import { runDispatch } from "./commands/dispatch.js";
+import { formatAgentOrg, runAgentOrg } from "./commands/agent-org.js";
 
 // dist/cli.js -> package root is one level up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -179,7 +184,7 @@ program
       if (opts.watch) {
         const first = await runPublish({});
         console.log(
-          `synced ${first.detail} · ${first.counts.requirements} requirements · ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs` +
+          `synced ${first.detail} · ${first.counts.requirements} requirements · ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs · ${first.counts.agents} agents` +
             `${first.uriHost ? ` -> ${first.uriHost}/${first.database}` : ""}`
         );
         console.log("watching for changes — Ctrl+C to stop.");
@@ -187,7 +192,7 @@ program
           onPublish: (r) => {
             const at = new Date().toLocaleTimeString();
             if (r instanceof Error) console.error(`${at}  sync failed: ${r.message}`);
-            else console.log(`${at}  synced ${r.counts.requirements} requirements · ${r.counts.tasks} tasks · ${r.counts.runs} runs`);
+            else console.log(`${at}  synced ${r.counts.requirements} requirements · ${r.counts.tasks} tasks · ${r.counts.runs} runs · ${r.counts.agents} agents`);
           },
         });
         const stop = async (): Promise<void> => {
@@ -204,9 +209,25 @@ program
           `${r.uriHost ? ` -> ${r.uriHost}/${r.database}` : ""}`
       );
       console.log(
-        `  ${r.detail} · requirements ${r.counts.requirements} · goals ${r.counts.goals} · tasks ${r.counts.tasks} · runs ${r.counts.runs}` +
+        `  ${r.detail} · requirements ${r.counts.requirements} · goals ${r.counts.goals} · tasks ${r.counts.tasks} · runs ${r.counts.runs} · agents ${r.counts.agents}` +
           `${r.counts.events > 0 ? ` · events ${r.counts.events}` : ""}`
       );
+      // Say what the redaction settings actually withheld. A privacy control whose
+      // effect is invisible is a privacy control nobody can tell is broken — and
+      // `redact.filePaths` was exactly that until 0.1.9.
+      if (r.detail === "full") {
+        const { workerLogs, outputTails, prompts } = r.redacted;
+        const withheld = [
+          workerLogs > 0 ? `${workerLogs} worker log(s)` : null,
+          outputTails > 0 ? `${outputTails} captured command output(s)` : null,
+          prompts > 0 ? `${prompts} prompt(s)` : null,
+        ].filter((part): part is string => part !== null);
+        console.log(
+          withheld.length > 0
+            ? `  withheld by redact settings: ${withheld.join(", ")}`
+            : `  redact settings withheld nothing — every prompt, path and captured output is being sent`
+        );
+      }
       if (r.detail === "summary") {
         console.log(
           `  bodies, run logs and event streams stay local. For the hosted dashboard to show them,\n` +
@@ -338,7 +359,8 @@ program
 program
   .command("doctor")
   .description("Diagnose the workspace: version skew, broken links, bad targets, abandoned runs.")
-  .action(async () => {
+  .option("--all", "list every instance instead of collapsing repeated findings")
+  .action(async (opts: { all?: boolean }) => {
     try {
       const findings = await runDoctor();
       if (findings.length === 0) {
@@ -346,14 +368,145 @@ program
         return;
       }
       const icon = { error: "✗", warn: "!", info: "·" } as const;
-      for (const f of findings) {
-        console.log(`${icon[f.severity]} [${f.area}] ${f.message}`);
-        if (f.fix) console.log(`    fix: ${f.fix}`);
+
+      // One systemic problem prints as one finding with a count. Unabridged, this
+      // page was 166 lines for the SHOP workspace, 74 of them the same sentence
+      // with a different task id — which reads as 74 problems when it is one.
+      const SAMPLES = 3;
+      for (const group of groupFindings(findings)) {
+        const shown = opts.all ? group.findings : group.findings.slice(0, SAMPLES);
+        for (const f of shown) {
+          console.log(`${icon[f.severity]} [${f.area}] ${f.message}`);
+          if (f.fix) console.log(`    fix: ${f.fix}`);
+        }
+        const hidden = group.findings.length - shown.length;
+        if (hidden > 0) {
+          console.log(
+            `${icon[group.severity]} [${group.findings[0].area}] …and ${hidden} more like this (${group.findings.length} in total)`
+          );
+          console.log(`    fix: same cause for all of them — \`awo doctor --all\` lists each one`);
+        }
       }
+
       const errors = findings.filter((f) => f.severity === "error").length;
       const warns = findings.filter((f) => f.severity === "warn").length;
       console.log(`\n${errors} error(s), ${warns} warning(s), ${findings.length - errors - warns} note(s).`);
       process.exitCode = doctorExitCode(findings);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+// ---- worktree ----
+// `awo` created worktrees from the day `task run` existed and never removed one:
+// the only mention of `git worktree remove` in the library was a line of prose in a
+// skill file asking an agent to do it by hand. Two weeks of real use left 2.0 GB of
+// checkouts for finished tasks. Removal has to be a command, not an instruction.
+/**
+ * Tasks in a terminal state, so pruning defaults to work that is provably over.
+ * Read from state rather than from the authored `status:`, which is only a
+ * starting point (§7.2).
+ */
+async function finishedTaskIds(root: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const { task, goal } of await findAllTasks(root)) {
+    const state = await readState(goal.dir, goal.id);
+    const status = (state.tasks[task.id] ?? newTaskState(task.authoredStatus)).status;
+    if (status === "done" || status === "cancelled") out.add(task.id);
+  }
+  return out;
+}
+
+const worktree = program
+  .command("worktree")
+  .description("Inspect and remove the task worktrees under repos/.worktrees/.");
+
+worktree
+  .command("list")
+  .description("Every checkout under repos/.worktrees/, with what it would cost to remove.")
+  .action(async () => {
+    try {
+      const root = findWorkspaceRoot(process.cwd());
+      const found = await listWorktrees(root, await readManifest(root), { withSizes: true });
+      if (found.length === 0) {
+        console.log("No task worktrees.");
+        return;
+      }
+      for (const w of found) {
+        const mb = Math.round(w.bytes / 1024 ** 2);
+        const reason = unsafeReason(w);
+        console.log(
+          `${w.path}\t${w.branch ?? "—"}\t${mb}MB\t${reason ? `KEEP — ${reason}` : "safe to remove"}`
+        );
+      }
+      const total = Math.round(found.reduce((a, w) => a + w.bytes, 0) / 1024 ** 2);
+      console.log(`\n${found.length} worktree(s), ${total}MB.`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+worktree
+  .command("prune")
+  .description(
+    "Remove worktrees for finished tasks. Keeps any that is dirty or holds commits no other branch has."
+  )
+  .option("--task <taskId...>", "prune only these tasks' worktrees")
+  .option("--all", "consider every worktree, not only those of finished tasks")
+  .option("--force", "remove even a dirty or unmerged worktree — this discards work")
+  .option("--dry-run", "show what would be removed without touching anything")
+  .action(async (opts: { task?: string[]; all?: boolean; force?: boolean; dryRun?: boolean }) => {
+    try {
+      const root = findWorkspaceRoot(process.cwd());
+      const manifest = await readManifest(root);
+      const finished = await finishedTaskIds(root);
+
+      const select = (w: { leaf: string }): boolean => {
+        if (opts.task) return opts.task.includes(w.leaf);
+        if (opts.all) return true;
+        // Default: only what is provably finished, plus baseline scratch trees,
+        // which hold no authored work by construction.
+        return w.leaf === ".baseline" || finished.has(w.leaf);
+      };
+
+      if (opts.dryRun) {
+        const candidates = (await listWorktrees(root, manifest, { withSizes: true })).filter(select);
+        if (candidates.length === 0) {
+          console.log("Nothing to prune.");
+          return;
+        }
+        for (const w of candidates) {
+          const reason = opts.force ? null : unsafeReason(w);
+          console.log(`${reason ? "keep  " : "remove"} ${w.path}${reason ? `  (${reason})` : ""}`);
+        }
+        console.log("\n(dry run — nothing was touched)");
+        return;
+      }
+
+      const results = await pruneWorktrees(root, manifest, { select, force: opts.force });
+      if (results.length === 0) {
+        console.log("Nothing to prune.");
+        return;
+      }
+      let freed = 0;
+      for (const r of results) {
+        if (r.removed) {
+          freed += r.worktree.bytes;
+          console.log(`removed ${r.worktree.path}`);
+        } else {
+          console.log(`kept    ${r.worktree.path}  (${r.keptBecause})`);
+        }
+      }
+      const removed = results.filter((r) => r.removed).length;
+      const kept = results.length - removed;
+      console.log(
+        `\n${removed} removed, ${Math.round(freed / 1024 ** 2)}MB freed` +
+          (kept > 0
+            ? `; ${kept} kept because they still hold work — inspect them, then \`--force\` if you truly want them gone.`
+            : ".")
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -422,15 +575,36 @@ req
 req
   .command("refine <reqId>")
   .description("Hand the requirement to the product-manager role to write acceptance criteria.")
-  .action(async (reqId: string) => {
+  .option("--plan", "propose the criteria for your approval before editing the requirement")
+  .action(async (reqId: string, opts: { plan?: boolean }) => {
     try {
-      const r = await runReqRefine(reqId);
+      const r = await runReqRefine(reqId, opts);
       console.log(`brief:   ${r.briefRunId}`);
       console.log(`model:   ${r.model}  (high tier — specification is judgment work)`);
       console.log("");
       console.log(r.invocation);
       console.log("");
+      if (r.planMode && r.approvesInSession) {
+        console.log(
+          `Plan mode: it proposes the criteria and waits. Approve, and the same session\n` +
+            `writes them into ${r.id}. Nothing is edited before that.`
+        );
+        console.log("");
+      }
+      if (r.planMode && r.executeInvocation) {
+        console.log(
+          `Plan mode: that runtime cannot write after you approve — its sandbox lasts the\n` +
+            `whole process. Read the proposal, then apply it with:\n  ${r.executeInvocation}`
+        );
+        console.log("");
+      }
       console.log(`Then it runs: awo req propose ${r.id}`);
+      if (r.planMode) {
+        console.log(
+          `Approving a plan is a session permission. The human decision is still\n` +
+            `  awo req approve ${r.id}`
+        );
+      }
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -605,7 +779,63 @@ goal
     try {
       const g = await runGoalNew(opts);
       console.log(`${g.id} created at ${g.dir}/ (from ${g.requirementId})`);
+      // Say it, so a reader knows the document's relative links still resolve.
+      if (g.movedAssets) console.log(`  brought ${g.movedAssets}/ along with it`);
       console.log(`Then add tasks: awo task new --goal ${g.id} --name "…" --targets <repo>`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("plan <goalId>")
+  .description(
+    "Assemble the tech-lead's task-decomposition brief and hand back a plan-mode invocation: the breakdown is proposed for your approval before any task file exists (§7.2)."
+  )
+  .option("--write", "skip the approval gate — let the planner create tasks directly")
+  .action(async (goalId: string, opts: { write?: boolean }) => {
+    try {
+      const r = await runGoalPlan(goalId, opts);
+      console.log(`brief:   awo log show ${r.briefRunId}`);
+      console.log(
+        `model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}  (high tier — decomposition is judgment work)`
+      );
+      console.log(`targets: ${r.targets.join(", ") || "none declared in the goal"}`);
+      if (r.existingTasks.length > 0) {
+        console.log(`exists:  ${r.existingTasks.join(", ")} — the planner is told not to recreate these`);
+      }
+      if (r.targetsWithoutTests.length > 0) {
+        console.log(
+          `\nNO TEST COMMAND: ${r.targetsWithoutTests.join(", ")}\n` +
+            `  A task there cannot satisfy tests-must-pass without an agent inventing one.\n` +
+            `  awo test-command <repo> "<cmd>"`
+        );
+      }
+
+      console.log(`\nplan with: ${r.invocation}`);
+      if (r.planMode && r.approvesInSession) {
+        console.log(
+          `\nPlan mode: it explores read-only, proposes the breakdown, and waits. Approve, and\n` +
+            `the same session creates the tasks with \`awo task new\`. Nothing is written before that.`
+        );
+      }
+      if (r.planMode && !r.approvesInSession && r.executeInvocation) {
+        // Being explicit rather than letting the user wait for a prompt that a
+        // process-lifetime sandbox will never show.
+        console.log(
+          `\nPlan mode: ${r.model.runtime} holds its read-only sandbox for the whole process, so it\n` +
+            `cannot write after you approve. Read the plan, then execute it with:\n` +
+            `  ${r.executeInvocation}`
+        );
+      }
+      if (!r.planMode) {
+        console.log(`\n--write: no approval gate. The planner creates tasks directly.`);
+      }
+      console.log(
+        `\nEvery task lands in \`todo\`. Approving a plan is a session permission, not the\n` +
+          `workspace's human gate — review the tasks before \`awo task run\`.`
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -718,6 +948,7 @@ task
   .option("--targets <repos>", "comma-separated repo names from the manifest", (v) => v.split(","))
   .option("--depends-on <taskIds>", "comma-separated task ids that must finish first", (v) => v.split(","))
   .option("--agent <agent>", "agent that should run it")
+  .option("--kind <kind>", "evidence contract: implementation, investigation, verification, decision, deployment-data")
   .option("--label <name...>", "PR labels for this task — applied only if the repo already has them")
   .action(
     async (opts: {
@@ -726,6 +957,7 @@ task
       targets?: string[];
       dependsOn?: string[];
       agent?: string;
+      kind?: "implementation" | "investigation" | "verification" | "decision" | "deployment-data";
       label?: string[];
     }) => {
     try {
@@ -1284,6 +1516,23 @@ for (const kind of ["agent", "skill"] as CatalogKind[]) {
         process.exitCode = 1;
       }
     });
+
+  if (kind === "agent") {
+    group
+      .command("org")
+      .description("Show installed agent reporting, delegation, review relationships, and task workload.")
+      .option("--json", "machine-readable organization graph")
+      .action(async (opts: { json?: boolean }) => {
+        try {
+          const result = await runAgentOrg();
+          console.log(opts.json ? JSON.stringify(result, null, 2) : formatAgentOrg(result));
+          if (result.errors.length > 0) process.exitCode = 1;
+        } catch (err) {
+          console.error((err as Error).message);
+          process.exitCode = 1;
+        }
+      });
+  }
 }
 
 program.parseAsync(process.argv);

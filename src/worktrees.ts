@@ -160,6 +160,345 @@ export async function ensureTaskWorktrees(
   return out;
 }
 
+/**
+ * A worktree awo's isolation directory holds right now, with everything needed to
+ * decide whether removing it would destroy work.
+ *
+ * Discovered from `git worktree list` rather than from state.json, for two reasons.
+ * State only ever knew about worktrees awo created — and the SHOP workspace had two
+ * (`ALMO-261`, `ALMO-265`) that agents made by hand while following the
+ * goal-branch flow. And `state.worktree` was initialised to `null` and never
+ * written, so it knew about none of them either.
+ */
+export interface ExistingWorktree {
+  repo: string;
+  /** Workspace-relative: repos/.worktrees/<repo>/<leaf>. */
+  path: string;
+  absPath: string;
+  /** The directory name under the repo — a task id for one awo created. */
+  leaf: string;
+  branch: string | null;
+  /** Uncommitted changes in the checkout. */
+  dirty: boolean;
+  /** Commits on this branch that no other branch contains. */
+  unmergedCommits: number;
+  /** Other refs that already contain this branch's tip. */
+  containedIn: string[];
+  /** False for a directory git has no record of — hand-made, or a failed `worktree add`. */
+  registered: boolean;
+  /**
+   * Set only for unregistered directories: whether the directory holds anything at
+   * all. Decided by one `readdir` rather than by `bytes`, which may be unmeasured.
+   */
+  empty?: boolean;
+  /**
+   * Apparent size, and 0 unless the caller asked for sizes.
+   *
+   * Opt-in because measuring it means walking every file in every checkout, and the
+   * SHOP workspace holds 1.5 GB of them: computing it unconditionally took `doctor`
+   * from 0.27s to 5.7s. A command that runs at the start of every session cannot pay
+   * for a number only `worktree list` prints.
+   */
+  bytes: number;
+}
+
+/** Removing this destroys nothing: it is clean, and its commits live elsewhere. */
+export function isSafeToRemove(worktree: ExistingWorktree): boolean {
+  // A directory git has no record of cannot be reasoned about — nothing says where
+  // its commits went, or whether it has any. Empty, it is obviously safe; otherwise
+  // it is reported and kept until a person looks at it.
+  if (!worktree.registered) return worktree.empty === true;
+  return !worktree.dirty && (worktree.unmergedCommits === 0 || worktree.containedIn.length > 0);
+}
+
+/** Why removing this would lose something, or null when it would not. */
+export function unsafeReason(worktree: ExistingWorktree): string | null {
+  if (isSafeToRemove(worktree)) return null;
+  if (!worktree.registered) return "git has no record of it, so its work cannot be accounted for";
+  if (worktree.dirty) return "uncommitted changes in the checkout";
+  return `${worktree.unmergedCommits} commit(s) no other branch contains`;
+}
+
+function worktreeRoot(workspaceRoot: string): string {
+  return path.join(workspaceRoot, "repos", ".worktrees");
+}
+
+/** Recursive apparent size, skipping symlinks so linked node_modules is not counted twice. */
+async function directoryBytes(dir: string): Promise<number> {
+  let total = 0;
+  const walk = async (at: string): Promise<void> => {
+    for (const entry of await fs.readdir(at, { withFileTypes: true }).catch(() => [])) {
+      const full = path.join(at, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) await walk(full);
+      else total += (await fs.stat(full).catch(() => null))?.size ?? 0;
+    }
+  };
+  await walk(dir);
+  return total;
+}
+
+/**
+ * Every checkout under `repos/.worktrees/`, whoever made it.
+ *
+ * `awo` created worktrees and never removed one: there is no `git worktree remove`
+ * anywhere in the library, only a line of prose in the `create-task-worktree` skill
+ * asking an agent to do it. Two weeks of real use left 2.0 GB of checkouts for
+ * tasks that were all `done` (§9 — SHOP workspace). This is what a prune command,
+ * and a doctor check, need to see.
+ */
+export async function listWorktrees(
+  workspaceRoot: string,
+  manifest: Manifest,
+  options: { withSizes?: boolean } = {}
+): Promise<ExistingWorktree[]> {
+  const root = worktreeRoot(workspaceRoot);
+  if (!(await fs.pathExists(root))) return [];
+
+  const sizeOf = async (dir: string): Promise<number> =>
+    options.withSizes ? directoryBytes(dir) : 0;
+  const out: ExistingWorktree[] = [];
+
+  // Concurrently, across repos and across each repo's worktrees. Answering "is this
+  // safe to remove?" costs three git invocations per checkout, and doing 20 of them
+  // in sequence took `doctor` from 0.27s to 1.7s — for a command whose whole job is
+  // to be the cheap thing you run before anything else.
+  const perRepo = await Promise.all(
+    manifest.repos.map(async (entry): Promise<ExistingWorktree[]> => {
+      const repoPath =
+        entry.type === "local" ? entry.path : path.join(workspaceRoot, "repos", entry.name);
+      const git = simpleGit(repoPath);
+      if (!(await git.checkIsRepo().catch(() => false))) return [];
+
+      const registered = (await registeredWorktrees(git)).filter(
+        // Only ours. A developer's own worktree elsewhere on disk is none of our
+        // business, and removing it would be a surprise a tool never earns back.
+        ({ worktreePath }) => worktreePath.startsWith(root + path.sep)
+      );
+
+      return Promise.all(
+        registered.map(async ({ worktreePath, branch }) => {
+          const [status, safety, bytes] = await Promise.all([
+            simpleGit(worktreePath).status().catch(() => null),
+            commitSafety(git, worktreePath, branch),
+            sizeOf(worktreePath),
+          ]);
+          return {
+            repo: entry.name,
+            path: path.relative(workspaceRoot, worktreePath),
+            absPath: worktreePath,
+            leaf: path.basename(worktreePath),
+            branch,
+            dirty: (status?.files.length ?? 0) > 0,
+            unmergedCommits: safety.unmergedCommits,
+            containedIn: safety.containedIn,
+            registered: true,
+            bytes,
+          };
+        })
+      );
+    })
+  );
+  out.push(...perRepo.flat());
+
+  // Directories under repos/.worktrees/<repo>/ that git has no record of.
+  //
+  // Discovering through `git worktree list` alone misses these, and the SHOP
+  // workspace had three: `ALMO-261`, 532KB of a hand-made checkout, and two empty
+  // `SHOP-T42` directories left by a `worktree add` that failed. They occupy the
+  // path awo wants to reuse, so they have to be visible.
+  for (const entry of manifest.repos) {
+    const dir = path.join(root, entry.name);
+    for (const leaf of await fs.readdir(dir).catch(() => [])) {
+      const abs = path.join(dir, leaf);
+      if (!(await fs.stat(abs).catch(() => null))?.isDirectory()) continue;
+      if (out.some((w) => w.absPath === abs)) continue;
+
+      const empty = (await fs.readdir(abs).catch(() => [])).length === 0;
+      const git = simpleGit(abs);
+      const isRepo = await git.checkIsRepo().catch(() => false);
+      const branch = isRepo
+        ? (await git.revparse(["--abbrev-ref", "HEAD"]).catch(() => "")).trim() || null
+        : null;
+
+      out.push({
+        repo: entry.name,
+        path: path.relative(workspaceRoot, abs),
+        absPath: abs,
+        leaf,
+        branch,
+        dirty: isRepo ? ((await git.status().catch(() => null))?.files.length ?? 0) > 0 : false,
+        unmergedCommits: 0,
+        containedIn: [],
+        registered: false,
+        empty,
+        bytes: await sizeOf(abs),
+      });
+    }
+  }
+
+  // `.baseline/<repo>` scratch checkouts, created by `task event --baseline` to
+  // measure a pre-change test run. They hold no authored work by construction, so
+  // they are always safe — but they are never cleaned up either.
+  for (const name of await fs.readdir(path.join(root, ".baseline")).catch(() => [])) {
+    const abs = path.join(root, ".baseline", name);
+    if (!(await fs.stat(abs).catch(() => null))?.isDirectory()) continue;
+    if (out.some((w) => w.absPath === abs)) continue;
+    out.push({
+      repo: name,
+      path: path.relative(workspaceRoot, abs),
+      absPath: abs,
+      leaf: ".baseline",
+      branch: null,
+      dirty: false,
+      unmergedCommits: 0,
+      containedIn: [],
+      registered: true,
+      bytes: await sizeOf(abs),
+    });
+  }
+
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/** `git worktree list --porcelain`, minus the main checkout. */
+async function registeredWorktrees(
+  git: ReturnType<typeof simpleGit>
+): Promise<{ worktreePath: string; branch: string | null }[]> {
+  const raw = await git.raw(["worktree", "list", "--porcelain"]).catch(() => "");
+  const out: { worktreePath: string; branch: string | null }[] = [];
+  let current: string | null = null;
+  let branch: string | null = null;
+  const flush = (): void => {
+    if (current) out.push({ worktreePath: current, branch });
+    current = null;
+    branch = null;
+  };
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      current = line.slice("worktree ".length).trim();
+    } else if (line.startsWith("branch refs/heads/")) {
+      branch = line.slice("branch refs/heads/".length).trim();
+    }
+  }
+  flush();
+  return out;
+}
+
+/**
+ * How much work would be lost. A branch whose tip another ref already contains has
+ * been merged somewhere — which under `goal-feature-branch` is the delivery branch,
+ * not main, so "merged into the default branch" is the wrong question to ask.
+ */
+async function commitSafety(
+  git: ReturnType<typeof simpleGit>,
+  worktreePath: string,
+  branch: string | null
+): Promise<{ unmergedCommits: number; containedIn: string[] }> {
+  if (!branch) return { unmergedCommits: 0, containedIn: [] };
+
+  const head = (await simpleGit(worktreePath).revparse(["HEAD"]).catch(() => "")).trim();
+  if (!head) return { unmergedCommits: 0, containedIn: [] };
+
+  const [containedRaw, uniqueRaw] = await Promise.all([
+    git.raw(["branch", "--contains", head]).catch(() => ""),
+    // `--exclude` patterns are matched against the ref name with `refs/heads/`
+    // already stripped, because `--branches` is what expands them. Passing the full
+    // `refs/heads/<branch>` excludes nothing, the branch counts as reaching its own
+    // tip, and every worktree reports 0 unmerged commits — which is the answer that
+    // makes a prune destructive.
+    git
+      .raw(["rev-list", "--count", head, "--not", `--exclude=${branch}`, "--branches"])
+      .catch(() => "0"),
+  ]);
+
+  const containedIn = containedRaw
+    .split("\n")
+    .map((l) => l.replace(/^[*+]?\s*/, "").trim())
+    .filter((l) => l !== "" && l !== branch && !l.startsWith("(") && !l.includes("detached"));
+
+  // Commits unique to this branch, measured against every other local branch — the
+  // same question `git log --not --branches` answers, scoped to this tip.
+  return { unmergedCommits: Number.parseInt(uniqueRaw.trim(), 10) || 0, containedIn };
+}
+
+export interface PrunedWorktree {
+  worktree: ExistingWorktree;
+  removed: boolean;
+  /** Why it was kept, when it was. */
+  keptBecause: string | null;
+}
+
+/**
+ * Remove the worktrees a caller nominates, refusing any that still holds work.
+ *
+ * Not part of `task complete` on purpose. Under `goal-feature-branch` a task's
+ * commits are merged into the repository's delivery branch *after* the task
+ * verifies, so deleting the checkout at completion would throw away commits that
+ * nothing else has yet. Pruning is therefore explicit, and safe by default.
+ */
+export async function pruneWorktrees(
+  workspaceRoot: string,
+  manifest: Manifest,
+  options: { select: (worktree: ExistingWorktree) => boolean; force?: boolean }
+): Promise<PrunedWorktree[]> {
+  const results: PrunedWorktree[] = [];
+
+  for (const worktree of await listWorktrees(workspaceRoot, manifest)) {
+    if (!options.select(worktree)) continue;
+
+    if (!options.force && !isSafeToRemove(worktree)) {
+      results.push({
+        worktree,
+        removed: false,
+        keptBecause: unsafeReason(worktree),
+      });
+      continue;
+    }
+
+    const entry = manifest.repos.find((r) => r.name === worktree.repo);
+    const repoPath =
+      entry && entry.type === "local"
+        ? entry.path
+        : path.join(workspaceRoot, "repos", worktree.repo);
+
+    // `git worktree remove` so the repo's administrative record goes too. A plain
+    // rm leaves a registration pointing at nothing, and git then refuses to reuse
+    // the path until someone runs `worktree prune` by hand.
+    const removed = await simpleGit(repoPath)
+      .raw(["worktree", "remove", ...(options.force ? ["--force"] : []), worktree.absPath])
+      .then(() => true)
+      .catch(() => false);
+
+    if (removed) {
+      results.push({ worktree, removed: true, keptBecause: null });
+      continue;
+    }
+
+    // Never registered with git (a hand-made directory, or `.baseline/`), so there
+    // is nothing to deregister and the directory is the whole of it.
+    const gone = await fs
+      .remove(worktree.absPath)
+      .then(() => true)
+      .catch(() => false);
+    results.push({
+      worktree,
+      removed: gone,
+      keptBecause: gone ? null : "git refused to remove it and the directory could not be deleted",
+    });
+  }
+
+  // Drop stale administrative records left by anything removed outside git.
+  for (const entry of manifest.repos) {
+    const repoPath =
+      entry.type === "local" ? entry.path : path.join(workspaceRoot, "repos", entry.name);
+    await simpleGit(repoPath).raw(["worktree", "prune"]).catch(() => undefined);
+  }
+
+  return results;
+}
+
 /** The worktree path currently holding `branch`, if any. */
 async function worktreeForBranch(
   git: ReturnType<typeof simpleGit>,

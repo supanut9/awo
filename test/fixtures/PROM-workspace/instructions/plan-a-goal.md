@@ -10,6 +10,15 @@ summary: Plan a goal
 Sequence for `awo goal plan PROM-G#`, owned by `tech-lead` (preceded by
 **capture-requirement**, owned by `product-manager`):
 
+0. Run `awo goal plan PROM-G#`. It assembles the brief — objective,
+   definition-of-done, the requirement's criteria, repos in scope, tasks that
+   already exist, installed roles — and hands you a **plan-mode** invocation.
+   Plan mode means the breakdown is proposed for a human to approve *before* any
+   task file exists: explore read-only, present the plan, wait. On approval the
+   same session does steps 1-5 below. `--write` skips the gate.
+   Approving a plan is a permission in that session; it is **not** the
+   workspace's human gate (rule: `human-approval-required`), which still applies
+   to every task before `awo task run`.
 1. Read the goal's objective, definition-of-done, and scope/constraints.
 2. Identify the repos in scope (must be a subset of the goal's `targets`).
 3. Draft tasks, each with a single clear objective, its own `targets`, and

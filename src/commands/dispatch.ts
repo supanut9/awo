@@ -71,6 +71,29 @@ export async function runDispatch(
     };
   }
 
+  // Refuse plan mode before opening a run, not after.
+  //
+  // A spawned worker has no human to approve its plan and no stdin to be asked on
+  // (that is closed deliberately — see runWorker). It would print a plan, wait, and
+  // be killed by the timeout with the run still open. The failure mode is 45 minutes
+  // of nothing, so this is an error with the two real options named.
+  {
+    const { runTaskShow } = await import("./task.js");
+    const shown = await runTaskShow(taskId, { cwd: root });
+    const { resolveModel } = await import("../models.js");
+    const resolved = await resolveModel(root, shown.task.agent, shown.task.tier);
+    if (resolved.mode === "plan") {
+      throw new Error(
+        `${taskId} resolves to ${resolved.runtime}:${resolved.model} in plan mode, which cannot be dispatched.\n` +
+          `  Plan mode waits for a human to approve the plan, and a spawned worker has nobody to ask —\n` +
+          `  it would print a plan and sit there until the timeout killed it, run still open.\n` +
+          `  Either run it yourself, interactively:  awo task run ${taskId}\n` +
+          `  or drop \`mode: plan\` from ${shown.task.agent ?? "the role"} in the models policy for dispatched work.\n` +
+          `  (Plan mode belongs on the planning steps — \`awo goal plan\`, \`awo req refine --plan\`.)`
+      );
+    }
+  }
+
   const opened: TaskRunResult = await runTaskRun(taskId, {
     cwd: root,
     instruction: options.instruction,

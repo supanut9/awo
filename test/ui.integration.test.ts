@@ -47,6 +47,44 @@ test("publish projects intake requirements without needing MongoDB for a dry run
   assert.match(output, /would publish workspace/);
 });
 
+/**
+ * `redact.filePaths` used to read `cfg.redact.filePaths ? x : x` — both branches the
+ * same expression — so the setting did nothing, and no output ever said so. It now
+ * withholds the fields that carry paths mechanically, and reports what it withheld.
+ */
+test("full publish honors redact.filePaths, and says what it withheld", (t) => {
+  const ws = makeWorkspace();
+  t.after(() => fs.rmSync(ws, { recursive: true, force: true }));
+
+  const manifestFile = path.join(ws, ".workspace", "manifest.json");
+  const setPublish = (redact: { prompts: boolean; filePaths: boolean }): void => {
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
+    manifest.publish = { detail: "full", redact };
+    fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+  };
+
+  // A run carrying captured command output — the field that holds file paths and
+  // stack traces whether or not anyone chose to include them.
+  awo(ws, ["task", "run", "UI-T1", "--no-worktree"]);
+  awo(ws, ["task", "event", "UI-T1", "test", "--repo", "api", "--run", "node -e \"process.exit(1)\""]);
+  awo(ws, ["task", "complete", "UI-T1", "--outcome", "failed"]);
+
+  setPublish({ prompts: true, filePaths: true });
+  const redactedOut = execFileSync(process.execPath, [CLI, "publish", "--dry-run"], {
+    cwd: ws,
+    encoding: "utf8",
+  });
+  assert.match(redactedOut, /withheld by redact settings:.*captured command output/);
+
+  setPublish({ prompts: false, filePaths: false });
+  const openOut = execFileSync(process.execPath, [CLI, "publish", "--dry-run"], {
+    cwd: ws,
+    encoding: "utf8",
+  });
+  // Turning it off has to be visible too, or "off" is indistinguishable from "broken".
+  assert.match(openOut, /redact settings withheld nothing/);
+});
+
 interface UiHandle {
   url: string;
   port: number;

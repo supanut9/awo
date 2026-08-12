@@ -10,6 +10,8 @@ export interface TaskDefinition {
   targets: string[];
   dependsOn: string[];
   agent: string | null;
+  /** Evidence contracts differ for code, investigation, QA, and human decisions. */
+  kind: TaskKind;
   /** Frontmatter `status:` is the AUTHORED starting state only (§7.2). */
   authoredStatus: TaskStatus;
   /**
@@ -28,11 +30,26 @@ export interface TaskDefinition {
   body: string;
 }
 
+export const TASK_KINDS = [
+  "implementation",
+  "investigation",
+  "verification",
+  "decision",
+  "deployment-data",
+] as const;
+export type TaskKind = (typeof TASK_KINDS)[number];
+
+export interface CompletionPolicy {
+  qaRequired: boolean;
+  acceptanceEvidenceRequired: boolean;
+}
+
 export interface GoalDefinition {
   id: string;
   title: string;
   dir: string;
   taskIds: string[];
+  completionPolicy: CompletionPolicy;
 }
 
 /**
@@ -91,12 +108,21 @@ export async function readTaskFile(file: string): Promise<TaskDefinition> {
     targets: asArray(fm.targets),
     dependsOn: asArray(fm.dependsOn),
     agent: typeof fm.agent === "string" ? fm.agent : null,
+    kind: TASK_KINDS.includes(fm.kind as TaskKind) ? (fm.kind as TaskKind) : "implementation",
     authoredStatus: authored as TaskStatus,
     tier:
       fm.tier === "high" || fm.tier === "standard" || fm.tier === "low" ? fm.tier : null,
     labels: asArray(fm.labels),
     file,
     body: parsed.content.trim(),
+  };
+}
+
+function completionPolicy(value: unknown): CompletionPolicy {
+  const policy = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    qaRequired: policy.qaRequired === true,
+    acceptanceEvidenceRequired: policy.acceptanceEvidenceRequired === true,
   };
 }
 
@@ -114,6 +140,7 @@ export async function findGoals(workspaceRoot: string): Promise<GoalDefinition[]
       title: typeof fm.title === "string" ? fm.title : id,
       dir,
       taskIds: tasks.map((t) => t.id),
+      completionPolicy: completionPolicy(fm.completionPolicy),
     });
   }
   return goals;

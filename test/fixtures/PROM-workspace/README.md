@@ -33,6 +33,7 @@ next, so you don't spend tokens scanning the tree.
 | `awo list` / `awo doctor` | Repo status / diagnose drift and unfinished work. |
 | `awo req new --title "…"` → `req refine` → `req propose` → `req approve` | Intake: capture and human-approve `PROM-R#`. |
 | `awo goal new --from PROM-R#` | Distil an approved requirement into a goal. |
+| `awo goal plan PROM-G#` | Brief the tech-lead to decompose it — in plan mode, so you approve the breakdown before any task exists. |
 | `awo task new --goal PROM-G# --name "…" --targets <repo>` | Add a task; allocates `PROM-T#`. |
 | `awo task run PROM-T#` | Open a run: creates the worktree, prints the model to use. |
 | `awo task event PROM-T# test --data '{"repo":"…","pass":42}'` | Record what ran. |
@@ -45,6 +46,7 @@ next, so you don't spend tokens scanning the tree.
 | `awo pr reconcile PROM-T#` | Refresh checks/reviews and create repair tasks for new review threads. |
 | `awo pr finalize PROM-T#` | Apply `pullRequests.mergePolicy`; never approves a PR. |
 | `awo log list [--tier low] [--status failed]` | Run history. |
+| `awo worktree list` / `awo worktree prune` | Task checkouts on disk / remove the finished ones. |
 | `awo ui` | Local dashboard on 127.0.0.1. |
 
 ## Two rules worth knowing before you start

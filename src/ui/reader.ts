@@ -2,8 +2,9 @@ import path from "path";
 import { readManifest } from "../manifest.js";
 import { runList, type RepoStatusEntry } from "../commands/list.js";
 import { findGoals, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
-import { newTaskState, readState, type GoalStatus, type TaskStatus } from "../state.js";
+import { newTaskState, readState, reconcileGoalState, type GoalStatus, type TaskStatus } from "../state.js";
 import { readDetail, readEvents, readIndex, type RunEvent, type RunIndexEntry } from "../runs.js";
+import { runAgentOrg } from "../commands/agent-org.js";
 import { findCriteria, listRequirements, REQ_STATUSES, type Requirement, type ReqStatus } from "../commands/intake.js";
 import fs from "fs-extra";
 import matter from "gray-matter";
@@ -29,6 +30,7 @@ export interface TaskView {
   blockedReason: string | null;
   targets: string[];
   agent: string | null;
+  kind: string;
 }
 
 export interface GoalView {
@@ -36,6 +38,16 @@ export interface GoalView {
   title: string;
   status: GoalStatus;
   tasks: TaskView[];
+}
+
+export interface AgentView {
+  id: string;
+  tier: string | null;
+  reportsTo: string | null;
+  delegatesTo: string[];
+  reviews: string[];
+  taskCount: number;
+  openTasks: number;
 }
 
 /** A requirement stays visible whether it is still in intake or has moved under a goal. */
@@ -83,6 +95,7 @@ export interface Snapshot {
   project: ProjectSummary;
   requirements: RequirementView[];
   goals: GoalView[];
+  agents: AgentView[];
   repos: RepoStatusEntry[];
   runs: RunIndexEntry[];
   stats: Stats;
@@ -106,6 +119,7 @@ export interface WorkspaceReader {
   runDetail(runId: string): Promise<string>;
   requirements(): Promise<RequirementView[]>;
   goals(): Promise<GoalView[]>;
+  agents(): Promise<AgentView[]>;
   repos(): Promise<RepoStatusEntry[]>;
   runs(): Promise<RunIndexEntry[]>;
   runEvents(runId: string): Promise<RunEvent[]>;
@@ -126,6 +140,7 @@ function toView(task: TaskDefinition, state: ReturnType<typeof newTaskState>): T
     blockedReason: state.blockedReason,
     targets: task.targets,
     agent: task.agent,
+    kind: task.kind,
   };
 }
 
@@ -203,8 +218,8 @@ export class FileReader implements WorkspaceReader {
   async goals(): Promise<GoalView[]> {
     const out: GoalView[] = [];
     for (const goal of await findGoals(this.root)) {
-      const state = await readState(goal.dir, goal.id);
       const tasks = await findTasksInGoal(goal.dir);
+      const state = reconcileGoalState(await readState(goal.dir, goal.id), tasks).state;
       out.push({
         id: goal.id,
         title: goal.title,
@@ -215,10 +230,18 @@ export class FileReader implements WorkspaceReader {
     return out;
   }
 
+  async agents(): Promise<AgentView[]> {
+    const result = await runAgentOrg({ cwd: this.root });
+    return result.agents.map(({ id, tier, reportsTo, delegatesTo, reviews, taskCount, openTasks }) => ({
+      id, tier, reportsTo, delegatesTo, reviews, taskCount, openTasks,
+    }));
+  }
+
   /** A task's definition plus its state — the drill-down the board links to. */
   async task(taskId: string): Promise<TaskDetailView> {
     const { task, goal } = await locateTask(this.root, taskId);
-    const state = await readState(goal.dir, goal.id);
+    const tasks = await findTasksInGoal(goal.dir);
+    const state = reconcileGoalState(await readState(goal.dir, goal.id), tasks).state;
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
     return {
       ...toView(task, ts),
@@ -260,12 +283,13 @@ export class FileReader implements WorkspaceReader {
   }
 
   async snapshot(): Promise<Snapshot> {
-    const [project, requirements, goals, repos, runs] = await Promise.all([
+    const [project, requirements, goals, repos, runs, agents] = await Promise.all([
       this.project(),
       this.requirements(),
       this.goals(),
       this.repos(),
       this.runs(),
+      this.agents(),
     ]);
 
     const tasks = goals.flatMap((g) => g.tasks);
@@ -309,6 +333,7 @@ export class FileReader implements WorkspaceReader {
       project,
       requirements,
       goals,
+      agents,
       repos,
       runs,
       stats: {

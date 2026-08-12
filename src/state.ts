@@ -107,6 +107,7 @@ export type GoalStatus =
   | "qa-review"
   | "blocked"
   | "done"
+  | "inconsistent"
   | "cancelled";
 
 export interface GoalState {
@@ -117,6 +118,18 @@ export interface GoalState {
   tasks: Record<string, TaskState>;
   /** 1-based acceptance-criterion index -> evidence gathered for the criterion. */
   criteria?: Record<string, CriterionEvidence[]>;
+}
+
+/** The authored task files are the inventory; state.json supplies their runtime state. */
+export interface AuthoredTaskState {
+  id: string;
+  authoredStatus: TaskStatus;
+}
+
+export interface GoalStateReconciliation {
+  state: GoalState;
+  missingTaskIds: string[];
+  orphanedTaskIds: string[];
 }
 
 export function newTaskState(status: TaskStatus = "todo"): TaskState {
@@ -171,6 +184,46 @@ export function rollupGoalStatus(tasks: Record<string, TaskState>): GoalStatus {
   return "planning";
 }
 
+/**
+ * Overlay mutable state on the task files without silently writing a repair.
+ * Readers must never announce `done` while authored work is absent from state.
+ */
+export function reconcileGoalState(
+  state: GoalState,
+  authoredTasks: AuthoredTaskState[]
+): GoalStateReconciliation {
+  const next: GoalState = JSON.parse(JSON.stringify(state));
+  const authored = new Set(authoredTasks.map((task) => task.id));
+  const missingTaskIds = authoredTasks
+    .filter((task) => !next.tasks[task.id])
+    .map((task) => task.id);
+  const orphanedTaskIds = Object.keys(next.tasks).filter((id) => !authored.has(id));
+
+  for (const task of authoredTasks) {
+    next.tasks[task.id] ??= newTaskState(task.authoredStatus);
+  }
+  // A missing state entry is, on its own, equivalent to `todo` — not a
+  // contradiction. A task authored and never run has no entry, which is the initial
+  // condition of every goal, so treating that alone as `inconsistent` made a freshly
+  // planned goal report as broken. Filling it in above is what protects the rollup:
+  // the goal sees a `todo` and cannot reach `done` while authored work is absent,
+  // which was the real defect (the old rollup read only the subset present in state).
+  //
+  // `inconsistent` is for a genuine contradiction, where no status can be derived
+  // that is both correct and consistent with what is stored:
+  //
+  //  - state describes a task whose file no longer exists; or
+  //  - the STORED status claims the work is over while authored tasks have no entry
+  //    at all. That is the reading that let SHOP-G1 report `done`, and a reader must
+  //    be conservative about it rather than quietly recomputing something tidier.
+  const claimsFinished = next.goalStatus === "done" || next.goalStatus === "qa-review";
+  next.goalStatus =
+    orphanedTaskIds.length > 0 || (missingTaskIds.length > 0 && claimsFinished)
+      ? "inconsistent"
+      : rollupGoalStatus(next.tasks);
+  return { state: next, missingTaskIds, orphanedTaskIds };
+}
+
 function statePath(goalDir: string): string {
   return path.join(goalDir, "state.json");
 }
@@ -203,10 +256,20 @@ export async function mutateState(
   const next: GoalState = JSON.parse(JSON.stringify(before));
   mutate(next);
 
-  next.goalId = goalId;
-  next.goalStatus = rollupGoalStatus(next.tasks);
-  next.rev = before.rev + 1;
-  next.updatedAt = new Date().toISOString();
+  // Import lazily to avoid a runtime cycle: tasks.ts needs TASK_STATUSES above.
+  // A write is an appropriate time to persist a newly authored task into state.
+  const { findTasksInGoal } = await import("./tasks.js");
+  const authored = await findTasksInGoal(goalDir);
+  const reconciled = reconcileGoalState(next, authored);
+
+  const persisted = reconciled.state;
+  // A mutation is an explicit repair point. Removed task files must not keep
+  // contributing a phantom status after the next legitimate state transition.
+  for (const id of reconciled.orphanedTaskIds) delete persisted.tasks[id];
+  persisted.goalId = goalId;
+  persisted.goalStatus = rollupGoalStatus(persisted.tasks);
+  persisted.rev = before.rev + 1;
+  persisted.updatedAt = new Date().toISOString();
 
   const file = statePath(goalDir);
   const current = await readState(goalDir, goalId);
@@ -221,7 +284,7 @@ export async function mutateState(
 
   await fs.ensureDir(goalDir);
   const tmp = `${file}.tmp`;
-  await fs.writeJson(tmp, next, { spaces: 2 });
+  await fs.writeJson(tmp, persisted, { spaces: 2 });
   await fs.rename(tmp, file);
-  return next;
+  return persisted;
 }

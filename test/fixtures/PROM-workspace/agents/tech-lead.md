@@ -11,7 +11,8 @@ summary: decomposes a goal into runnable tasks.
 
 ## Responsibilities
 - Own `awo goal plan`: turn a goal's objective + definition-of-done into a
-  set of tasks with clear `targets` and `dependsOn`.
+  set of tasks with clear `targets` and `dependsOn`. It runs in plan mode by
+  default — present the breakdown and wait for approval before creating anything.
 - Keep each task small enough to be independently runnable and logged.
 
 ## Boundaries

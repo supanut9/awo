@@ -20,13 +20,27 @@ right after `sync-repos`, before touching any files.
    `git -C repos/<repo-name> worktree add ../.worktrees/<repo-name>/<taskId> feature/<taskId>-<slug>`
 3. All implementation, commits, and pushes for this task happen **inside
    that worktree path** — never in `repos/<repo-name>` directly.
-4. After the task's PR merges (or the task is abandoned), remove the
-   worktree: `git -C repos/<repo-name> worktree remove <path>` and prune.
 
 ## Done when
 - The task has its own worktree + branch, isolated from every other task
   currently active on the same repo.
 
 ## Cleanup
-Stale worktrees (merged or abandoned tasks) should be pruned periodically —
-consider surfacing this in `awo doctor`.
+Do **not** remove a worktree by hand. `awo` owns this:
+
+```sh
+awo worktree list          # every checkout, and what removing it would cost
+awo worktree prune         # remove finished tasks' checkouts
+```
+
+`prune` only considers tasks that are `done` or `cancelled`, and it refuses any
+checkout that is dirty or holds commits no other branch contains — which under
+`goal-feature-branch` is the normal state of a task whose work has not yet been
+merged into its repository's delivery branch. `awo doctor` reports the ones
+waiting.
+
+This step used to read "remove the worktree: `git … worktree remove <path>` and
+prune". Nothing enforced it, and two weeks of real use left 20 checkouts and
+1.5 GB on disk — including 15 commits that no other branch held, which a
+remove-on-completion rule would have destroyed. An instruction is not a
+lifecycle.

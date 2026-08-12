@@ -47,6 +47,7 @@ function Card({
       <div className="mt-1 text-xs font-semibold leading-snug text-ink">{task.name}</div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-ink/55">
         {task.agent && <span className="rounded bg-wash px-1.5 py-0.5">{task.agent}</span>}
+        <span className="rounded bg-wash px-1.5 py-0.5">{task.kind}</span>
         {task.targets.length > 0 && <span className="truncate font-mono">{task.targets.join(", ")}</span>}
         {task.lastRunOutcome && (
           <span className={`rounded-full border px-1.5 py-0.5 font-semibold ${OUTCOME[task.lastRunOutcome] ?? ""}`}>

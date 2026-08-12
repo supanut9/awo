@@ -3,7 +3,14 @@ import path from "path";
 import matter from "gray-matter";
 import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest } from "../manifest.js";
-import { findGoals, findAllTasks } from "../tasks.js";
+import { findGoals, findAllTasks, TASK_KINDS, type TaskKind } from "../tasks.js";
+import {
+  invocationHint,
+  planModeApprovesInSession,
+  resolveModel,
+  type ResolvedModel,
+} from "../models.js";
+import { allocateRunId, writeDetail } from "../runs.js";
 
 
 /**
@@ -118,6 +125,8 @@ export interface GoalNewResult {
   id: string;
   dir: string;
   requirementId: string;
+  /** The asset directory carried in with the requirement, if it had one. */
+  movedAssets: string | null;
 }
 
 export async function runGoalNew(options: {
@@ -174,6 +183,21 @@ export async function runGoalNew(options: {
   await fs.writeFile(path.join(dir, "requirement.md"), matter.stringify(parsed.content, fm));
   await fs.remove(reqFile);
 
+  // A requirement and the files it links are one artifact, so the sibling asset
+  // directory moves with it.
+  //
+  // It did not, and the document's relative links then resolved to nothing:
+  // SHOP-R2 lost all nine of its Figma exports on 2026-08-03, they were moved by
+  // hand, and the workspace grew a shell script and a required rule to stop it
+  // happening again. That is a lot of process for a directory rename.
+  const assets = path.join(root, "requirements", `${options.from}-assets`);
+  const movedAssets = (await fs.pathExists(assets))
+    ? await fs
+        .move(assets, path.join(dir, `${options.from}-assets`), { overwrite: false })
+        .then(() => true)
+        .catch(() => false)
+    : false;
+
   await fs.writeFile(
     path.join(dir, "goal.md"),
     matter.stringify(
@@ -201,7 +225,237 @@ _Short rationale for how this goal splits into its tasks._
     )
   );
 
-  return { id, dir: path.relative(root, dir), requirementId: options.from };
+  return {
+    id,
+    dir: path.relative(root, dir),
+    requirementId: options.from,
+    movedAssets: movedAssets ? `${options.from}-assets` : null,
+  };
+}
+
+export interface GoalPlanResult {
+  goalId: string;
+  briefRunId: string;
+  model: ResolvedModel;
+  invocation: string;
+  /** How to execute after approval, when the runtime cannot lift its own sandbox. */
+  executeInvocation: string | null;
+  planMode: boolean;
+  approvesInSession: boolean;
+  existingTasks: string[];
+  targets: string[];
+  /** Repos in `targets` with no declared test command — a planning blocker. */
+  targetsWithoutTests: string[];
+}
+
+/**
+ * §7.2 — the tech-lead's decomposition step, in plan mode by default.
+ *
+ * `instructions/plan-a-goal.md` and `agents/tech-lead.md` have both said "own `awo
+ * goal plan`" since the template shipped, and the command did not exist: planning
+ * was freehand `awo task new` calls with nothing between the goal and 39 task files.
+ * SHOP-G1 is what that looks like — the first opportunity to disagree with the shape
+ * of the work arrived after every file had been written.
+ *
+ * So this command does not create tasks. It assembles what a planner needs, records
+ * the brief, and hands back an invocation that is read-only until a human approves
+ * the breakdown. On approval the same session runs `awo task new` per task, which
+ * keeps ID allocation and the goal's `taskIds` where they belong — with the CLI.
+ */
+export async function runGoalPlan(
+  goalId: string,
+  options: { cwd?: string; write?: boolean } = {}
+): Promise<GoalPlanResult> {
+  const root = findWorkspaceRoot(options.cwd ?? process.cwd());
+  const manifest = await readManifest(root);
+
+  const goals = await findGoals(root);
+  const goal = goals.find((g) => g.id === goalId);
+  if (!goal) {
+    throw new Error(
+      goals.length > 0
+        ? `Unknown goal "${goalId}". Known goals: ${goals.map((g) => g.id).join(", ")}.`
+        : `Unknown goal "${goalId}". Create one with \`awo goal new --from <req-id>\`.`
+    );
+  }
+
+  const goalBody = await fs.readFile(path.join(goal.dir, "goal.md"), "utf8");
+  const reqFile = path.join(goal.dir, "requirement.md");
+  const reqBody = (await fs.pathExists(reqFile)) ? await fs.readFile(reqFile, "utf8") : "";
+
+  const { findTasksInGoal } = await import("../tasks.js");
+  const existing = await findTasksInGoal(goal.dir);
+
+  const fm = matter(goalBody).data as Record<string, unknown>;
+  const targets = (Array.isArray(fm.targets) ? fm.targets : []).map(String);
+  const declared = new Map(manifest.repos.map((r) => [r.name, r]));
+  const unknownTargets = targets.filter((t) => !declared.has(t));
+  if (unknownTargets.length > 0) {
+    throw new Error(
+      `${goal.id} targets repos that are not linked: ${unknownTargets.join(", ")}. ` +
+        `Link them with \`awo connect\`/\`awo add\`, or fix \`targets:\` in ${path.relative(root, path.join(goal.dir, "goal.md"))}.`
+    );
+  }
+  // Named before planning rather than discovered during it: a task whose repo cannot
+  // state how it verifies itself is a task whose agent will invent a command, and an
+  // agent choosing the verification is the same failure as an agent asserting the result.
+  const targetsWithoutTests = targets.filter((t) => !declared.get(t)?.testCommand);
+
+  // Decomposition is judgment, so it runs at the high tier whatever the tasks will use.
+  const model = await resolveModel(root, "tech-lead", "high");
+  const planMode = !options.write;
+
+  const availableAgents = await installedAgents(root);
+  const brief = buildPlanBrief({
+    goalId: goal.id,
+    goalBody,
+    reqBody,
+    existing: existing.map((t) => `${t.id} — ${t.name} (${t.authoredStatus})`),
+    targets,
+    targetsWithoutTests,
+    availableAgents,
+    planMode,
+  });
+
+  const briefRunId = await allocateRunId(root, goal.id);
+  await writeDetail(
+    root,
+    briefRunId,
+    {
+      kind: "plan-brief",
+      goal: goal.id,
+      model: `${model.runtime}:${model.model}`,
+      mode: planMode ? "plan" : "write",
+      existingTasks: existing.length,
+    },
+    { interpreted: `Task decomposition brief for ${goal.id}`, summary: brief }
+  );
+
+  const context = { cwd: ".", prompt: `$(awo log show ${briefRunId})` };
+  const approvesInSession = planModeApprovesInSession(model.runtime);
+
+  return {
+    goalId: goal.id,
+    briefRunId,
+    model,
+    invocation: invocationHint(model, goal.id, { ...context, planMode }),
+    // Codex holds `-s read-only` for the life of the process, so approval cannot be
+    // followed by writes in the same run. Hand over the second command explicitly
+    // instead of leaving the user waiting for a prompt that will never appear.
+    executeInvocation:
+      planMode && !approvesInSession ? invocationHint(model, goal.id, context) : null,
+    planMode,
+    approvesInSession,
+    existingTasks: existing.map((t) => t.id),
+    targets,
+    targetsWithoutTests,
+  };
+}
+
+/** Roles that are installed, so a planner assigns work to one that exists. */
+async function installedAgents(root: string): Promise<string[]> {
+  return (await fs.readdir(path.join(root, "agents")).catch(() => []))
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => f.replace(/\.md$/, ""))
+    .sort();
+}
+
+function buildPlanBrief(input: {
+  goalId: string;
+  goalBody: string;
+  reqBody: string;
+  existing: string[];
+  targets: string[];
+  targetsWithoutTests: string[];
+  availableAgents: string[];
+  planMode: boolean;
+}): string {
+  const lines = [
+    `You are the tech-lead planning ${input.goalId} into tasks.`,
+    "",
+    input.planMode
+      ? `You are in PLAN MODE. Explore and read whatever you need, then present the\n` +
+        `proposed task breakdown for approval. Create NOTHING until it is approved.\n` +
+        `Once it is, execute the plan yourself with the \`awo task new\` calls below.`
+      : `You are in WRITE MODE — no approval gate. Create the tasks directly.`,
+    "",
+    `## The goal`,
+    input.goalBody.trim(),
+    "",
+  ];
+
+  if (input.reqBody.trim()) {
+    lines.push(
+      `## The requirement it came from`,
+      `Every acceptance criterion below must be covered by at least one task, or`,
+      `named as out of scope with a reason.`,
+      "",
+      input.reqBody.trim(),
+      ""
+    );
+  }
+
+  if (input.existing.length > 0) {
+    lines.push(
+      `## Tasks that already exist`,
+      `Do NOT recreate these. Say plainly whether each still fits the plan:`,
+      ...input.existing.map((t) => `- ${t}`),
+      ""
+    );
+  }
+
+  lines.push(
+    `## Repos in scope`,
+    input.targets.length > 0
+      ? input.targets.map((t) => `- ${t}`).join("\n")
+      : `- none declared in the goal's \`targets:\` — fix that before planning`,
+    ""
+  );
+
+  if (input.targetsWithoutTests.length > 0) {
+    lines.push(
+      `**These repos cannot say how they verify themselves:** ${input.targetsWithoutTests.join(", ")}.`,
+      `A task there cannot satisfy \`tests-must-pass\` without an agent inventing a`,
+      `command. Declare it first:  awo test-command <repo> "<cmd>"`,
+      ""
+    );
+  }
+
+  lines.push(
+    `## What to produce`,
+    `A task per unit of work that one agent can finish and verify on its own. For each:`,
+    `- **name** — the outcome, not the activity.`,
+    `- **targets** — a subset of the goal's targets. A repo you only mention in prose`,
+    `  gets no worktree, so the work has nowhere to happen.`,
+    `- **dependsOn** — real ordering only. A dependent task branches from its`,
+    `  dependency's work, so a missing edge silently breaks the chain.`,
+    `- **agent** — one of: ${input.availableAgents.join(", ") || "none installed"}.`,
+    `  \`awo agent list\` shows what is still in the catalog; schema and data-model`,
+    `  work belongs to \`data-engineer\`, not \`software-engineer\`.`,
+    `- **kind** — implementation, investigation, verification, decision, or`,
+    `  deployment-data. Evidence requirements follow from it.`,
+    `- **tier: high** on a task whose work needs judgment even though its role`,
+    `  normally runs low (e.g. "define the data model").`,
+    "",
+    `Create each one with:`,
+    `  awo task new --goal ${input.goalId} --name "…" --targets <repo> [--depends-on <id>] [--agent <role>] [--kind <kind>]`,
+    `It allocates the id, places the file, validates targets, and wires the goal's`,
+    `taskIds. Do NOT hand-author task files or invent ids — the command owns both.`,
+    `Then fill in each file's Objective / Steps / Done when.`,
+    "",
+    `Leave every task in \`todo\`. Planning does not start work.`,
+    "",
+    `## Boundaries`,
+    `- Do not touch repos, write code, or open a PR.`,
+    `- Do not mark the goal or any task as anything other than \`todo\`.`,
+    input.planMode
+      ? `- Approving this plan is a permission in THIS session. It is not the`
+        + ` workspace's\n  human-approval gate: the tasks you create still await human`
+        + ` review before\n  \`awo task run\` (rule: human-approval-required).`
+      : `- The tasks you create await human review before \`awo task run\`.`,
+  );
+
+  return lines.join("\n");
 }
 
 export interface TaskNewResult {
@@ -216,6 +470,7 @@ export async function runTaskNew(options: {
   targets?: string[];
   dependsOn?: string[];
   agent?: string;
+  kind?: TaskKind;
   /** PR labels for this task. Applied only if the repo already has them (§18). */
   labels?: string[];
   /** Used by control-plane commands that create a task from external feedback. */
@@ -224,6 +479,10 @@ export async function runTaskNew(options: {
 }): Promise<TaskNewResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const manifest = await readManifest(root);
+
+  if (options.kind && !TASK_KINDS.includes(options.kind)) {
+    throw new Error(`Unknown task kind "${options.kind}". Valid: ${TASK_KINDS.join(", ")}.`);
+  }
 
   const goals = await findGoals(root);
   const goal = goals.find((g) => g.id === options.goal);
@@ -272,6 +531,7 @@ _What "done" means for this unit._
         targets: options.targets ?? [],
         dependsOn: options.dependsOn ?? [],
         ...(options.agent ? { agent: options.agent } : {}),
+        kind: options.kind ?? "implementation",
         status: "todo",
       }
     )

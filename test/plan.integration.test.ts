@@ -581,3 +581,191 @@ test("awo run plans in dependency order and never owns the verdict", () => {
   assert.match(bad.stderr, /not a task of PL-G1/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+/**
+ * SHOP-R2 lost all nine of its Figma exports when `goal new` moved the document and
+ * left its assets behind, and the workspace grew a shell script plus a required rule
+ * to compensate. The directory has to travel with the document that links it.
+ */
+test("goal new carries the requirement's asset directory with it", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Needs a screenshot"]);
+  approveRequirement(ws, "PL-R1");
+
+  // A requirement that links a sibling asset directory, as intake produces.
+  const assets = path.join(ws, "requirements", "PL-R1-assets");
+  fs.mkdirSync(assets, { recursive: true });
+  fs.writeFileSync(path.join(assets, "mock.png"), "not really a png");
+  const reqFile = path.join(ws, "requirements", "PL-R1.md");
+  fs.writeFileSync(
+    reqFile,
+    `${fs.readFileSync(reqFile, "utf8")}\n![the mock](./PL-R1-assets/mock.png)\n`
+  );
+
+  const out = awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /brought PL-R1-assets\/ along with it/);
+
+  const moved = path.join(ws, "goals", "PL-G1", "PL-R1-assets", "mock.png");
+  assert.ok(fs.existsSync(moved), "the asset must move into the goal folder");
+  assert.ok(
+    !fs.existsSync(assets),
+    "and must not be left behind in requirements/, or there are two copies"
+  );
+
+  // The point of moving it: the relative link in the moved document resolves.
+  const doc = fs.readFileSync(path.join(ws, "goals", "PL-G1", "requirement.md"), "utf8");
+  const link = /!\[[^\]]*\]\(\.\/([^)]+)\)/.exec(doc);
+  assert.ok(link, "the moved document still carries its relative link");
+  assert.ok(
+    fs.existsSync(path.join(ws, "goals", "PL-G1", link[1])),
+    `the link ./${link?.[1]} must resolve after the move`
+  );
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("goal new is unaffected when the requirement has no assets", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Plain requirement"]);
+  approveRequirement(ws, "PL-R1");
+
+  const out = awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.doesNotMatch(out.stdout, /along with it/);
+  assert.ok(fs.existsSync(path.join(ws, "goals", "PL-G1", "requirement.md")));
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+/**
+ * `awo goal plan` is the tech-lead's step. Both `instructions/plan-a-goal.md` and
+ * `agents/tech-lead.md` claimed to own it since the template shipped, and it did not
+ * exist — planning was freehand `awo task new` calls, which is how SHOP-G1 arrived at
+ * 39 task files with no point at which anyone could disagree with the shape.
+ */
+test("goal plan briefs the tech-lead in plan mode, and creates nothing", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "A thing worth planning"]);
+  approveRequirement(ws, "PL-R1");
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+
+  const out = awo(ws, ["goal", "plan", "PL-G1"]);
+  assert.equal(out.code, 0, out.stderr);
+
+  // Plan mode is the whole point: read-only until a human approves.
+  assert.match(out.stdout, /--permission-mode plan/);
+  assert.match(out.stdout, /high tier — decomposition is judgment work/);
+  assert.match(out.stdout, /proposes the breakdown, and waits/);
+
+  // The two approvals must not be conflated — one is a session permission, the
+  // other is the workspace's gate before any task runs.
+  assert.match(out.stdout, /session permission, not the\s+workspace's human gate/);
+
+  // It briefs a planner; it does not plan. No task may exist yet.
+  assert.deepEqual(fs.readdirSync(path.join(ws, "goals", "PL-G1", "tasks")), []);
+
+  // The brief is a real run record, addressable like every other one.
+  const briefRunId = /awo log show (\S+)/.exec(out.stdout)?.[1];
+  assert.ok(briefRunId, "the brief must be addressable");
+  const brief = awo(ws, ["log", "show", briefRunId!]);
+  assert.match(brief.stdout, /You are the tech-lead planning PL-G1 into tasks/);
+  assert.match(brief.stdout, /You are in PLAN MODE/);
+  assert.match(brief.stdout, /awo task new --goal PL-G1/);
+  // The planner must not hand-author files or invent ids — the CLI owns both.
+  assert.match(brief.stdout, /Do NOT hand-author task files or invent ids/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("goal plan --write drops the approval gate, and says so", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Planned without a gate"]);
+  approveRequirement(ws, "PL-R1");
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+
+  const out = awo(ws, ["goal", "plan", "PL-G1", "--write"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.doesNotMatch(out.stdout, /--permission-mode plan/);
+  assert.match(out.stdout, /no approval gate/);
+
+  const briefRunId = /awo log show (\S+)/.exec(out.stdout)?.[1];
+  assert.match(awo(ws, ["log", "show", briefRunId!]).stdout, /You are in WRITE MODE/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("goal plan tells the planner what already exists and what cannot be verified", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Partly planned already"]);
+  approveRequirement(ws, "PL-R1");
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Already here", "--targets", "api"]);
+
+  // The goal's targets drive the brief, so declare one.
+  const goalFile = path.join(ws, "goals", "PL-G1", "goal.md");
+  fs.writeFileSync(goalFile, fs.readFileSync(goalFile, "utf8").replace("targets: []", "targets: [api]"));
+
+  const out = awo(ws, ["goal", "plan", "PL-G1"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /exists:\s+PL-T1/);
+  // `api` has no testCommand, so tests-must-pass is unsatisfiable there. Named at
+  // planning time rather than discovered by an agent inventing a command.
+  assert.match(out.stdout, /NO TEST COMMAND: api/);
+
+  const briefRunId = /awo log show (\S+)/.exec(out.stdout)?.[1];
+  const brief = awo(ws, ["log", "show", briefRunId!]);
+  assert.match(brief.stdout, /Do NOT recreate these/);
+  assert.match(brief.stdout, /PL-T1 — Already here \(todo\)/);
+  assert.match(brief.stdout, /cannot say how they verify themselves/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("goal plan refuses a goal whose targets are not linked, and an unknown goal", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Bad targets"]);
+  approveRequirement(ws, "PL-R1");
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+
+  const goalFile = path.join(ws, "goals", "PL-G1", "goal.md");
+  fs.writeFileSync(goalFile, fs.readFileSync(goalFile, "utf8").replace("targets: []", "targets: [ghost]"));
+
+  const bad = awo(ws, ["goal", "plan", "PL-G1"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /targets repos that are not linked: ghost/);
+
+  const missing = awo(ws, ["goal", "plan", "PL-G9"]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /Unknown goal "PL-G9"/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("req refine --plan proposes criteria for approval instead of editing in place", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Refine me carefully"]);
+
+  const plain = awo(ws, ["req", "refine", "PL-R1"]);
+  assert.equal(plain.code, 0, plain.stderr);
+  assert.doesNotMatch(plain.stdout, /--permission-mode plan/);
+
+  const planned = awo(ws, ["req", "refine", "PL-R1", "--plan"]);
+  assert.equal(planned.code, 0, planned.stderr);
+  assert.match(planned.stdout, /--permission-mode plan/);
+  assert.match(planned.stdout, /Nothing is edited before that/);
+  // The session approval must not read as the human decision the workflow needs.
+  assert.match(planned.stdout, /The human decision is still\s+awo req approve PL-R1/);
+
+  const briefRunId = /brief:\s+(\S+)/.exec(planned.stdout)?.[1];
+  const brief = awo(ws, ["log", "show", briefRunId!]);
+  assert.match(brief.stdout, /You are in PLAN MODE/);
+  assert.match(brief.stdout, /Edit nothing until it is\napproved/);
+
+  // Refining is a briefing step either way: the requirement is untouched and still
+  // a draft until an agent actually runs and proposes it.
+  const req = fs.readFileSync(path.join(ws, "requirements", "PL-R1.md"), "utf8");
+  assert.match(req, /^status: draft$/m);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});

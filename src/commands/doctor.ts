@@ -5,8 +5,10 @@ import { fileURLToPath } from "url";
 import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest } from "../manifest.js";
 import { findGoals, findAllTasks } from "../tasks.js";
-import { newTaskState, readState } from "../state.js";
+import { newTaskState, readState, reconcileGoalState } from "../state.js";
 import { readEvents } from "../runs.js";
+import { listWorktrees, unsafeReason } from "../worktrees.js";
+import { runAgentOrg } from "./agent-org.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -17,6 +19,49 @@ export interface Finding {
   area: "version" | "repos" | "tasks" | "goals" | "runs" | "workspace";
   message: string;
   fix?: string;
+  /**
+   * Findings sharing a group are one systemic problem, and the printer collapses
+   * them (§11.4).
+   *
+   * Two weeks of real use turned `doctor` into 166 lines, 78 warnings, of which 74
+   * were the same sentence about a different task id. A page nobody reads to the end
+   * diagnoses nothing, and "every single task is affected" is a different fact from
+   * "this task is affected" — it should read as one finding with a count.
+   */
+  group?: string;
+}
+
+/** One systemic problem: its first few instances, and how many there were. */
+export interface FindingGroup {
+  key: string;
+  severity: Severity;
+  findings: Finding[];
+}
+
+/**
+ * Collapse findings into groups, preserving the order each group first appeared.
+ * An ungrouped finding is its own group, so nothing is ever silently merged.
+ */
+export function groupFindings(findings: Finding[]): FindingGroup[] {
+  const groups: FindingGroup[] = [];
+  const index = new Map<string, FindingGroup>();
+
+  for (const [at, finding] of findings.entries()) {
+    const key = finding.group ?? `${finding.area}:${at}`;
+    const existing = index.get(key);
+    if (existing) {
+      existing.findings.push(finding);
+      // A group is as severe as its worst member.
+      if (finding.severity === "error") existing.severity = "error";
+      else if (finding.severity === "warn" && existing.severity === "info") existing.severity = "warn";
+      continue;
+    }
+    const group: FindingGroup = { key, severity: finding.severity, findings: [finding] };
+    index.set(key, group);
+    groups.push(group);
+  }
+
+  return groups;
 }
 
 /**
@@ -32,6 +77,15 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
   };
 
   const manifest = await readManifest(root);
+  const organization = await runAgentOrg({ cwd: root });
+  for (const message of organization.errors) {
+    add({
+      severity: "error",
+      area: "workspace",
+      message: `agent organization: ${message}`,
+      fix: "fix reportsTo, delegatesTo, or reviews in agents/<role>.md",
+    });
+  }
 
   // ---- unresolved upgrade conflicts (§11.2) ----
   // `upgrade` writes `<file>.new` beside a file you edited rather than overwriting
@@ -61,6 +115,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
         area: "repos",
         message: `${repo.name} has no testCommand, so agents must invent one per run`,
         fix: `awo test-command ${repo.name} "<how this repo runs its tests>"`,
+        group: "repos:no-test-command",
       });
     }
   }
@@ -81,6 +136,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           area: "workspace",
           message: `rule "${id}" exists but AGENTS.md never mentions it, so agents will not apply it`,
           fix: `add a line for it under "## Always-on rules" in AGENTS.md`,
+          group: "workspace:rule-unmentioned",
         });
       }
     }
@@ -106,7 +162,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
       severity: "info",
       area: "version",
       message: `workspace is at ${manifest.libraryVersion}, installed awo is ${installed}`,
-      fix: "`awo upgrade` (not built yet) — harmless while no scaffolding has changed",
+      fix: "`awo upgrade` — it runs the migrations between those versions and reconciles scaffolding",
     });
   }
   if (!manifest.workspaceId) {
@@ -211,6 +267,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           area: "runs",
           message: `${task.id} is ${ts.status} but its run recorded no commit or diff`,
           fix: "confirm the work exists; a run that changed nothing should not be a success",
+          group: "runs:no-commit-or-diff",
         });
       }
       if (!events.some((e) => e.kind === "test")) {
@@ -223,6 +280,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           // none — it costs the reader the time to find that out.
           fix:
             `rule tests-must-pass — verify it for real: \`awo task recheck ${task.id} --run "<cmd>" --baseline\``,
+          group: "runs:no-test-evidence",
         });
       }
     }
@@ -235,6 +293,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           area: "runs",
           message: `${task.id}: run ${ts.lastRunId} was opened but never closed`,
           fix: `\`awo task complete ${task.id} --outcome failed\`, or move it back with \`awo task status ${task.id} todo\``,
+          group: "runs:never-closed",
         });
       }
     }
@@ -245,6 +304,31 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
     const fm = matter(await fs.readFile(goalFile, "utf8")).data as Record<string, unknown>;
     const declared = new Set((Array.isArray(fm.taskIds) ? fm.taskIds : []).map(String));
     const actual = new Set(goal.taskIds);
+    const rawState = await readState(goal.dir, goal.id);
+    const reconciliation = reconcileGoalState(rawState, await (await import("../tasks.js")).findTasksInGoal(goal.dir));
+
+    // Missing state for a task that has never run is normal, not a finding — every
+    // freshly planned goal is in that state. What is corruption is a goal whose
+    // STORED status claims the work is over while authored tasks are absent from
+    // state entirely: that is the reading that let SHOP-G1 report done, and no
+    // reader should trust it.
+    const claimsFinished = rawState.goalStatus === "done" || rawState.goalStatus === "qa-review";
+    if (reconciliation.missingTaskIds.length > 0 && claimsFinished) {
+      add({
+        severity: "error",
+        area: "goals",
+        message: `${goal.id}: state.json says "${rawState.goalStatus}" but is missing authored task(s): ${reconciliation.missingTaskIds.join(", ")} — that status is not trustworthy`,
+        fix: `those tasks are counted as todo on read; run a task transition to persist the correction`,
+      });
+    }
+    if (reconciliation.orphanedTaskIds.length > 0) {
+      add({
+        severity: "warn",
+        area: "goals",
+        message: `${goal.id}: state.json contains deleted task(s): ${reconciliation.orphanedTaskIds.join(", ")}`,
+        fix: "review the deleted tasks, then run a task transition to persist reconciliation",
+      });
+    }
 
     for (const id of actual) {
       if (!declared.has(id)) {
@@ -253,6 +337,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           area: "goals",
           message: `${goal.id}: task ${id} exists but is not in the goal's taskIds`,
           fix: `add it to \`taskIds:\` in ${path.relative(root, goalFile)}`,
+          group: "goals:task-not-in-taskids",
         });
       }
     }
@@ -263,6 +348,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           area: "goals",
           message: `${goal.id}: taskIds lists ${id}, but no such task file exists`,
           fix: `remove it from \`taskIds:\` in ${path.relative(root, goalFile)}`,
+          group: "goals:taskid-without-file",
         });
       }
     }
@@ -276,8 +362,42 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           area: "goals",
           message: `${goal.id}: state.json tracks ${id}, which has no task file`,
           fix: "harmless, but it will linger until state.json is edited or the task returns",
+          group: "goals:state-without-file",
         });
       }
+    }
+  }
+
+  // ---- worktrees for work that is finished ----
+  // `awo` created these and never removed one. In the SHOP workspace that left 2.0 GB
+  // of checkouts for tasks that were all `done`, plus two an agent made by hand and
+  // seven `.baseline/` scratch trees. Reported, never removed: `worktree prune` is the
+  // command that removes things, and it refuses any checkout still holding work.
+  const terminal = new Set<string>();
+  for (const { task, goal } of located) {
+    const state = await readState(goal.dir, goal.id);
+    const status = (state.tasks[task.id] ?? newTaskState(task.authoredStatus)).status;
+    if (status === "done" || status === "cancelled") terminal.add(task.id);
+  }
+
+  // Without sizes: measuring them walks every file in every checkout, which took
+  // this command from 0.27s to 5.7s on a workspace holding 1.5 GB of them.
+  // `awo worktree list` is where the number belongs.
+  const worktrees = await listWorktrees(root, manifest).catch(() => []);
+  const stale = worktrees.filter((w) => w.leaf === ".baseline" || terminal.has(w.leaf));
+  if (stale.length > 0) {
+    for (const worktree of stale) {
+      add({
+        severity: "info",
+        area: "workspace",
+        message:
+          worktree.leaf === ".baseline"
+            ? `${worktree.path} is a leftover baseline checkout for ${worktree.repo}`
+            : `${worktree.path} is still checked out, but ${worktree.leaf} is finished` +
+              (unsafeReason(worktree) ? ` — and ${unsafeReason(worktree)}` : ""),
+        fix: `${stale.length} stale worktree(s) — \`awo worktree list\` for their size, \`awo worktree prune\` to remove them (it keeps any that still holds work)`,
+        group: "workspace:stale-worktree",
+      });
     }
   }
 

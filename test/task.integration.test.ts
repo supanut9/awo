@@ -71,6 +71,13 @@ function readState(ws: string): {
   );
 }
 
+/** The same file, untyped, for assertions about fields the helper above omits. */
+function readStateFull(ws: string): {
+  tasks: Record<string, Record<string, unknown>>;
+} {
+  return JSON.parse(fs.readFileSync(path.join(ws, "goals", "TEST-G1-demo", "state.json"), "utf8"));
+}
+
 /** logs/<date>/ holds exactly two files, plus workers/ when one was dispatched. */
 function dayFile(ws: string, runId: string, file: string): string {
   return path.join(ws, "logs", runId.slice(0, 10), file);
@@ -266,7 +273,11 @@ test("--gate routes a success to in-review, and verify closes the QA gate", () =
   awo(ws, ["task", "run", "TEST-T1"]);
   awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--gate"]);
   assert.equal(readState(ws).tasks["TEST-T1"].status, "in-review");
-  assert.equal(readState(ws).goalStatus, "qa-review");
+  // `in-progress`, not `qa-review`: TEST-T2 is authored and has never run, so the
+  // goal is not in QA. This assertion used to read `qa-review` because the rollup
+  // saw only the tasks present in state.json — the subset that had run — which is
+  // how a goal could report further along than it was.
+  assert.equal(readState(ws).goalStatus, "in-progress");
 
   const rejected = awo(ws, ["task", "verify", "TEST-T1", "--reject", "--reason", "missing case"]);
   assert.equal(rejected.code, 0, rejected.stderr);
@@ -611,6 +622,49 @@ test("agent add installs from the catalog and refuses unknown or duplicate names
   assert.match(awo(ws, ["task", "run", "TEST-T4", "--no-worktree"]).stdout, /data-engineer — high tier/);
 
   assert.match(awo(ws, ["skill", "list"]).stdout, /available: .*write-migration/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("agent org reports relationships, workload, and invalid references", () => {
+  const ws = makeWorkspace();
+  const agentsDir = path.join(ws, "agents");
+  fs.writeFileSync(
+    path.join(agentsDir, "tech-lead.md"),
+    "---\ntier: high\n---\n\nLead.\n"
+  );
+  fs.writeFileSync(
+    path.join(agentsDir, "software-engineer.md"),
+    "---\nreportsTo: tech-lead\ndelegatesTo: [missing-role]\nreviews: [tech-lead]\n---\n\nBuild.\n"
+  );
+
+  const graph = awo(ws, ["agent", "org", "--json"]);
+  assert.equal(graph.code, 1);
+  const parsed = JSON.parse(graph.stdout) as { roots: string[]; errors: string[]; agents: { id: string; reportsTo: string | null }[] };
+  assert.ok(parsed.roots.includes("tech-lead"));
+  assert.match(parsed.errors.join("\n"), /unknown agent/);
+  assert.equal(parsed.agents.find((agent) => agent.id === "software-engineer")?.reportsTo, "tech-lead");
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("context treats authored tasks missing from state as inconsistent", () => {
+  const ws = makeWorkspace();
+  const stateFile = path.join(ws, "goals", "TEST-G1-demo", "state.json");
+  fs.writeFileSync(
+    stateFile,
+    JSON.stringify({
+      rev: 1,
+      goalId: "TEST-G1",
+      goalStatus: "done",
+      updatedAt: new Date().toISOString(),
+      tasks: { "TEST-T1": { status: "done", lastRunOutcome: "success", lastRunId: null, startedAt: null, finishedAt: null, attempts: 1, worktree: null, blockedReason: null } },
+    })
+  );
+  const context = awo(ws, ["context"]);
+  assert.equal(context.code, 0);
+  assert.match(context.stdout, /TEST-G1 inconsistent/);
+  const doctor = awo(ws, ["doctor"]);
+  assert.equal(doctor.code, 1);
+  assert.match(`${doctor.stdout}\n${doctor.stderr}`, /missing authored task/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -1058,4 +1112,213 @@ test("what the worker was told is recorded at run-open, not left to be remembere
   assert.match(record, /### User prompt\n+You are software-engineer/);
   assert.ok(!/### User prompt\n_not recorded_/.test(record));
   fs.rmSync(path.dirname(ws), { recursive: true, force: true });
+});
+
+/** A workspace whose linked repo is a real git repo, so worktrees can be created. */
+function makeGitWorkspace(): { ws: string; repoPath: string } {
+  const ws = makeWorkspace();
+  const repoPath = JSON.parse(
+    fs.readFileSync(path.join(ws, ".workspace", "manifest.json"), "utf8")
+  ).repos[0].path as string;
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repoPath });
+  execFileSync("git", ["add", "-A"], { cwd: repoPath });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], {
+    cwd: repoPath,
+  });
+  return { ws, repoPath };
+}
+
+/** Close TEST-T1 as done without needing real test evidence. */
+function closeAsDone(ws: string): void {
+  awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "not the point here"]);
+}
+
+test("task run records where it put the worker, instead of claiming no worktree", () => {
+  const { ws, repoPath } = makeGitWorkspace();
+  awo(ws, ["task", "run", "TEST-T1"]);
+
+  // `state.worktree` was initialised to null and never written, so every task
+  // claimed no checkout while the directories piled up on disk.
+  assert.equal(
+    readStateFull(ws).tasks["TEST-T1"].worktree,
+    path.join("repos", ".worktrees", "api", "TEST-T1")
+  );
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("worktree list reports every checkout and whether removing it loses work", () => {
+  const { ws, repoPath } = makeGitWorkspace();
+  awo(ws, ["task", "run", "TEST-T1"]);
+
+  const clean = awo(ws, ["worktree", "list"]);
+  assert.equal(clean.code, 0, clean.stderr);
+  assert.match(clean.stdout, /repos\/\.worktrees\/api\/TEST-T1/);
+  assert.match(clean.stdout, /feature\/TEST-T1/);
+  assert.match(clean.stdout, /safe to remove/);
+
+  // An uncommitted edit must flip it, or prune would silently discard the edit.
+  fs.writeFileSync(path.join(ws, "repos", ".worktrees", "api", "TEST-T1", "scratch.txt"), "wip\n");
+  assert.match(awo(ws, ["worktree", "list"]).stdout, /KEEP — uncommitted changes in the checkout/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("worktree prune removes finished tasks' checkouts and deregisters them from git", () => {
+  const { ws, repoPath } = makeGitWorkspace();
+  awo(ws, ["task", "run", "TEST-T1"]);
+  const wt = path.join(ws, "repos", ".worktrees", "api", "TEST-T1");
+  assert.ok(fs.existsSync(wt));
+
+  // A running task is not finished, so the default selection leaves it alone.
+  assert.match(awo(ws, ["worktree", "prune"]).stdout, /Nothing to prune/);
+  assert.ok(fs.existsSync(wt), "a running task's worktree must survive a prune");
+
+  closeAsDone(ws);
+  const dry = awo(ws, ["worktree", "prune", "--dry-run"]);
+  assert.match(dry.stdout, /remove repos\/\.worktrees\/api\/TEST-T1/);
+  assert.match(dry.stdout, /nothing was touched/);
+  assert.ok(fs.existsSync(wt), "--dry-run must not remove anything");
+
+  const out = awo(ws, ["worktree", "prune"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /removed repos\/\.worktrees\/api\/TEST-T1/);
+  assert.ok(!fs.existsSync(wt), "the directory must be gone");
+
+  // `git worktree remove`, not a plain rm: a stale registration makes git refuse
+  // to reuse the path until someone prunes it by hand.
+  assert.doesNotMatch(
+    execFileSync("git", ["worktree", "list"], { cwd: repoPath, encoding: "utf8" }),
+    /TEST-T1/,
+    "git must no longer know about it"
+  );
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("worktree prune keeps a checkout that still holds work, and says why", () => {
+  const { ws, repoPath } = makeGitWorkspace();
+  awo(ws, ["task", "run", "TEST-T1"]);
+  const wt = path.join(ws, "repos", ".worktrees", "api", "TEST-T1");
+  closeAsDone(ws);
+
+  // A commit no other branch contains. Under `goal-feature-branch` a task's commits
+  // are merged into the delivery branch AFTER the task closes, so a prune at
+  // completion time would have thrown this away.
+  fs.writeFileSync(path.join(wt, "feature.txt"), "real work\n");
+  execFileSync("git", ["add", "-A"], { cwd: wt });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "feat"], {
+    cwd: wt,
+  });
+
+  const out = awo(ws, ["worktree", "prune"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /kept .*TEST-T1.*commit\(s\) no other branch contains/);
+  assert.match(out.stdout, /1 kept because they still hold work/);
+  assert.ok(fs.existsSync(wt), "unmerged work must survive a default prune");
+
+  // Merged into another branch, the same commits are no longer at risk.
+  execFileSync("git", ["branch", "delivery", "feature/TEST-T1"], { cwd: repoPath });
+  const after = awo(ws, ["worktree", "prune"]);
+  assert.match(after.stdout, /removed repos\/\.worktrees\/api\/TEST-T1/);
+  assert.ok(!fs.existsSync(wt));
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("worktree prune --force discards work only when asked in those words", () => {
+  const { ws, repoPath } = makeGitWorkspace();
+  awo(ws, ["task", "run", "TEST-T1"]);
+  const wt = path.join(ws, "repos", ".worktrees", "api", "TEST-T1");
+  closeAsDone(ws);
+  fs.writeFileSync(path.join(wt, "scratch.txt"), "uncommitted\n");
+
+  assert.match(awo(ws, ["worktree", "prune"]).stdout, /kept .*uncommitted changes/);
+  assert.ok(fs.existsSync(wt));
+
+  assert.match(awo(ws, ["worktree", "prune", "--force"]).stdout, /removed/);
+  assert.ok(!fs.existsSync(wt));
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("doctor reports a finished task's leftover worktree and points at prune", () => {
+  const { ws, repoPath } = makeGitWorkspace();
+  awo(ws, ["task", "run", "TEST-T1"]);
+  closeAsDone(ws);
+
+  const out = awo(ws, ["doctor"]);
+  assert.match(out.stdout, /repos\/\.worktrees\/api\/TEST-T1 is still checked out, but TEST-T1 is finished/);
+  assert.match(out.stdout, /awo worktree prune/);
+
+  // Read-only: a diagnostic that silently repairs hides the problem it was run for.
+  assert.ok(
+    fs.existsSync(path.join(ws, "repos", ".worktrees", "api", "TEST-T1")),
+    "doctor must not remove anything"
+  );
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("doctor collapses one systemic problem into one finding with a count", () => {
+  const ws = makeWorkspace();
+
+  // Six repos with no testCommand is one planning gap, not six findings. Real use
+  // turned this page into 166 lines, 74 of them the same sentence.
+  for (const name of ["r1", "r2", "r3", "r4", "r5", "r6"]) {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), `awo-doc-${name}-`));
+    fs.writeFileSync(path.join(repo, "README.md"), `# ${name}\n`);
+    awo(ws, ["connect", repo, "--name", name]);
+  }
+
+  const collapsed = awo(ws, ["doctor"]);
+  assert.match(collapsed.stdout, /…and \d+ more like this \(\d+ in total\)/);
+  assert.match(collapsed.stdout, /awo doctor --all/);
+
+  const all = awo(ws, ["doctor", "--all"]);
+  assert.doesNotMatch(all.stdout, /more like this/);
+  // Every instance is still there under --all, and the tally never changed.
+  for (const name of ["r1", "r2", "r3", "r4", "r5", "r6"]) {
+    assert.match(all.stdout, new RegExp(`${name} has no testCommand`));
+  }
+  const tally = /(\d+) error\(s\), (\d+) warning\(s\), (\d+) note\(s\)/;
+  assert.deepEqual(tally.exec(collapsed.stdout)?.slice(1), tally.exec(all.stdout)?.slice(1));
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+/**
+ * The SHOP workspace had three directories under repos/.worktrees/ that git had no
+ * record of: `ALMO-261`, 532KB of a checkout an agent made by hand while following
+ * the goal-branch flow, and two empty leaves left by a failed `worktree add`.
+ * Discovery through `git worktree list` alone cannot see any of them, and they
+ * occupy the path awo wants to reuse.
+ */
+test("worktree list finds directories git has no record of, and prune keeps the ones with content", () => {
+  const { ws, repoPath } = makeGitWorkspace();
+  const under = path.join(ws, "repos", ".worktrees", "api");
+  fs.mkdirSync(path.join(under, "ALMO-9"), { recursive: true });
+  fs.writeFileSync(path.join(under, "ALMO-9", "handwritten.txt"), "work nobody registered\n");
+  fs.mkdirSync(path.join(under, "TEST-T9"), { recursive: true });
+
+  const list = awo(ws, ["worktree", "list"]);
+  assert.equal(list.code, 0, list.stderr);
+  assert.match(list.stdout, /ALMO-9\t—\t.*KEEP — git has no record of it/);
+  // An empty leftover is safe by inspection, so it is not held back.
+  assert.match(list.stdout, /TEST-T9\t—\t0MB\tsafe to remove/);
+
+  const out = awo(ws, ["worktree", "prune", "--all"]);
+  assert.match(out.stdout, /kept .*ALMO-9.*git has no record of it/);
+  assert.match(out.stdout, /removed .*TEST-T9/);
+  assert.ok(fs.existsSync(path.join(under, "ALMO-9")), "unaccounted-for content must survive");
+  assert.ok(!fs.existsSync(path.join(under, "TEST-T9")), "an empty leftover can go");
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
 });

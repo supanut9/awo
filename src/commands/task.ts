@@ -290,6 +290,20 @@ export async function runTaskRun(
   // hands it the real checkout, and it edits that instead of the worktree
   // (§9 item 42: the fix caused the violation it was meant to prevent).
   const usable = worktrees.filter((w) => !w.error);
+
+  // `state.worktree` was initialised to null and never written, so 100 tasks in the
+  // SHOP workspace all claimed no checkout while 14 sat on disk. Record where the
+  // worker was actually put; `awo worktree` reconciles against git regardless, but
+  // state should not assert something false.
+  if (usable[0]) {
+    const where = usable[0].path;
+    await mutateState(goal.dir, goal.id, (s) => {
+      const t = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
+      t.worktree = where;
+      s.tasks[task.id] = t;
+    });
+  }
+
   const workerContext = {
     cwd: usable[0] ? usable[0].path : undefined,
     allow: [...new Set(usable.flatMap((w) => w.writablePaths))],
@@ -470,8 +484,8 @@ export interface TaskCompleteResult {
 
 /**
  * Closes an open run: final event, run detail (§7.3), index line, and the
- * lifecycle transition. `--gate` routes a success to `in-review` instead of
- * `done`, so the QA gate (§7.1) stays a real step.
+ * lifecycle transition. `--gate`, or a goal policy requiring QA, routes a success
+ * to `in-review` instead of `done`.
  */
 export async function runTaskComplete(
   taskId: string,
@@ -571,7 +585,7 @@ export async function runTaskComplete(
   }
 
   const nextStatus: TaskStatus =
-    outcome === "success" ? (options.gate ? "in-review" : "done") : "blocked";
+    outcome === "success" ? (options.gate || goal.completionPolicy.qaRequired ? "in-review" : "done") : "blocked";
 
   await writeDetail(
     workspaceRoot,

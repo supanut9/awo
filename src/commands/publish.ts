@@ -4,6 +4,7 @@ import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest } from "../manifest.js";
 import { FileReader } from "../ui/reader.js";
 import { workerLogFile } from "../runs.js";
+import { runAgentOrg } from "./agent-org.js";
 
 /**
  * §7.6 — optional publishing of a workspace's state to MongoDB, so a hosted
@@ -38,7 +39,16 @@ export interface PublishResult {
   workspaceId: string;
   database: string;
   detail: "summary" | "full";
-  counts: { requirements: number; goals: number; tasks: number; runs: number; events: number };
+  counts: { requirements: number; goals: number; tasks: number; runs: number; events: number; agents: number };
+  /**
+   * What the active redaction settings actually withheld.
+   *
+   * Reported because this is how a privacy control is kept honest. `redact.filePaths`
+   * read `config.redact.filePaths ? r.reposChanged : r.reposChanged` — both branches
+   * identical — so the flag did nothing at all, and nothing in the output would ever
+   * have said so.
+   */
+  redacted: { workerLogs: number; outputTails: number; prompts: number };
   dryRun: boolean;
   uriHost: string | null;
 }
@@ -164,7 +174,7 @@ export async function runPublish(
     );
   }
 
-  const snapshot = await new FileReader(root).snapshot();
+  const [snapshot, organization] = await Promise.all([new FileReader(root).snapshot(), runAgentOrg({ cwd: root })]);
 
   // A projection, not the files. Keyed on workspaceId because projectKey collides
   // across users (§5).
@@ -239,6 +249,7 @@ export async function runPublish(
       name: t.name,
       status: t.status,
       agent: t.agent,
+      kind: t.kind,
       targets: t.targets,
       lastRunOutcome: t.lastRunOutcome,
       lastRunId: t.lastRunId,
@@ -246,6 +257,20 @@ export async function runPublish(
       blockedReason: t.blockedReason,
     }))
   );
+
+  // Relationship fields are deliberately summary-safe: they explain handoffs but
+  // confer no authority. Agent prose remains full-detail only in the workspace.
+  const agents = organization.agents.map((agent) => ({
+    _id: `${wid}:${agent.id}`,
+    workspaceId: wid,
+    agentId: agent.id,
+    tier: agent.tier,
+    reportsTo: agent.reportsTo,
+    delegatesTo: agent.delegatesTo,
+    reviews: agent.reviews,
+    taskCount: agent.taskCount,
+    openTasks: agent.openTasks,
+  }));
 
   if (full) {
     // Task bodies come from the reader so the hosted view sees exactly what the
@@ -274,13 +299,18 @@ export async function runPublish(
     startedAt: r.startedAt,
     finishedAt: r.finishedAt,
     durationSec: r.durationSec,
-    // Repo names are structural; file paths describe private code (§7.6).
-    reposChanged: config.redact.filePaths ? r.reposChanged : r.reposChanged,
+    // Repo names are structural, so they travel either way. `redact.filePaths` is
+    // about paths WITHIN a repo — and this line used to read
+    // `config.redact.filePaths ? r.reposChanged : r.reposChanged`, both branches
+    // identical, so the flag did nothing here at all. It applies where paths
+    // actually appear: the run's markdown record, below.
+    reposChanged: r.reposChanged,
   }));
 
   // One document per run holding its markdown record and event stream. Kept out of
   // the run index docs so a board query never drags the prose along with it.
   const events: Record<string, unknown>[] = [];
+  const redacted = { workerLogs: 0, outputTails: 0, prompts: 0 };
   if (full) {
     for (const r of snapshot.runs) {
       const [stream, markdown, workerLog] = await Promise.all([
@@ -288,17 +318,24 @@ export async function runPublish(
         reader.runDetail(r.runId).catch(() => ""),
         readWorkerLog(root, r.runId),
       ]);
+      if (config.redact.filePaths) {
+        if (workerLog) redacted.workerLogs += 1;
+        redacted.outputTails += stream.filter((e) => typeof e.tail === "string").length;
+      }
+      if (config.redact.prompts && markdown !== stripPrompt(markdown)) redacted.prompts += 1;
+
       events.push({
         _id: `${wid}:${r.runId}`,
         workspaceId: wid,
         runId: r.runId,
         taskId: r.taskId,
-        events: stream,
+        events: config.redact.filePaths ? stream.map(stripOutputTail) : stream,
         markdown: config.redact.prompts ? stripPrompt(markdown) : markdown,
         // A dispatched worker's stdout is the only record of *how* it reached its
         // answer, and the first thing you want when a run went wrong. Absent for
-        // runs a human drove.
-        ...(workerLog ? { workerLog } : {}),
+        // runs a human drove — and withheld under `redact.filePaths`, because raw
+        // stdout is nothing but paths, stack traces and source excerpts.
+        ...(workerLog && !config.redact.filePaths ? { workerLog } : {}),
       });
     }
   }
@@ -313,7 +350,9 @@ export async function runPublish(
       tasks: tasks.length,
       runs: runs.length,
       events: events.length,
+      agents: agents.length,
     },
+    redacted,
     dryRun: Boolean(options.dryRun),
     uriHost: uri ? hostOf(uri) : null,
   };
@@ -339,6 +378,7 @@ export async function runPublish(
       db.collection(c("tasks")).createIndex({ workspaceId: 1, status: 1 }),
       db.collection(c("runs")).createIndex({ workspaceId: 1, runId: -1 }),
       db.collection(c("events")).createIndex({ workspaceId: 1, runId: 1 }),
+      db.collection(c("agents")).createIndex({ workspaceId: 1, agentId: 1 }),
       db.collection(c("projects")).createIndex({ updatedAt: -1 }),
     ]).catch(() => undefined);
 
@@ -348,6 +388,7 @@ export async function runPublish(
       ["tasks", tasks],
       ["runs", runs],
       ["events", events],
+      ["agents", agents],
     ] as const) {
       if (docs.length === 0) continue;
       await db.collection(c(name)).bulkWrite(
@@ -366,6 +407,9 @@ export async function runPublish(
     await db
       .collection(c("requirements"))
       .deleteMany({ workspaceId: wid, requirementId: { $nin: requirements.map((r) => r.requirementId) } } as never);
+    await db
+      .collection(c("agents"))
+      .deleteMany({ workspaceId: wid, agentId: { $nin: agents.map((agent) => agent.agentId) } } as never);
   } finally {
     await client.close().catch(() => undefined);
   }
@@ -396,6 +440,24 @@ async function readWorkerLog(root: string, runId: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * Drop the captured command output from a measurement event.
+ *
+ * `tail` is the failing end of a test run — stack traces, source excerpts and the
+ * paths of every file involved. It is the one field in the event stream that carries
+ * file paths mechanically rather than because an agent happened to type one, which
+ * makes it what `redact.filePaths` is for.
+ *
+ * What this does NOT scrub is prose: a summary an agent wrote may name a file, and no
+ * pattern match on free text can be trusted to catch that. Withhold prose with
+ * `detail: "summary"`, which sends no bodies at all.
+ */
+function stripOutputTail(event: Record<string, unknown>): Record<string, unknown> {
+  if (typeof event.tail !== "string") return event;
+  const { tail: _tail, ...rest } = event;
+  return { ...rest, tailRedacted: true };
 }
 
 function stripPrompt(markdown: string): string {

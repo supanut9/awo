@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type RunEvent, type Snapshot, type TaskStatus } from "./api";
+import { api, type AgentView, type RunEvent, type Snapshot, type TaskStatus } from "./api";
 import Board from "./components/Board";
 import TaskDrawer from "./components/TaskDrawer";
 import Timeline from "./components/Timeline";
 import Markdown from "./components/Markdown";
 
-type Tab = "board" | "requirements" | "runs" | "repos" | "analytics";
+type Tab = "board" | "requirements" | "organization" | "runs" | "repos" | "analytics";
 
 const TAB_COPY: Record<Tab, { label: string; eyebrow: string; title: string }> = {
   board: { label: "Workboard", eyebrow: "Live work", title: "Make the next move obvious." },
   requirements: { label: "Requirements", eyebrow: "Intake and scope", title: "Keep the intent visible before work starts." },
+  organization: { label: "Organization", eyebrow: "Responsibility graph", title: "Make ownership and review paths visible." },
   runs: { label: "Run history", eyebrow: "Evidence", title: "Read what actually happened." },
   repos: { label: "Repositories", eyebrow: "Connected code", title: "Keep the working surface healthy." },
   analytics: { label: "Model signal", eyebrow: "Cost and quality", title: "Check whether the tiering policy earns its keep." },
@@ -95,7 +96,7 @@ export default function App() {
   }
   if (!snap) return <div className="p-6 text-sm text-neutral-500">Loading…</div>;
 
-  const { project, stats, goals, repos, runs } = snap;
+  const { project, stats, goals, repos, runs, agents } = snap;
   // An already-running local server can briefly serve a pre-upgrade snapshot
   // while its static bundle has been rebuilt. Render an empty intake view until
   // the server is restarted or sends the new shape.
@@ -127,7 +128,7 @@ export default function App() {
             </div>
           </div>
           <nav className="order-3 flex w-full gap-1 overflow-x-auto rounded-full bg-wash/80 p-1 sm:order-none sm:ml-4 sm:w-auto" aria-label="Dashboard views">
-            {(["board", "requirements", "runs", "repos", "analytics"] as Tab[]).map((item) => (
+            {(["board", "requirements", "organization", "runs", "repos", "analytics"] as Tab[]).map((item) => (
               <button
                 key={item}
                 onClick={() => setTab(item)}
@@ -248,6 +249,8 @@ export default function App() {
               </div>
             )
           )}
+
+          {tab === "organization" && <LocalOrganization agents={agents ?? []} />}
 
           {tab === "runs" && (
             <>
@@ -439,4 +442,29 @@ export default function App() {
 
 function EmptyState({ title, copy }: { title: string; copy: string }) {
   return <div className="px-6 py-16 text-center"><div className="font-display text-3xl">{title}</div><p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-ink/60">{copy}</p></div>;
+}
+
+function LocalOrganization({ agents }: { agents: AgentView[] }) {
+  if (agents.length === 0) {
+    return <EmptyState title="No organization yet" copy="Install agent roles and add relationship fields such as reportsTo, delegatesTo, or reviews." />;
+  }
+  return (
+    <div className="space-y-3 p-5 sm:p-6">
+      {agents.map((agent) => (
+        <article key={agent.id} className="rounded-2xl border border-ink/10 bg-paper p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs font-bold text-moss-deep">{agent.id}</span>
+            {agent.tier && <span className="rounded-full bg-wash px-2 py-0.5 text-[10px]">{agent.tier}</span>}
+            <span className="ml-auto text-[11px] text-ink/55">{agent.openTasks}/{agent.taskCount} open</span>
+          </div>
+          <div className="mt-2 text-[11px] text-ink/55">
+            {agent.reportsTo && <span>reports to {agent.reportsTo}</span>}
+            {agent.delegatesTo.length > 0 && <span className="ml-4">delegates to {agent.delegatesTo.join(", ")}</span>}
+            {agent.reviews.length > 0 && <span className="ml-4">reviews {agent.reviews.join(", ")}</span>}
+          </div>
+        </article>
+      ))}
+      <p className="border-t border-ink/10 pt-4 text-[11px] text-ink/55">Relationships describe responsibility only. Task ownership and human approval remain explicit.</p>
+    </div>
+  );
 }

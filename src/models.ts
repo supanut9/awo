@@ -135,7 +135,15 @@ export interface AgentDefinition {
   id: string;
   tier: Tier | null;
   model: ModelChoice | null;
+  reportsTo: string | null;
+  delegatesTo: string[];
+  reviews: string[];
   file: string;
+}
+
+function relationshipList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  return typeof value === "string" ? [value] : [];
 }
 
 function parseChoice(value: unknown): ModelChoice | null {
@@ -191,7 +199,15 @@ export async function readAgent(workspaceRoot: string, id: string): Promise<Agen
     const file = path.join(workspaceRoot, dir, `${id}.md`);
     if (!(await fs.pathExists(file))) continue;
     const fm = matter(await fs.readFile(file, "utf8")).data as Record<string, unknown>;
-    return { id, tier: parseTier(fm.tier), model: parseChoice(fm.model), file };
+    return {
+      id,
+      tier: parseTier(fm.tier),
+      model: parseChoice(fm.model),
+      reportsTo: typeof fm.reportsTo === "string" ? fm.reportsTo : null,
+      delegatesTo: relationshipList(fm.delegatesTo),
+      reviews: relationshipList(fm.reviews),
+      file,
+    };
   }
   return null;
 }
@@ -283,8 +299,34 @@ export interface WorkerContext {
    * requirement, a task, or a log entry.
    */
   readOnly?: boolean;
+  /**
+   * Read-only **until a human approves**, then write — the planning gate (§12.7).
+   *
+   * Distinct from `readOnly`, which never writes. Plan mode exists because the
+   * planning step is where a mistake multiplies: SHOP-G1 was decomposed into 39
+   * task files, and the first chance to disagree with that shape was after all 39
+   * existed. Under plan mode the agent explores, proposes, and waits; on approval
+   * the same session writes the requirement or calls `awo task new` for each task.
+   *
+   * Only meaningful for an invocation a human runs interactively. A dispatched
+   * worker in plan mode waits for an approval that never arrives, so `dispatch`
+   * refuses it rather than hanging.
+   */
+  planMode?: boolean;
   /** Replace the default task prompt — the gate supplies its own brief. */
   prompt?: string;
+}
+
+/**
+ * Whether a runtime can go from "here is my plan" to writing inside one process.
+ *
+ * Claude can: plan mode is a permission state the human lifts mid-session. Codex
+ * cannot — `-s read-only` is a sandbox for the life of the process, so planning and
+ * executing are two invocations. Pretending they behave the same is how a user ends
+ * up waiting for an approval prompt that a sandbox will never show them.
+ */
+export function planModeApprovesInSession(runtime: string): boolean {
+  return runtime !== "codex" && runtime !== "gemini";
 }
 
 /** The command the orchestrator would run to hand this task to a worker. */
@@ -328,18 +370,27 @@ function invocationFor(
     ? ""
     : (context.allow ?? []).map((p) => ` --add-dir ${p}`).join("");
 
+  // `mode: "plan"` may also arrive from the manifest's models policy, per role. It
+  // used to be honoured for Claude and dropped on the floor for every other runtime,
+  // so a codex role declaring plan mode got an unrestricted workspace-write sandbox
+  // and nobody was told.
+  const planning = context.planMode || mode === "plan";
+
   switch (runtime) {
     case "codex": {
       const eff = effort ? ` -c model_reasoning_effort=${effort}` : "";
-      const sandbox = context.readOnly ? " -s read-only" : " -s workspace-write";
+      // Codex cannot lift its sandbox on approval, so planning is read-only for the
+      // whole process and executing is a second invocation.
+      const sandbox = context.readOnly || planning ? " -s read-only" : " -s workspace-write";
       return `codex exec -m ${model}${eff}${sandbox}${cwd}${allow} "${prompt}"`;
     }
     case "gemini":
       return `gemini -m ${model} -p "${prompt}"`;
     default: {
-      // Claude has no read-only sandbox flag; plan mode is the nearest equivalent
-      // and is exactly right here — a reviewer should propose, not act (§12.7).
-      const m = context.readOnly || mode === "plan" ? " --permission-mode plan" : "";
+      // Claude has no read-only sandbox flag; plan mode is the nearest equivalent.
+      // For the QA gate it is exactly right — a reviewer should propose, not act —
+      // and for planning it is the approval gate itself (§12.7).
+      const m = context.readOnly || planning ? " --permission-mode plan" : "";
       return `claude --model ${model}${m}${cwd}${allow} "${prompt}"`;
     }
   }

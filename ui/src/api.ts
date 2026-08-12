@@ -22,6 +22,7 @@ export interface TaskView {
   blockedReason: string | null;
   targets: string[];
   agent: string | null;
+  kind: string;
 }
 
 export interface GoalView {
@@ -29,6 +30,16 @@ export interface GoalView {
   title: string;
   status: string;
   tasks: TaskView[];
+}
+
+export interface AgentView {
+  id: string;
+  tier: string | null;
+  reportsTo: string | null;
+  delegatesTo: string[];
+  reviews: string[];
+  taskCount: number;
+  openTasks: number;
 }
 
 export interface RequirementView {
@@ -78,6 +89,7 @@ export interface Snapshot {
   project: { workspaceId: string | null; projectKey: string; projectName: string; libraryVersion: string };
   requirements: RequirementView[];
   goals: GoalView[];
+  agents: AgentView[];
   repos: RepoView[];
   runs: RunIndexEntry[];
   stats: {
