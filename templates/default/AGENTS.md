@@ -25,6 +25,7 @@ and an ID is permanent, which is why paths are named for IDs and never for title
 
 ```
 requirements/{{PROJECT_KEY}}-R1.md          intake, not yet planned
+requirements/archive/{{PROJECT_KEY}}-R2.md  suspended, cancelled or rejected
 goals/{{PROJECT_KEY}}-G1/goal.md            the objective and its definition of done
                     /requirement.md         the ask it came from
                     /tasks/{{PROJECT_KEY}}-T1.md   executable units

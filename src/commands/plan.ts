@@ -32,7 +32,12 @@ async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promi
     if (m) used.add(Number(m[1]));
   };
 
-  for (const rel of ["goals", "requirements"]) {
+  // `requirements/archive` is included for the same reason the goal folders are
+  // walked below: an id that leaves the directory this scan reads becomes free, and
+  // gets handed to a second requirement. That already happened once with R1, and
+  // shelving a requirement moves its file — so the archive must be scanned or every
+  // suspension would set up a collision.
+  for (const rel of ["goals", "requirements", path.join("requirements", "archive")]) {
     const dir = path.join(root, rel);
     if (await fs.pathExists(dir)) {
       for (const entry of await fs.readdir(dir)) consider(entry);
@@ -139,6 +144,18 @@ export async function runGoalNew(options: {
 
   const reqFile = requirementPath(root, options.from);
   if (!(await fs.pathExists(reqFile))) {
+    // Distinguish "no such requirement" from "shelved". Both are missing from
+    // intake, and only one of them is a typo.
+    const archived = path.join(root, "requirements", "archive", `${options.from}.md`);
+    if (await fs.pathExists(archived)) {
+      const { readRequirement } = await import("./intake.js");
+      const shelved = await readRequirement(root, options.from);
+      throw new Error(
+        `${options.from} is ${shelved.status} and lives in ${shelved.file}, so planning cannot start from it.\n` +
+          (shelved.data.decisionNote ? `  Reason given: ${String(shelved.data.decisionNote)}\n` : "") +
+          `  Bring it back deliberately first:  awo req resume ${options.from}`
+      );
+    }
     const loose = (await fs.readdir(path.join(root, "requirements")).catch(() => []))
       .filter((f) => f.endsWith(".md"))
       .map((f) => f.replace(/\.md$/, ""));

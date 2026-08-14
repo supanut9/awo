@@ -55,7 +55,56 @@ const MIGRATIONS: Migration[] = [
     description: "collapse each day's runs into logs/<date>/{runs.jsonl,runs.md}",
     apply: async ({ root }) => collapseLogsIntoDayFiles(root),
   },
+  {
+    version: "0.3.0",
+    description: "move shelved requirements into requirements/archive/",
+    apply: async ({ root }) => shelveArchivedRequirements(root),
+  },
 ];
+
+/**
+ * 0.3.0 — the directory a requirement sits in now follows its status.
+ *
+ * Existing workspaces have `rejected` requirements in `requirements/` from before
+ * that rule existed, and leaving them there is the noise the rule exists to remove:
+ * `awo req list` reads intake, so they would keep appearing as live work.
+ *
+ * Reads the frontmatter directly rather than through `intake.ts`. A migration
+ * describes a layout that no longer exists, and calling today's helpers is how
+ * 0.0.33 left 24 dangling pointers (§9 finding 61) — a later change to what
+ * "archived" means must not silently rewrite what this migration did.
+ */
+async function shelveArchivedRequirements(root: string): Promise<boolean> {
+  const SHELVED = new Set(["rejected", "suspended", "cancelled"]);
+  const dir = path.join(root, "requirements");
+  if (!(await fs.pathExists(dir))) return false;
+
+  const archive = path.join(dir, "archive");
+  let moved = false;
+
+  for (const name of (await fs.readdir(dir).catch(() => [])) as string[]) {
+    if (!name.endsWith(".md")) continue;
+    const from = path.join(dir, name);
+    const text = await fs.readFile(from, "utf8").catch(() => "");
+    const status = /^status:\s*"?([a-z-]+)"?\s*$/m.exec(text)?.[1];
+    if (!status || !SHELVED.has(status)) continue;
+
+    await fs.ensureDir(archive);
+    await fs.move(from, path.join(archive, name), { overwrite: true });
+
+    // Assets travel with the document that links them, or its relative links break.
+    const id = name.replace(/\.md$/, "");
+    const assets = path.join(dir, `${id}-assets`);
+    if (await fs.pathExists(assets)) {
+      await fs.move(assets, path.join(archive, `${id}-assets`), { overwrite: true }).catch(
+        () => undefined
+      );
+    }
+    moved = true;
+  }
+
+  return moved;
+}
 
 /**
  * 0.0.35 — every earlier log layout collapses into two files per day.

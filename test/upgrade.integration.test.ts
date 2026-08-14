@@ -561,3 +561,43 @@ test("adding a rule needs no AGENTS.md edit, and does not make it look customize
   assert.match(fs.readFileSync(path.join(ws, "AGENTS.md"), "utf8"), /- `data-engineer`/);
   assert.ok(!/conflict: /.test(awo(ws, ["upgrade", "--dry-run"]).stdout));
 });
+
+/**
+ * 0.3.0 — the directory a requirement sits in follows its status. Workspaces
+ * predating that rule have rejected requirements in `requirements/`, where
+ * `awo req list` keeps showing them as live work.
+ */
+test("upgrading moves already-shelved requirements into requirements/archive/", () => {
+  const ws = makeWorkspace();
+  pretendOlder(ws, "0.2.0");
+
+  const reqDir = path.join(ws, "requirements");
+  fs.mkdirSync(reqDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(reqDir, "UP-R1.md"),
+    `---\nid: UP-R1\ntype: requirement\ntitle: Sent back\nstatus: rejected\n---\n\n![m](./UP-R1-assets/m.png)\n`
+  );
+  fs.mkdirSync(path.join(reqDir, "UP-R1-assets"), { recursive: true });
+  fs.writeFileSync(path.join(reqDir, "UP-R1-assets", "m.png"), "x");
+  // A live one must not be touched.
+  fs.writeFileSync(
+    path.join(reqDir, "UP-R2.md"),
+    `---\nid: UP-R2\ntype: requirement\ntitle: Still wanted\nstatus: draft\n---\n\nbody\n`
+  );
+
+  const out = awo(ws, ["upgrade", "--force"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /migration 0\.3\.0: move shelved requirements/);
+
+  assert.ok(fs.existsSync(path.join(reqDir, "archive", "UP-R1.md")), "the rejected one moves");
+  assert.ok(!fs.existsSync(path.join(reqDir, "UP-R1.md")));
+  // Its assets go with it, or the document's relative links resolve to nothing.
+  assert.ok(fs.existsSync(path.join(reqDir, "archive", "UP-R1-assets", "m.png")));
+  assert.ok(fs.existsSync(path.join(reqDir, "UP-R2.md")), "a draft stays in intake");
+
+  // Idempotent: re-running finds nothing left to move and breaks nothing.
+  assert.equal(awo(ws, ["upgrade", "--force"]).code, 0);
+  assert.ok(fs.existsSync(path.join(reqDir, "archive", "UP-R1.md")));
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});

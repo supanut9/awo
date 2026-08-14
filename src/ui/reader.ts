@@ -59,6 +59,15 @@ export interface RequirementView {
   goalId: string | null;
   file: string;
   criteria: { total: number; covered: number; exceptions: number };
+  /**
+   * True for a suspended, cancelled or rejected requirement, whose file lives in
+   * `requirements/archive/`.
+   *
+   * Published rather than dropped: the decision not to build something, and why, is
+   * part of the record a reviewer needs. `awo req list` hides these by default so
+   * intake stays short; a dashboard has room to show them and should.
+   */
+  archived: boolean;
 }
 
 /**
@@ -156,7 +165,9 @@ function coverage(criteria: string[], state?: Awaited<ReturnType<typeof readStat
 }
 
 function requirementView(
-  requirement: Pick<Requirement, "id" | "title" | "status" | "source" | "goalId" | "file" | "body">,
+  requirement: Pick<Requirement, "id" | "title" | "status" | "source" | "goalId" | "file" | "body"> & {
+    archived?: boolean;
+  },
   state?: Awaited<ReturnType<typeof readState>>
 ): RequirementView {
   return {
@@ -167,6 +178,7 @@ function requirementView(
     goalId: requirement.goalId,
     file: requirement.file,
     criteria: coverage(findCriteria(requirement.body), state),
+    archived: requirement.archived ?? false,
   };
 }
 
@@ -185,7 +197,11 @@ export class FileReader implements WorkspaceReader {
   }
 
   async requirements(): Promise<RequirementView[]> {
-    const intake = (await listRequirements(this.root)).map((requirement) => requirementView(requirement));
+    // Archived included: a hosted reviewer should be able to see that something was
+    // parked or killed, and why, rather than watching it vanish from the record.
+    const intake = (await listRequirements(this.root, { includeArchived: true })).map((requirement) =>
+      requirementView(requirement)
+    );
     const planned: RequirementView[] = [];
 
     for (const goal of await findGoals(this.root)) {

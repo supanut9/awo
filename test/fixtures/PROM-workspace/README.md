@@ -15,6 +15,9 @@ next, so you don't spend tokens scanning the tree.
 - `instructions/` — workflow glue; `full-workflow.md` is the master sequence,
   and `pm-to-pr.md` is the PM request to human-approved PR playbook.
 - `requirements/` — intake: `<KEY>-R#.md`, until a goal is planned from it.
+  `requirements/archive/` holds the ones nobody intends to build now — suspended,
+  cancelled or rejected. The status decides the directory, so intake stays a list
+  of what is actually wanted. Ids are never reused, wherever the file sits.
 - `goals/` — one directory per goal (`goals/<KEY>-G#/`), holding `goal.md`, the
   `requirement.md` it came from, and `tasks/<KEY>-T#.md`.
 - `catalog/` — extra agents/skills shipped but **not installed**; add one with `awo agent add <name>`.
@@ -32,6 +35,9 @@ next, so you don't spend tokens scanning the tree.
 | `awo sync` | Reconcile `repos/` with the manifest. |
 | `awo list` / `awo doctor` | Repo status / diagnose drift and unfinished work. |
 | `awo req new --title "…"` → `req refine` → `req propose` → `req approve` | Intake: capture and human-approve `PROM-R#`. |
+| `awo req suspend PROM-R# --why "…"` / `req cancel … --why "…"` | Park it, or drop it. Both move the file to `requirements/archive/`. |
+| `awo req resume PROM-R#` | Bring a shelved requirement back into intake, at the status it left from. |
+| `awo req list [--all\|--archived]` | Intake by default; the shelved ones on request. |
 | `awo goal new --from PROM-R#` | Distil an approved requirement into a goal. |
 | `awo goal plan PROM-G#` | Brief the tech-lead to decompose it — in plan mode, so you approve the breakdown before any task exists. |
 | `awo task new --goal PROM-G# --name "…" --targets <repo>` | Add a task; allocates `PROM-T#`. |

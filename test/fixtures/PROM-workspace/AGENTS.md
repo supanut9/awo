@@ -25,6 +25,7 @@ and an ID is permanent, which is why paths are named for IDs and never for title
 
 ```
 requirements/PROM-R1.md          intake, not yet planned
+requirements/archive/PROM-R2.md  suspended, cancelled or rejected
 goals/PROM-G1/goal.md            the objective and its definition of done
                     /requirement.md         the ask it came from
                     /tasks/PROM-T1.md   executable units

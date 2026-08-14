@@ -235,6 +235,7 @@ export async function runPublish(
       status: r.status,
       source: r.source,
       goalId: r.goalId,
+      archived: r.archived,
       criteria: r.criteria,
       ...(full ? { body: await fs.readFile(path.join(root, r.file), "utf8").catch(() => "") } : {}),
     }))

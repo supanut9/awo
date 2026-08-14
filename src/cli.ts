@@ -6,10 +6,13 @@ import { Command } from "commander";
 import { findWorkspaceRoot } from "./workspace.js";
 import {
   findCriteria,
+  isArchivedStatus,
   listRequirements,
   runReqDecide,
   runReqPropose,
   runReqRefine,
+  runReqResume,
+  runReqShelve,
 } from "./commands/intake.js";
 import { runAuto } from "./commands/autorun.js";
 import { listConflicts, runResolve } from "./commands/resolve.js";
@@ -552,12 +555,27 @@ req
 
 req
   .command("list")
-  .description("Requirements and where each one is in intake.")
-  .action(async () => {
+  .description("Requirements in intake. Shelved ones are in requirements/archive/ — pass --all.")
+  .option("--all", "include suspended, cancelled and rejected requirements")
+  .option("--archived", "show only the shelved ones")
+  .action(async (opts: { all?: boolean; archived?: boolean }) => {
     try {
-      const rows = await listRequirements(findWorkspaceRoot(process.cwd()));
+      const root = findWorkspaceRoot(process.cwd());
+      const every = await listRequirements(root, { includeArchived: true });
+      const rows = opts.archived
+        ? every.filter((r) => r.archived)
+        : opts.all
+          ? every
+          : every.filter((r) => !r.archived);
+
       if (rows.length === 0) {
-        console.log('No requirements yet. Capture one with `awo req new --title "…"`.');
+        console.log(
+          opts.archived
+            ? "Nothing shelved."
+            : every.length > 0
+              ? `Nothing in intake. ${every.length} shelved — \`awo req list --archived\`.`
+              : 'No requirements yet. Capture one with `awo req new --title "…"`.'
+        );
         return;
       }
       for (const r of rows) {
@@ -565,6 +583,11 @@ req
         console.log(
           `${r.id}\t${r.status}\t${criteria} criteria\t${r.goalId ? `-> ${r.goalId}` : "unplanned"}\t${r.title}`
         );
+      }
+      // Say what is being left out, so a short list never reads as the whole story.
+      const hidden = every.filter((r) => r.archived).length;
+      if (!opts.all && !opts.archived && hidden > 0) {
+        console.log(`\n${hidden} shelved in requirements/archive/ — \`awo req list --archived\`.`);
       }
     } catch (err) {
       console.error((err as Error).message);
@@ -619,6 +642,7 @@ req
       const r = await runReqPropose(reqId);
       console.log(`${r.id} proposed with ${r.criteria.length} acceptance criteria:`);
       for (const c of r.criteria) console.log(`  - ${c}`);
+      if (r.restored) console.log(`\nbrought back into intake at ${r.file}`);
       console.log(`\nWaiting on a human: awo req approve ${r.id}`);
     } catch (err) {
       console.error((err as Error).message);
@@ -646,6 +670,10 @@ for (const [name, flag] of [
         if (r.status === "approved") {
           console.log(`${r.criteria.length} criteria accepted. Next: awo goal new --from ${r.id}`);
         }
+        if (r.moved && isArchivedStatus(r.status)) {
+          console.log(`moved out of intake to ${r.file}`);
+          console.log(`Revise it there, then \`awo req propose ${r.id}\` brings it back.`);
+        }
         console.log(`recorded as ${r.runId}`);
       } catch (err) {
         console.error((err as Error).message);
@@ -653,6 +681,52 @@ for (const [name, flag] of [
       }
     });
 }
+
+for (const name of ["suspend", "cancel"] as const) {
+  req
+    .command(`${name} <reqId>`)
+    .description(
+      name === "suspend"
+        ? "Park a requirement: still wanted, not now. Moves it to requirements/archive/."
+        : "Drop a requirement for good. Moves it to requirements/archive/."
+    )
+    .requiredOption("--why <text>", "why it is being set aside — required")
+    .option("--who <name>", "who decided (default: human)")
+    .action(async (reqId: string, opts: { why: string; who?: string }) => {
+      try {
+        const r = await runReqShelve(reqId, name === "suspend" ? "suspended" : "cancelled", opts);
+        console.log(`${r.id} ${r.status} — ${r.title}`);
+        console.log(`moved out of intake to ${r.file}`);
+        if (r.movedAssets) console.log(`  brought ${r.movedAssets}/ along with it`);
+        console.log(`recorded as ${r.runId}`);
+        console.log(
+          name === "suspend"
+            ? `Bring it back with: awo req resume ${r.id}`
+            : `Its id stays reserved, so nothing will reuse ${r.id}. Reopen: awo req resume ${r.id}`
+        );
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+}
+
+req
+  .command("resume <reqId>")
+  .description("Bring a shelved requirement back into intake, at the status it left from.")
+  .option("--who <name>", "who decided (default: human)")
+  .action(async (reqId: string, opts: { who?: string }) => {
+    try {
+      const r = await runReqResume(reqId, opts);
+      console.log(`${r.id} ${r.status} — ${r.title}`);
+      console.log(`back in intake at ${r.file}`);
+      if (r.movedAssets) console.log(`  brought ${r.movedAssets}/ along with it`);
+      console.log(`recorded as ${r.runId}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
 
 program
   .command("test-command <repo> [command]")

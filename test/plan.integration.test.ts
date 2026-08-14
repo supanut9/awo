@@ -769,3 +769,184 @@ test("req refine --plan proposes criteria for approval instead of editing in pla
 
   fs.rmSync(ws, { recursive: true, force: true });
 });
+
+/** Paths a shelved requirement moves between. */
+const intakeFile = (ws: string, id: string): string =>
+  path.join(ws, "requirements", `${id}.md`);
+const archiveFile = (ws: string, id: string): string =>
+  path.join(ws, "requirements", "archive", `${id}.md`);
+
+/**
+ * Flipping a status and leaving the file in `requirements/` turned intake into a
+ * pile of things nobody intends to build. The status now decides the directory.
+ */
+test("suspend and cancel move the file out of intake, with the reason recorded", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Parked for later"]);
+  awo(ws, ["req", "new", "--title", "Never doing this"]);
+
+  const suspended = awo(ws, ["req", "suspend", "PL-R1", "--why", "waiting on the vendor"]);
+  assert.equal(suspended.code, 0, suspended.stderr);
+  assert.match(suspended.stdout, /PL-R1 suspended/);
+  assert.match(suspended.stdout, /moved out of intake to requirements\/archive\/PL-R1\.md/);
+  assert.ok(!fs.existsSync(intakeFile(ws, "PL-R1")), "it must leave intake");
+  assert.ok(fs.existsSync(archiveFile(ws, "PL-R1")), "and land in the archive");
+
+  const cancelled = awo(ws, ["req", "cancel", "PL-R2", "--why", "the feature was dropped"]);
+  assert.equal(cancelled.code, 0, cancelled.stderr);
+  assert.match(cancelled.stdout, /PL-R2 cancelled/);
+  assert.ok(fs.existsSync(archiveFile(ws, "PL-R2")));
+
+  // The reason is the part worth having later, so it is in the file and in the log.
+  const doc = fs.readFileSync(archiveFile(ws, "PL-R1"), "utf8");
+  assert.match(doc, /^status: suspended$/m);
+  assert.match(doc, /waiting on the vendor/);
+  const runId = /recorded as (\S+)/.exec(suspended.stdout)?.[1];
+  assert.match(awo(ws, ["log", "show", runId!]).stdout, /waiting on the vendor/);
+
+  // A reason is not optional: "why is this not being built?" is the whole point.
+  awo(ws, ["req", "new", "--title", "Third"]);
+  const bare = awo(ws, ["req", "suspend", "PL-R3"]);
+  assert.equal(bare.code, 1);
+  assert.match(`${bare.stdout}${bare.stderr}`, /required option '--why/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("req list shows intake only, and says how much it is not showing", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Live one"]);
+  awo(ws, ["req", "new", "--title", "Shelved one"]);
+  awo(ws, ["req", "suspend", "PL-R2", "--why", "not now"]);
+
+  const intake = awo(ws, ["req", "list"]);
+  assert.match(intake.stdout, /PL-R1/);
+  assert.doesNotMatch(intake.stdout, /PL-R2\t/);
+  // A short list must never read as the whole story.
+  assert.match(intake.stdout, /1 shelved in requirements\/archive\//);
+
+  assert.match(awo(ws, ["req", "list", "--all"]).stdout, /PL-R2\tsuspended/);
+  const archived = awo(ws, ["req", "list", "--archived"]);
+  assert.match(archived.stdout, /PL-R2\tsuspended/);
+  assert.doesNotMatch(archived.stdout, /PL-R1\t/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("resume returns a suspended requirement to the status it left from", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Comes back"]);
+  // Reach `proposed` first, so resuming has a status to restore that is not draft.
+  const file = intakeFile(ws, "PL-R1");
+  fs.writeFileSync(
+    file,
+    fs.readFileSync(file, "utf8").replace("- _…_", "- Given a thing, when it happens, then it holds")
+  );
+  awo(ws, ["req", "propose", "PL-R1"]);
+  awo(ws, ["req", "suspend", "PL-R1", "--why", "deferred a quarter"]);
+
+  const out = awo(ws, ["req", "resume", "PL-R1"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /PL-R1 proposed/);
+  assert.match(out.stdout, /back in intake at requirements\/PL-R1\.md/);
+  assert.ok(fs.existsSync(intakeFile(ws, "PL-R1")));
+  assert.ok(!fs.existsSync(archiveFile(ws, "PL-R1")));
+
+  // Nothing to resume when it is already in intake.
+  const again = awo(ws, ["req", "resume", "PL-R1"]);
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /already in intake/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("an id is never reissued to a second requirement after the file is shelved", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "First"]);
+  awo(ws, ["req", "cancel", "PL-R1", "--why", "dropped"]);
+
+  // The bug this guards: ID allocation scans directories, and a file that leaves
+  // the scanned set frees its number. R1 was reissued that way once before.
+  const second = awo(ws, ["req", "new", "--title", "Second"]);
+  assert.match(second.stdout, /PL-R2 created/);
+  assert.ok(fs.existsSync(archiveFile(ws, "PL-R1")), "the cancelled one is still there");
+  assert.match(fs.readFileSync(archiveFile(ws, "PL-R1"), "utf8"), /title: First/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("rejecting moves it out, and proposing again brings it back", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Needs another pass"]);
+  const file = intakeFile(ws, "PL-R1");
+  fs.writeFileSync(
+    file,
+    fs.readFileSync(file, "utf8").replace("- _…_", "- Given a thing, when it happens, then it holds")
+  );
+  awo(ws, ["req", "propose", "PL-R1"]);
+
+  const rejected = awo(ws, ["req", "reject", "PL-R1", "--why", "criteria are not checkable"]);
+  assert.equal(rejected.code, 0, rejected.stderr);
+  assert.match(rejected.stdout, /moved out of intake to requirements\/archive\/PL-R1\.md/);
+  assert.match(rejected.stdout, /brings it back/);
+
+  // The revise-and-re-propose round trip has to work from the archive, or archiving
+  // a rejection would amount to discarding it.
+  const reproposed = awo(ws, ["req", "propose", "PL-R1"]);
+  assert.equal(reproposed.code, 0, reproposed.stderr);
+  assert.match(reproposed.stdout, /brought back into intake at requirements\/PL-R1\.md/);
+  assert.ok(fs.existsSync(intakeFile(ws, "PL-R1")));
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("a cancelled requirement cannot be re-proposed or planned by accident", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Killed off"]);
+  const file = intakeFile(ws, "PL-R1");
+  fs.writeFileSync(
+    file,
+    fs.readFileSync(file, "utf8").replace("- _…_", "- Given a thing, when it happens, then it holds")
+  );
+  awo(ws, ["req", "cancel", "PL-R1", "--why", "superseded by PL-R2"]);
+
+  const proposed = awo(ws, ["req", "propose", "PL-R1"]);
+  assert.equal(proposed.code, 1);
+  assert.match(proposed.stderr, /was cancelled, so re-proposing it would quietly undo that/);
+  assert.match(proposed.stderr, /awo req resume PL-R1/);
+
+  // And planning says it is shelved rather than "no such requirement", which is a
+  // different problem with a different fix.
+  const planned = awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  assert.equal(planned.code, 1);
+  assert.match(planned.stderr, /is cancelled and lives in requirements\/archive\/PL-R1\.md/);
+  assert.match(planned.stderr, /superseded by PL-R2/);
+  assert.match(planned.stderr, /awo req resume PL-R1/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("shelving carries the requirement's assets, and refuses once it is planned", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Has a mock"]);
+  const assets = path.join(ws, "requirements", "PL-R1-assets");
+  fs.mkdirSync(assets, { recursive: true });
+  fs.writeFileSync(path.join(assets, "mock.png"), "not really a png");
+
+  const out = awo(ws, ["req", "suspend", "PL-R1", "--why", "design not signed off"]);
+  assert.match(out.stdout, /brought requirements\/archive\/PL-R1-assets\/ along with it/);
+  assert.ok(fs.existsSync(path.join(ws, "requirements", "archive", "PL-R1-assets", "mock.png")));
+  assert.ok(!fs.existsSync(assets), "and nothing is left behind to go stale");
+
+  // Once a requirement is a goal, the work lives on the goal — moving the document
+  // would change nothing, so it says what would.
+  awo(ws, ["req", "new", "--title", "Already planned"]);
+  approveRequirement(ws, "PL-R2");
+  awo(ws, ["goal", "new", "--from", "PL-R2"]);
+  const planned = awo(ws, ["req", "cancel", "PL-R2", "--why", "changed our mind"]);
+  assert.equal(planned.code, 1);
+  assert.match(planned.stderr, /already been planned as PL-G1/);
+  assert.match(planned.stderr, /awo task status <taskId> cancelled/);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+});
