@@ -4,13 +4,14 @@ import { simpleGit } from "simple-git";
 import matter from "gray-matter";
 import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest } from "../manifest.js";
-import { findGoals, findTasksInGoal } from "../tasks.js";
-import { newTaskState, readState } from "../state.js";
+import { findGoals, findTasksInGoal, type TaskKind } from "../tasks.js";
+import { mutateState, newTaskState, readState } from "../state.js";
 import { invocationHint, resolveModel, type ResolvedModel } from "../models.js";
 import { readEvents, readIndex, allocateRunId, writeDetail } from "../runs.js";
 import { runTaskVerify } from "./task.js";
-import { runReqNew } from "./plan.js";
+import { runReqNew, runTaskNew } from "./plan.js";
 import { runLogAdd } from "./log.js";
+import { runGoalReadiness } from "./readiness.js";
 
 /**
  * §7.1 QA gate, made operable.
@@ -129,6 +130,12 @@ export async function runGoalVerify(
   const unfinished = entries
     .filter((t) => t.status !== "done" && t.status !== "in-review" && t.status !== "cancelled")
     .map((t) => `${t.id} (${t.status})`);
+  if (unfinished.length > 0) {
+    throw new Error(
+      `${goal.id} is not ready for goal-level QA: ${unfinished.join(", ")}\n` +
+        `  Finish the work first, then run \`awo goal readiness ${goal.id}\`.`
+    );
+  }
 
   const goalBody = await fs.readFile(path.join(goal.dir, "goal.md"), "utf8");
   const reqPath = path.join(goal.dir, "requirement.md");
@@ -150,6 +157,18 @@ export async function runGoalVerify(
     { kind: "qa-gate", goal: goal.id, model: `${model.runtime}:${model.model}`, tasks: entries.length },
     { interpreted: `QA gate for ${goal.id}`, summary: brief }
   );
+  await mutateState(goal.dir, goal.id, (draft) => {
+    draft.qa = {
+      briefRunId,
+      briefRecordedAt: new Date().toISOString(),
+      verdict: null,
+      summary: null,
+      verdictRunId: null,
+      verdictRecordedAt: null,
+      verdictBy: null,
+      model: `${model.runtime}:${model.model}`,
+    };
+  });
 
   return {
     goalId: goal.id,
@@ -227,13 +246,13 @@ export interface GoalVerdictResult {
   pass: boolean;
   verifiedTasks: string[];
   filedRequirement: string | null;
+  createdTask: string | null;
 }
 
 /**
  * Record the gate's outcome. On PASS the in-review tasks are verified, which rolls
- * the goal up to `done` (§7.4). On GAP the finding becomes a **new requirement**
- * rather than a silent fix, per `file-bug` — the goal is not blocked indefinitely,
- * and the gap re-enters the pipeline as work someone chose to schedule.
+ * the goal up to `done` (§7.4). An in-scope GAP becomes an explicit repair task on
+ * this goal; only a human-attributed `--new-scope` finding re-enters intake.
  */
 export async function runGoalVerdict(
   goalId: string,
@@ -243,23 +262,56 @@ export async function runGoalVerdict(
     summary: string;
     note?: string[];
     model?: string;
+    who?: string;
+    newScope?: boolean;
+    targets?: string[];
+    agent?: string;
+    kind?: TaskKind;
   }
 ): Promise<GoalVerdictResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const goal = (await findGoals(root)).find((g) => g.id === goalId);
   if (!goal) throw new Error(`Unknown goal "${goalId}".`);
+  if (options.pass && options.newScope) {
+    throw new Error("--new-scope only applies to --gap.");
+  }
+  if (goal.completionPolicy.qaRequired && !options.who?.trim()) {
+    throw new Error("A governed goal verdict requires --who <human> so the decision is attributable.");
+  }
 
   const tasks = await findTasksInGoal(goal.dir);
   const state = await readState(goal.dir, goal.id);
+  if (!state.qa?.briefRunId) {
+    throw new Error(
+      `${goal.id} has no attached QA brief. Run \`awo goal verify ${goal.id}\` before recording a verdict.`
+    );
+  }
 
-  await runLogAdd({
+  if (options.pass) {
+    const readiness = await runGoalReadiness(goal.id, { cwd: root });
+    if (!readiness.canPassVerdict) {
+      throw new Error(
+        `${goal.id} cannot pass QA:\n` +
+          readiness.blockers
+            .filter((blocker) => blocker.code !== "qa-verdict-missing" && blocker.code !== "qa-gap")
+            .map((blocker) => `  - ${blocker.message}`)
+            .join("\n") +
+          `\n  Inspect all blockers with \`awo goal readiness ${goal.id}\`.`
+      );
+    }
+  }
+
+  const verdictLog = await runLogAdd({
     cwd: root,
     label: `qa-gate-${goalId}`,
     agent: "qa-engineer",
     model: options.model ? [options.model] : [],
     outcome: options.pass ? "success" : "failed",
     summary: `${options.pass ? "PASS" : "GAP"} — ${options.summary}`,
-    note: options.note,
+    note: [
+      ...(options.who?.trim() ? [`Decision recorded by human: ${options.who.trim()}`] : []),
+      ...(options.note ?? []),
+    ],
   });
 
   const verified: string[] = [];
@@ -267,20 +319,60 @@ export async function runGoalVerdict(
     for (const task of tasks) {
       const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
       if (ts.status !== "in-review") continue;
-      await runTaskVerify(task.id, { cwd: root, approve: true });
+      await runTaskVerify(task.id, { cwd: root, approve: true, goalVerdict: true });
       verified.push(task.id);
     }
   }
 
   let filed: string | null = null;
+  let createdTask: string | null = null;
   if (!options.pass) {
-    const req = await runReqNew({
-      cwd: root,
-      title: `Gaps found by the ${goalId} QA gate`,
-      source: `qa-engineer via verify-acceptance-criteria on ${goalId}`,
-    });
-    filed = req.id;
+    if (options.newScope) {
+      const req = await runReqNew({
+        cwd: root,
+        title: `New scope found by the ${goalId} QA gate: ${options.summary}`,
+        source: `qa-engineer via verify-acceptance-criteria on ${goalId}`,
+      });
+      filed = req.id;
+    } else {
+      const inheritedTargets = goal.targets.length > 0
+        ? goal.targets
+        : [...new Set(tasks.flatMap((task) => task.targets))];
+      const repair = await runTaskNew({
+        cwd: root,
+        goal: goal.id,
+        name: `QA gap: ${options.summary}`,
+        targets: options.targets ?? inheritedTargets,
+        agent: options.agent ?? "software-engineer",
+        kind: options.kind ?? "implementation",
+        body:
+          `\n## Objective\n\nClose the in-scope gap found by the ${goal.id} QA gate.\n\n` +
+          `## QA finding\n\n${options.summary}\n\n` +
+          (options.note?.length ? `## Required changes\n\n${options.note.map((note) => `- ${note}`).join("\n")}\n\n` : "") +
+          `## Done when\n\n- The finding is fixed and linked to acceptance evidence.\n- Goal-level QA is run again.\n`,
+      });
+      createdTask = repair.id;
+    }
   }
 
-  return { goalId, pass: options.pass, verifiedTasks: verified, filedRequirement: filed };
+  await mutateState(goal.dir, goal.id, (draft) => {
+    draft.qa = {
+      briefRunId: state.qa?.briefRunId ?? null,
+      briefRecordedAt: state.qa?.briefRecordedAt ?? null,
+      verdict: options.pass ? "pass" : "gap",
+      summary: options.summary,
+      verdictRunId: verdictLog.runId,
+      verdictRecordedAt: new Date().toISOString(),
+      verdictBy: options.who?.trim() ?? null,
+      model: options.model ?? state.qa?.model ?? null,
+    };
+  });
+
+  return {
+    goalId,
+    pass: options.pass,
+    verifiedTasks: verified,
+    filedRequirement: filed,
+    createdTask,
+  };
 }

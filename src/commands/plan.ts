@@ -11,6 +11,7 @@ import {
   type ResolvedModel,
 } from "../models.js";
 import { allocateRunId, writeDetail } from "../runs.js";
+import { mutateState, newTaskState } from "../state.js";
 
 
 /**
@@ -237,6 +238,10 @@ _Short rationale for how this goal splits into its tasks._
         requirementId: options.from,
         targets: [],
         taskIds: [],
+        completionPolicy: {
+          qaRequired: true,
+          acceptanceEvidenceRequired: true,
+        },
         createdAt: new Date().toISOString(),
       }
     )
@@ -528,11 +533,8 @@ export async function runTaskNew(options: {
 
   const id = await nextId(root, manifest.projectKey, "T");
   const file = path.join(goal.dir, "tasks", `${id}.md`);
-
-  await fs.writeFile(
-    file,
-    matter.stringify(
-      options.body ?? `\n## Objective
+  const taskBody = matter.stringify(
+    options.body ?? `\n## Objective
 _What "done" means for this unit._
 
 ## Steps
@@ -541,28 +543,43 @@ _What "done" means for this unit._
 ## Done when
 - _…_
 `,
-      {
-        id,
-        goalId: goal.id,
-        name: options.name,
-        targets: options.targets ?? [],
-        dependsOn: options.dependsOn ?? [],
-        ...(options.agent ? { agent: options.agent } : {}),
-        kind: options.kind ?? "implementation",
-        status: "todo",
-      }
-    )
+    {
+      id,
+      goalId: goal.id,
+      name: options.name,
+      targets: options.targets ?? [],
+      dependsOn: options.dependsOn ?? [],
+      ...(options.agent ? { agent: options.agent } : {}),
+      kind: options.kind ?? "implementation",
+      status: "todo",
+    }
   );
 
   // Keep the goal's taskIds in sync — it's the down-link in the traceability
   // chain, and nothing else maintains it.
   const goalFile = path.join(goal.dir, "goal.md");
-  const parsed = matter(await fs.readFile(goalFile, "utf8"));
+  const originalGoal = await fs.readFile(goalFile, "utf8");
+  const parsed = matter(originalGoal);
   const fm = parsed.data as Record<string, unknown>;
   const ids = Array.isArray(fm.taskIds) ? fm.taskIds.map(String) : [];
   if (!ids.includes(id)) ids.push(id);
   fm.taskIds = ids;
-  await fs.writeFile(goalFile, matter.stringify(parsed.content, fm));
+
+  // These three writes are one logical operation. Roll authored files back if
+  // the atomic state writer fails, so a stored `done` goal cannot survive beside
+  // newly-created work (the real SHOP-G12 failure).
+  await fs.writeFile(file, taskBody);
+  try {
+    await fs.writeFile(goalFile, matter.stringify(parsed.content, fm));
+    await mutateState(goal.dir, goal.id, (state) => {
+      state.tasks[id] = newTaskState("todo");
+      delete state.qa;
+    });
+  } catch (err) {
+    await fs.remove(file).catch(() => {});
+    await fs.writeFile(goalFile, originalGoal).catch(() => {});
+    throw err;
+  }
 
   return { id, file: path.relative(root, file), goalId: goal.id };
 }

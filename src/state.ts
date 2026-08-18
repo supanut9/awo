@@ -98,6 +98,21 @@ export interface CriterionEvidence {
   kind: CriterionEvidenceKind;
   ref: string;
   recordedAt: string;
+  /** Exceptions are decisions, not measurements, so name the accepting human. */
+  acceptedBy?: string;
+}
+
+export interface GoalQaState {
+  /** The most recent read-only QA brief assembled for this exact work state. */
+  briefRunId: string | null;
+  briefRecordedAt: string | null;
+  verdict: "pass" | "gap" | null;
+  summary: string | null;
+  verdictRunId: string | null;
+  verdictRecordedAt: string | null;
+  /** Human who accepted responsibility for the goal-level decision. */
+  verdictBy: string | null;
+  model: string | null;
 }
 
 /** §7.2 — a goal's status is rolled up from its tasks, never hand-authored. */
@@ -118,6 +133,8 @@ export interface GoalState {
   tasks: Record<string, TaskState>;
   /** 1-based acceptance-criterion index -> evidence gathered for the criterion. */
   criteria?: Record<string, CriterionEvidence[]>;
+  /** Goal-level QA is separate from task success and is invalidated by new work. */
+  qa?: GoalQaState;
 }
 
 /** The authored task files are the inventory; state.json supplies their runtime state. */

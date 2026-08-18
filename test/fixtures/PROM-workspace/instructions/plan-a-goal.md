@@ -37,10 +37,11 @@ Sequence for `awo goal plan PROM-G#`, owned by `tech-lead` (preceded by
      normally runs low (e.g. "define the data model"). See §12.
 5. Leave tasks in `todo` status for human review before `awo task run`
    is used (draft → approve gate).
-6. Once every task reaches `done` (see **ship-a-change**), hand off to
+6. Once every task is closed for QA (see **ship-a-change**), hand off to
    `qa-engineer` for **verify-acceptance-criteria** before the goal is
-   marked `done` (rule: `acceptance-criteria-required`). A gap found there
-   re-enters via `file-bug` → back to `product-manager`.
+   marked `done` (rule: `acceptance-criteria-required`). In-scope gaps become
+   repair tasks on the goal; human-confirmed new scope re-enters through
+   `file-bug` → `product-manager`.
 
 Finally, record the run (rule: `record-every-run`):
 `awo log add --label <short-slug> --agent tech-lead --model <model> --started <iso-when-you-began> --summary "<what you did>" --prompt "<the ask>"`

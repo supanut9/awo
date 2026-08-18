@@ -1,7 +1,7 @@
 ---
 id: AWO-F2
 title: Delivery integrity and stabilization
-status: proposed
+status: in-progress
 owners: [human, orchestrator]
 repositories: [awo, awo-dashboard]
 releaseOrder: [awo, awo-dashboard]
@@ -49,6 +49,20 @@ AWO can truthfully answer whether a goal is ready for human approval:
 
 The dashboard communicates readiness and blockers rather than only green task
 counts.
+
+## Implementation status
+
+The AWO safety core is implemented on `feature/truthful-readiness`: conservative
+read-time reconciliation plus `goal reconcile`, strict defaults for newly-created
+goals, attached QA state, `goal readiness`, criterion exception attribution,
+in-goal QA repair tasks, task-kind-aware completion checks, and automatic Git
+baseline/change evidence. Legacy tasks without an explicit kind retain their old
+contract to avoid turning historical investigations into false implementation
+warnings.
+
+Delivery groups, bounded stabilization records/budgets, run taxonomy, publishing
+profiles, migrations, and both dashboards remain follow-on scope. This document is
+therefore `in-progress`, not done.
 
 ## Scope
 

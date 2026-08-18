@@ -15,7 +15,7 @@ export interface CriterionTrace {
   index: number;
   criterion: string;
   evidence: CriterionEvidence[];
-  status: "covered" | "exception" | "missing";
+  status: "covered" | "exception" | "unapproved-exception" | "missing";
 }
 
 async function criteriaForGoal(root: string, goalId: string) {
@@ -38,6 +38,7 @@ export async function runTaskEvidence(options: {
   criterion: number;
   kind: CriterionEvidenceKind;
   ref: string;
+  who?: string;
   cwd?: string;
 }): Promise<CriterionEvidence> {
   if (!Number.isInteger(options.criterion) || options.criterion < 1) {
@@ -47,6 +48,9 @@ export async function runTaskEvidence(options: {
     throw new Error("--kind must be test, manual, or exception.");
   }
   if (options.ref.trim() === "") throw new Error("--ref cannot be empty.");
+  if (options.kind === "exception" && !options.who?.trim()) {
+    throw new Error("--kind exception requires --who <human> so the acceptance is attributable.");
+  }
 
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { task, goal } = await locateTask(root, options.taskId);
@@ -60,8 +64,10 @@ export async function runTaskEvidence(options: {
     kind: options.kind,
     ref: options.ref.trim(),
     recordedAt: new Date().toISOString(),
+    ...(options.kind === "exception" ? { acceptedBy: options.who!.trim() } : {}),
   };
   await mutateState(goal.dir, goal.id, (state) => {
+    delete state.qa;
     state.criteria ??= {};
     const entries = (state.criteria[String(options.criterion)] ??= []);
     if (!entries.some((item) => item.taskId === evidence.taskId && item.kind === evidence.kind && item.ref === evidence.ref)) {
@@ -79,9 +85,11 @@ export async function runGoalTrace(goalId: string, options: { cwd?: string } = {
     const evidence = state.criteria?.[String(i + 1)] ?? [];
     const status = evidence.some((item) => item.kind === "test" || item.kind === "manual")
       ? "covered"
-      : evidence.some((item) => item.kind === "exception")
+      : evidence.some((item) => item.kind === "exception" && item.acceptedBy?.trim())
         ? "exception"
-        : "missing";
+        : evidence.some((item) => item.kind === "exception")
+          ? "unapproved-exception"
+          : "missing";
     return { index: i + 1, criterion, evidence, status };
   });
 }

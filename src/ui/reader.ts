@@ -159,7 +159,7 @@ function coverage(criteria: string[], state?: Awaited<ReturnType<typeof readStat
   for (let i = 1; i <= criteria.length; i += 1) {
     const evidence = state?.criteria?.[String(i)] ?? [];
     if (evidence.some((item) => item.kind === "test" || item.kind === "manual")) covered += 1;
-    else if (evidence.some((item) => item.kind === "exception")) exceptions += 1;
+    else if (evidence.some((item) => item.kind === "exception" && item.acceptedBy?.trim())) exceptions += 1;
   }
   return { total: criteria.length, covered, exceptions };
 }
