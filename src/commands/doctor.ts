@@ -257,11 +257,25 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
     const state = await readState(goal.dir, goal.id);
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
 
-    // Work claimed with no evidence. The QA gate caught six such tasks composing
-    // into a broken feature (§9 item 47); this is the cheap version of that check.
-    if ((ts.status === "done" || ts.status === "in-review") && ts.lastRunId) {
+    // Evidence follows the authored task kind. Legacy tasks did not declare one,
+    // so retroactively calling every investigation "implementation" produced 112
+    // false commit warnings in SHOP and buried the real integrity error.
+    if (
+      task.kindExplicit &&
+      (ts.status === "done" || ts.status === "in-review") &&
+      ts.lastRunId
+    ) {
       const events = await readEvents(root, ts.lastRunId);
-      if (!events.some((e) => e.kind === "commit" || e.kind === "repo.diff")) {
+      if (
+        task.kind === "implementation" &&
+        events.some((e) => e.kind === "repo.baseline") &&
+        !events.some(
+          (e) =>
+            e.kind === "commit" ||
+            e.kind === "repo.diff" ||
+            (e.kind === "note" && e.category === "no-change")
+        )
+      ) {
         add({
           severity: "warn",
           area: "runs",
@@ -270,7 +284,10 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           group: "runs:no-commit-or-diff",
         });
       }
-      if (!events.some((e) => e.kind === "test")) {
+      if (
+        (task.kind === "implementation" || task.kind === "verification") &&
+        !events.some((e) => e.kind === "test")
+      ) {
         add({
           severity: "warn",
           area: "runs",

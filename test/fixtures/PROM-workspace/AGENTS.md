@@ -104,7 +104,7 @@ boundaries. A human naming a role explicitly always overrides the above.
 <!-- awo:generated skills -->
 - `create-commit` — stage + commit with a conventional message.
 - `create-task-worktree` — give a task its own isolated git worktree + branch.
-- `file-bug` — turn a QA-found gap into a new requirement.
+- `file-bug` — promote a human-confirmed new-scope gap to a requirement.
 - `open-pr` — branch, push, open a PR from the template.
 - `refine-requirement` — turn a raw ask into a clear, scoped requirement.
 - `resolve-pr` — address review feedback, then follow configured merge authority.
@@ -117,7 +117,7 @@ boundaries. A human naming a role explicitly always overrides the above.
 <!-- awo:generated agents -->
 - `code-reviewer` — reviews PRs and reports readiness; it never approves.
 - `product-manager` — owns intake: raw ask → refined requirement → goal.
-- `qa-engineer` — verifies a goal's definition-of-done as a whole; files gaps as new requirements.
+- `qa-engineer` — verifies a goal as a whole; routes in-scope gaps to repair and new scope to intake.
 - `release-engineer` — takes a verified task through its configured PR outcome.
 - `software-engineer` — writes the code for a task and verifies it via tests.
 - `tech-lead` — decomposes a goal into runnable tasks.

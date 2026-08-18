@@ -235,6 +235,98 @@ test("a full run: open -> events -> complete, writing state, events, index and d
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test("explicit implementation tasks capture Git change evidence automatically", () => {
+  const ws = makeWorkspace();
+  const repoPath = JSON.parse(
+    fs.readFileSync(path.join(ws, ".workspace", "manifest.json"), "utf8")
+  ).repos[0].path as string;
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repoPath });
+  execFileSync("git", ["add", "-A"], { cwd: repoPath });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repoPath });
+
+  const taskFile = path.join(ws, "goals", "TEST-G1-demo", "tasks", "TEST-T1-first.md");
+  fs.writeFileSync(
+    taskFile,
+    fs.readFileSync(taskFile, "utf8").replace("agent: software-engineer", "agent: software-engineer\nkind: implementation")
+  );
+
+  assert.equal(awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]).code, 0);
+  const runId = readState(ws).tasks["TEST-T1"].lastRunId!;
+  assert.ok(runLines(ws, runId).some((event) => event.kind === "repo.baseline"));
+  fs.appendFileSync(path.join(repoPath, "README.md"), "changed\n");
+  assert.equal(awo(ws, ["task", "event", "TEST-T1", "test", "--run", "true"]).code, 0);
+
+  const completed = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  assert.equal(completed.code, 0, completed.stderr);
+  const events = runLines(ws, runId);
+  const diff = events.find((event) => event.kind === "repo.diff");
+  assert.equal(diff?.auto, true);
+  assert.equal(diff?.repo, "api");
+  assert.equal(diff?.fileCount, 1);
+  assert.deepEqual((diff?.files as string[]).map((file) => file.trim()), ["M README.md"]);
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("an unchanged implementation needs an explicit reason, not silent success", () => {
+  const ws = makeWorkspace();
+  const repoPath = JSON.parse(
+    fs.readFileSync(path.join(ws, ".workspace", "manifest.json"), "utf8")
+  ).repos[0].path as string;
+  execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repoPath });
+  execFileSync("git", ["add", "-A"], { cwd: repoPath });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repoPath });
+  const taskFile = path.join(ws, "goals", "TEST-G1-demo", "tasks", "TEST-T1-first.md");
+  fs.writeFileSync(
+    taskFile,
+    fs.readFileSync(taskFile, "utf8").replace("agent: software-engineer", "agent: software-engineer\nkind: implementation")
+  );
+
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  awo(ws, ["task", "event", "TEST-T1", "test", "--run", "true"]);
+  const refused = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /Git shows no commit or diff/);
+  const accepted = awo(ws, [
+    "task", "complete", "TEST-T1", "--outcome", "success", "--unchanged", "configuration was already correct",
+  ]);
+  assert.equal(accepted.code, 0, accepted.stderr);
+  assert.ok(
+    runLines(ws, readState(ws).tasks["TEST-T1"].lastRunId!).some(
+      (event) => event.kind === "note" && event.category === "no-change"
+    )
+  );
+
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(repoPath, { recursive: true, force: true });
+});
+
+test("investigation evidence requires a finding, not an invented test or commit", () => {
+  const ws = makeWorkspace();
+  const taskFile = path.join(ws, "goals", "TEST-G1-demo", "tasks", "TEST-T1-first.md");
+  fs.writeFileSync(
+    taskFile,
+    fs.readFileSync(taskFile, "utf8").replace(
+      "agent: software-engineer",
+      "agent: software-engineer\nkind: investigation"
+    )
+  );
+
+  awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
+  const refused = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /investigation work.*requires --summary/);
+  const accepted = awo(ws, [
+    "task", "complete", "TEST-T1", "--outcome", "success",
+    "--summary", "The endpoint already returns the required field; no change is needed.",
+  ]);
+  assert.equal(accepted.code, 0, accepted.stderr);
+  assert.equal(readState(ws).tasks["TEST-T1"].status, "done");
+  assert.ok(!/no commit or diff|no test evidence/.test(awo(ws, ["doctor"]).stdout));
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 test("a task with unmet dependencies is blocked rather than run", () => {
   const ws = makeWorkspace();
   const out = awo(ws, ["task", "run", "TEST-T2"]);
@@ -665,6 +757,32 @@ test("context treats authored tasks missing from state as inconsistent", () => {
   const doctor = awo(ws, ["doctor"]);
   assert.equal(doctor.code, 1);
   assert.match(`${doctor.stdout}\n${doctor.stderr}`, /missing authored task/);
+
+  const repaired = awo(ws, ["goal", "reconcile", "TEST-G1"]);
+  assert.equal(repaired.code, 0, repaired.stderr);
+  assert.match(repaired.stdout, /added:   TEST-T2/);
+  assert.match(repaired.stdout, /TEST-G1 reconciled — planning/);
+  assert.ok(!/TEST-G1 inconsistent/.test(awo(ws, ["context"]).stdout));
+  const persisted = readState(ws);
+  assert.equal(persisted.tasks["TEST-T2"].status, "todo");
+  assert.equal(persisted.goalStatus, "planning");
+  assert.match(
+    fs.readFileSync(onlyDayFile(ws, "runs.md"), "utf8"),
+    /Reconciled TEST-G1: added 1, removed 0/
+  );
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("goal progress distinguishes cancelled work from completed work", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["task", "status", "TEST-T1", "cancelled"]);
+  awo(ws, ["task", "status", "TEST-T2", "cancelled"]);
+
+  const listed = awo(ws, ["goal", "list"]);
+  assert.match(listed.stdout, /TEST-G1\t0\/2 done, 2 cancelled, 2\/2 closed/);
+  const context = awo(ws, ["context"]);
+  assert.match(context.stdout, /0\/2 done \+ 2 cancelled \(2\/2 closed\)/);
+  assert.match(context.stdout, /all tasks are closed/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -1001,8 +1119,8 @@ test("recheck attaches real evidence to a task closed without any", () => {
     [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then"],
     { cwd: ws }
   );
-  assert.match(awo(ws, ["task", "show", "EV-T1"]).stdout, /status: {3}done/);
-  assert.match(awo(ws, ["doctor"]).stdout, /EV-T1 is done with no test evidence/);
+  assert.match(awo(ws, ["task", "show", "EV-T1"]).stdout, /status: {3}in-review/);
+  assert.match(awo(ws, ["doctor"]).stdout, /EV-T1 is in-review with no test evidence/);
 
   // doctor's advice must be runnable. The old text said `task event`, which cannot
   // work on a closed task — assert the advice names the command that does.
@@ -1010,7 +1128,7 @@ test("recheck attaches real evidence to a task closed without any", () => {
 
   const rechecked = awo(ws, ["task", "recheck", "EV-T1", "--run", "./t.sh", "--baseline"]);
   assert.equal(rechecked.code, 0, rechecked.stderr);
-  assert.match(rechecked.stdout, /done -> done — pass/);
+  assert.match(rechecked.stdout, /in-review -> in-review — pass/);
 
   // The original run is untouched; the verification is a new one (append-only).
   const runs = dayRows(ws).filter((r) => r.taskId === "EV-T1");
@@ -1027,7 +1145,7 @@ test("recheck that fails says the original close was wrong, and does not hide it
   const { ws, worktree } = makeEvidenceWorkspace();
   execFileSync(
     process.execPath,
-    [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then"],
+    [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then", "--unchanged", "legacy close had no repo change"],
     { cwd: ws }
   );
 
@@ -1057,7 +1175,7 @@ test("a recheck against an already-red suite is inconclusive, not a verdict on t
   const { ws, worktree } = makeEvidenceWorkspace({ brokenAtBase: true });
   execFileSync(
     process.execPath,
-    [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then"],
+    [CLI, "task", "complete", "EV-T1", "--outcome", "success", "--untested", "no runner then", "--unchanged", "legacy close had no repo change"],
     { cwd: ws }
   );
   fs.writeFileSync(path.join(worktree, "README.md"), "unrelated\n");
@@ -1107,7 +1225,10 @@ test("what the worker was told is recorded at run-open, not left to be remembere
   // And it reaches the record with nobody passing --prompt, which is the whole point:
   // 28 of 28 records from the first real run said "_not recorded_".
   awo(ws, ["task", "event", "EV-T1", "test", "--run", "./t.sh"]);
-  awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--summary", "done"]);
+  awo(ws, [
+    "task", "complete", "EV-T1", "--outcome", "success", "--summary", "done",
+    "--unchanged", "this run only verified the existing behavior",
+  ]);
   const record = runRecord(ws, String(briefs.at(-1)!.runId));
   assert.match(record, /### User prompt\n+You are software-engineer/);
   assert.ok(!/### User prompt\n_not recorded_/.test(record));

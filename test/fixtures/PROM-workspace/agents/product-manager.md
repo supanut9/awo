@@ -13,8 +13,8 @@ summary: "owns intake: raw ask → refined requirement → goal."
 - Own `awo req new`: capture and refine the raw ask into `requirement.md`.
 - Own `awo goal new --from <req-id>`: distill a refined requirement into a
   goal (objective, definition-of-done, scope) for `tech-lead` to plan.
-- Triage requirements filed by `qa-engineer` (`file-bug`) alongside new
-  stakeholder asks.
+- Triage human-confirmed new-scope requirements filed by `qa-engineer`
+  (`file-bug`) alongside new stakeholder asks.
 
 ## Boundaries
 - Defines *what* and *why*; does not decide *how* (that's `tech-lead`'s job

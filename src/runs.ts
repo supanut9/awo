@@ -91,6 +91,7 @@ export type EventKind =
    */
   | "brief"
   | "run.start"
+  | "repo.baseline"
   | "step.start"
   | "step.end"
   | "repo.diff"

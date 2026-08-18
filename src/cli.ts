@@ -54,6 +54,7 @@ import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
 import { formatContext, runContext } from "./commands/context.js";
 import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
+import { runGoalReadiness, runGoalReconcile } from "./commands/readiness.js";
 import { credentialPath, runPublish, runPublishWatch } from "./commands/publish.js";
 import { runDispatch } from "./commands/dispatch.js";
 import { formatAgentOrg, runAgentOrg } from "./commands/agent-org.js";
@@ -917,6 +918,52 @@ goal
   });
 
 goal
+  .command("readiness <goalId>")
+  .description("Report every blocker between the goal's current state and a truthful QA-ready result.")
+  .option("--json", "machine-readable result")
+  .action(async (goalId: string, opts: { json?: boolean }) => {
+    try {
+      const r = await runGoalReadiness(goalId);
+      if (opts.json) {
+        console.log(JSON.stringify(r, null, 2));
+      } else {
+        console.log(`${r.goalId} ${r.ready ? "READY" : "NOT READY"} (${r.status})`);
+        console.log(`tasks: ${Object.entries(r.tasks.byStatus).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`);
+        if (r.criteria) {
+          console.log(
+            `criteria: ${r.criteria.covered} covered, ${r.criteria.exceptions} accepted exception, ${r.criteria.missing} missing`
+          );
+        }
+        console.log(
+          `qa: ${r.qa.briefRunId ?? "no brief"} · ${r.qa.verdict ?? "no verdict"}` +
+            `${r.qa.verdictBy ? ` by ${r.qa.verdictBy}` : ""}`
+        );
+        for (const blocker of r.blockers) console.log(`- ${blocker.code}: ${blocker.message}`);
+      }
+      if (!r.ready) process.exitCode = 1;
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("reconcile <goalId>")
+  .description("Persist authored-task/runtime-state reconciliation and record the repair in the run log.")
+  .action(async (goalId: string) => {
+    try {
+      const r = await runGoalReconcile(goalId);
+      console.log(`${r.goalId} reconciled — ${r.status}`);
+      console.log(`added:   ${r.added.join(", ") || "none"}`);
+      console.log(`removed: ${r.removed.join(", ") || "none"}`);
+      console.log(`log:     ${r.runId}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
   .command("verify <goalId>")
   .description(
     "Assemble the goal-level QA gate: the definition-of-done, every task's branch and diff, and the high-tier invocation to review it read-only (§7.1)."
@@ -935,7 +982,7 @@ goal
         console.log(`\nNOT READY: ${r.unfinished.join(", ")} — the gate judges finished work.`);
       }
       console.log(`\nreview with: ${r.invocation}`);
-      console.log(`then record: awo goal verdict ${goalId} --pass|--gap --summary "…"`);
+      console.log(`then record: awo goal verdict ${goalId} --pass|--gap --summary "…" --who "<human>"`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -951,7 +998,10 @@ goal
       for (const row of rows) {
         console.log(`${row.index}\t${row.status}\t${row.criterion}`);
         for (const evidence of row.evidence) {
-          console.log(`  ${evidence.kind}\t${evidence.taskId}\t${evidence.ref}`);
+          console.log(
+            `  ${evidence.kind}\t${evidence.taskId}\t${evidence.ref}` +
+              `${evidence.acceptedBy ? `\taccepted by ${evidence.acceptedBy}` : ""}`
+          );
         }
       }
     } catch (err) {
@@ -962,13 +1012,29 @@ goal
 
 goal
   .command("verdict <goalId>")
-  .description("Record the QA gate's outcome: --pass verifies the in-review tasks, --gap files a new requirement.")
+  .description("Record the QA gate's outcome: --pass enforces readiness; --gap creates an in-goal repair task unless --new-scope is explicit.")
   .option("--pass", "the goal meets its definition of done")
-  .option("--gap", "it does not — file the finding as a requirement")
+  .option("--gap", "it does not — create a repair task on this goal")
+  .option("--new-scope", "the gap is outside the approved goal — file a new requirement")
+  .option("--targets <repos>", "repair-task repos; defaults to the goal targets", (v) => v.split(","))
+  .option("--agent <agent>", "repair-task owner (default: software-engineer)")
+  .option("--kind <kind>", "repair-task evidence contract")
   .requiredOption("--summary <text>", "the verdict, in one or two sentences")
+  .option("--who <human>", "human responsible for the verdict; required by governed goals")
   .option("--note <text...>", "the prioritised changes, risks, follow-ups")
   .option("--model <model>", "which model produced the verdict")
-  .action(async (goalId: string, opts: { pass?: boolean; gap?: boolean; summary: string; note?: string[]; model?: string }) => {
+  .action(async (goalId: string, opts: {
+    pass?: boolean;
+    gap?: boolean;
+    newScope?: boolean;
+    targets?: string[];
+    agent?: string;
+    kind?: "implementation" | "investigation" | "verification" | "decision" | "deployment-data";
+    summary: string;
+    who?: string;
+    note?: string[];
+    model?: string;
+  }) => {
     try {
       if (opts.pass === Boolean(opts.gap)) {
         throw new Error("Pass exactly one of --pass or --gap.");
@@ -976,6 +1042,9 @@ goal
       const r = await runGoalVerdict(goalId, { ...opts, pass: Boolean(opts.pass) });
       console.log(`${goalId}: ${r.pass ? "PASS" : "GAP"} recorded.`);
       if (r.verifiedTasks.length > 0) console.log(`verified: ${r.verifiedTasks.join(", ")}`);
+      if (r.createdTask) {
+        console.log(`repair:   ${r.createdTask} — stays on ${goalId}; run goal-level QA again after it closes`);
+      }
       if (r.filedRequirement) {
         console.log(`filed:    ${r.filedRequirement} — turn it into a goal with \`awo goal new --from ${r.filedRequirement}\``);
       }
@@ -991,11 +1060,12 @@ goal
   .action(async () => {
     try {
       const rows = await runTaskList();
-      const byGoal = new Map<string, { total: number; done: number; blocked: number }>();
+      const byGoal = new Map<string, { total: number; done: number; cancelled: number; blocked: number }>();
       for (const r of rows) {
-        const g = byGoal.get(r.goalId) ?? { total: 0, done: 0, blocked: 0 };
+        const g = byGoal.get(r.goalId) ?? { total: 0, done: 0, cancelled: 0, blocked: 0 };
         g.total += 1;
         if (r.status === "done") g.done += 1;
+        if (r.status === "cancelled") g.cancelled += 1;
         if (r.status === "blocked") g.blocked += 1;
         byGoal.set(r.goalId, g);
       }
@@ -1004,7 +1074,12 @@ goal
         return;
       }
       for (const [id, g] of byGoal) {
-        console.log(`${id}\t${g.done}/${g.total} done${g.blocked ? `, ${g.blocked} blocked` : ""}`);
+        const closed = g.done + g.cancelled;
+        console.log(
+          `${id}\t${g.done}/${g.total} done` +
+            `${g.cancelled ? `, ${g.cancelled} cancelled, ${closed}/${g.total} closed` : ""}` +
+            `${g.blocked ? `, ${g.blocked} blocked` : ""}`
+        );
       }
     } catch (err) {
       console.error((err as Error).message);
@@ -1095,7 +1170,8 @@ task
   .requiredOption("--criterion <n>", "1-based acceptance-criterion number", (v) => parseInt(v, 10))
   .requiredOption("--kind <kind>", "test | manual | exception")
   .requiredOption("--ref <text>", "test command/run ID, manual evidence URL, or exception reference")
-  .action(async (taskId: string, opts: { criterion: number; kind: "test" | "manual" | "exception"; ref: string }) => {
+  .option("--who <human>", "human accepting an exception; required for --kind exception")
+  .action(async (taskId: string, opts: { criterion: number; kind: "test" | "manual" | "exception"; ref: string; who?: string }) => {
     try {
       const evidence = await runTaskEvidence({ taskId, ...opts });
       console.log(`criterion ${opts.criterion} <- ${evidence.kind} evidence from ${taskId}`);
@@ -1283,9 +1359,13 @@ task
   .option("--note <text...>", "deferred items, risks, follow-ups")
   .option("--gate", "route a success to in-review for the QA gate instead of done")
   .option("--untested <why>", "close as success without test evidence, stating why (tests-must-pass)")
+  // Commander reserves every `--no-*` flag for boolean negation, so a reasoned
+  // exception needs a positive flag name or the supplied string is discarded.
+  .option("--unchanged <why>", "implementation intentionally produced no commit or diff")
   .action(async (taskId: string, opts: Record<string, never>) => {
     try {
-      const r = await runTaskComplete(taskId, opts as unknown as { outcome: string });
+      const input = opts as unknown as { outcome: string; unchanged?: string };
+      const r = await runTaskComplete(taskId, { ...input, noChange: input.unchanged });
       console.log(`${r.taskId} run ${r.runId} -> ${r.outcome}; task is now ${r.status}.`);
       console.log(`log: ${r.detail}`);
     } catch (err) {

@@ -12,6 +12,8 @@ export interface TaskDefinition {
   agent: string | null;
   /** Evidence contracts differ for code, investigation, QA, and human decisions. */
   kind: TaskKind;
+  /** Legacy tasks had no kind; do not retroactively impose implementation evidence. */
+  kindExplicit: boolean;
   /** Frontmatter `status:` is the AUTHORED starting state only (§7.2). */
   authoredStatus: TaskStatus;
   /**
@@ -48,6 +50,7 @@ export interface GoalDefinition {
   id: string;
   title: string;
   dir: string;
+  targets: string[];
   taskIds: string[];
   completionPolicy: CompletionPolicy;
 }
@@ -109,6 +112,7 @@ export async function readTaskFile(file: string): Promise<TaskDefinition> {
     dependsOn: asArray(fm.dependsOn),
     agent: typeof fm.agent === "string" ? fm.agent : null,
     kind: TASK_KINDS.includes(fm.kind as TaskKind) ? (fm.kind as TaskKind) : "implementation",
+    kindExplicit: TASK_KINDS.includes(fm.kind as TaskKind),
     authoredStatus: authored as TaskStatus,
     tier:
       fm.tier === "high" || fm.tier === "standard" || fm.tier === "low" ? fm.tier : null,
@@ -139,6 +143,7 @@ export async function findGoals(workspaceRoot: string): Promise<GoalDefinition[]
       id,
       title: typeof fm.title === "string" ? fm.title : id,
       dir,
+      targets: asArray(fm.targets),
       taskIds: tasks.map((t) => t.id),
       completionPolicy: completionPolicy(fm.completionPolicy),
     });

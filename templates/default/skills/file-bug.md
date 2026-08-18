@@ -1,19 +1,19 @@
 ---
 id: file-bug
-name: File a bug as a new requirement
-description: Turn a QA-found gap into a new requirement, re-entering the pipeline
+name: Promote a new-scope gap to a requirement
+description: Turn a human-confirmed out-of-scope QA gap into a new requirement
 requires:
   connectors: []
-summary: turn a QA-found gap into a new requirement.
+summary: promote a human-confirmed new-scope gap to a requirement.
 ---
 
 ## When to use
-Whenever `verify-acceptance-criteria` (or any exploratory testing) finds a
-gap between expected and actual behavior.
+Only after a human confirms that a QA gap is outside the approved goal scope.
+In-scope gaps stay on the goal as repair tasks.
 
 ## Steps
-1. Create a new `requirement.md` (next `{{PROJECT_KEY}}-R#`) describing the gap as the
-   "Raw requirement", with `source` noting which goal/task surfaced it.
+1. Run `awo goal verdict <goal> --gap --new-scope --summary "…" --who "<human>"`,
+   with `source` noting which goal/task surfaced it.
 2. Set `status: refined` if the gap is already well-understood, else `draft`.
 3. Link back: reference the originating `goalId`/`taskId` in the body so the
    bug's provenance is traceable.

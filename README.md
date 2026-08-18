@@ -69,12 +69,13 @@ awo test-command my-api "npm test"       # declare how the repo verifies itself,
 awo task run SHOP-T1 --instruction "…"   # opens the run, creates the worktree,
                                           # resolves the model, records the brief
 awo task event SHOP-T1 test --run "npm test" --baseline   # awo RUNS it and records
-awo task complete SHOP-T1 --outcome success --gate
+awo task complete SHOP-T1 --outcome success
 awo task evidence SHOP-T1 --criterion 1 --kind test --ref "npm test"
 awo goal trace SHOP-G1
 
 awo goal verify SHOP-G1                   # assemble the QA gate for a high-tier review
-awo goal verdict SHOP-G1 --pass --summary "meets the definition of done"
+awo goal readiness SHOP-G1                # blockers: tasks, criteria, attached QA
+awo goal verdict SHOP-G1 --pass --summary "meets the definition of done" --who "QA owner"
 
 awo run --goal SHOP-G1 --until SHOP-T3    # work the plan, stopping before the verdict
 awo ui                                    # local dashboard on 127.0.0.1
@@ -108,7 +109,7 @@ awo goal new --from SHOP-R1
 awo task new --goal SHOP-G1 --name "Implement API contract" --targets api --agent software-engineer
 awo task dispatch SHOP-T1
 awo task event SHOP-T1 test --run "npm test" --baseline
-awo task complete SHOP-T1 --outcome success --gate
+awo task complete SHOP-T1 --outcome success
 awo task evidence SHOP-T1 --criterion 1 --kind test --ref "npm test"
 awo goal trace SHOP-G1
 awo goal verify SHOP-G1
@@ -168,14 +169,15 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | `awo req refine` · `propose` · `approve` · `reject` · `list` | Turn a wish into checkable criteria, then **a human accepts the terms**. `goal new` refuses anything unapproved. |
 | `awo run --goal <id> [--until <task>] [--yolo]` | Work the plan in dependency order. Stops at the gate, on failure, and always on evidence needing a human. |
 | `awo goal new --from <req>` | Turn a requirement into a goal, moving it in as `requirement.md`. |
-| `awo goal list` · `goal trace` · `goal verify` · `goal verdict` | Progress · criterion coverage · assemble the QA gate · record its outcome. |
-| `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`, `--label`. |
+| `awo goal list` · `goal trace` · `goal readiness` · `goal verify` · `goal verdict` | Task progress · criterion coverage · completion blockers · attach the QA gate · record its outcome. |
+| `awo goal reconcile <g>` | Persist a conservative authored-task/state repair and log it. |
+| `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`, `--kind`, `--label`. New tasks update state immediately. |
 | `awo task run <id> [--instruction <text>]` | Open a run: resolve dependencies, create the isolated worktree, resolve the model, and **record the brief the worker is given**. |
 | `awo task dispatch <id>` | Open a run **and spawn** the resolved worker, blocking until it exits. |
 | `awo task event <id> <kind>` | Record progress during a run. |
-| `awo task evidence <id> --criterion <n> --kind <test\|manual\|exception> --ref <text>` | Trace task evidence to an acceptance criterion. |
-| `awo task complete <id> --outcome <o>` | Close it. `--gate` routes success to review. |
-| `awo task verify <id> [--reject]` | QA gate on one task. |
+| `awo task evidence <id> --criterion <n> --kind <test\|manual\|exception> --ref <text>` | Trace evidence to a criterion. Exceptions also require `--who <human>`. |
+| `awo task complete <id> --outcome <o>` | Close it. Governed goals route success to review automatically; `--unchanged <why>` records an intentional no-diff implementation. |
+| `awo task verify <id> [--reject]` | Per-task QA for legacy/non-governed goals. Governed goals finish only through a passing goal verdict. |
 | `awo task recheck <id> --run <cmd>` | Attach real evidence to a task closed without any. Opens a new run; never rewrites the old one. |
 | `awo log list` · `log show` · `log tail` · `log add` | Run history, filterable by task/agent/repo/status/tier/effort. |
 

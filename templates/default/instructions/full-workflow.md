@@ -25,15 +25,16 @@ alternatives to it. Use this file when asked "what's our normal workflow."
    run in parallel; tasks on the same repo get isolated worktrees
    (rule: `isolate-task-worktrees`).
 4. **QA gate** — owner: `qa-engineer`. Skill: `verify-acceptance-criteria`.
-   Runs once **every** task under the goal reports `success` — verifies the
+   Runs once **every** task under the goal is closed for QA — verifies the
    goal's definition-of-done as a whole, not just per-task tests
    (rule: `acceptance-criteria-required`). Goal moves to `status: qa-review`
    while this runs.
    - **Pass** → goal moves to `status: done`.
-   - **Gap found** → `file-bug` opens a new requirement, referencing the
-     originating goal/task. Re-enters at **Intake**, triaged by
-     `product-manager` like any other ask. The goal itself is not blocked
-     indefinitely by this — scope the fix as new/follow-up work.
+   - **In-scope gap found** → `awo goal verdict <goal> --gap` creates a repair
+     task inside the goal. The goal reopens and must pass goal-level QA again.
+   - **New scope found** → `awo goal verdict <goal> --gap --new-scope` opens a
+     new requirement, referencing the originating goal. It re-enters at
+     **Intake**, triaged by `product-manager` like any other ask.
 5. **Merge authority** — owner: the party configured by
    `pullRequests.mergePolicy`. AI may keep fixing the PR until all required
    checks and actionable threads are resolved. `human-only` stops at **ready

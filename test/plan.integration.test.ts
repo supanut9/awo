@@ -130,12 +130,19 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /PL-T1 is running/);
 
-  // T2 depends on T1, so it must refuse until T1 is done.
+  // Strict goals keep successful work in review, but that must still unblock
+  // dependent implementation work or every dependency chain deadlocks before QA.
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--untested", "fixture"]);
+  assert.match(awo(ws, ["task", "show", "PL-T1"]).stdout, /status:   in-review/);
+  assert.match(
+    awo(ws, ["context"]).stdout,
+    /NEXT.*start PL-T2/,
+    "an in-review predecessor must not hide the next runnable task"
+  );
   assert.equal(awo(ws, ["task", "run", "PL-T2"]).code, 0);
 
   const goals = awo(ws, ["goal", "list"]);
-  assert.match(goals.stdout, /PL-G1\t1\/2 done/);
+  assert.match(goals.stdout, /PL-G1\t0\/2 done/);
 
   fs.rmSync(ws, { recursive: true, force: true });
 });
@@ -202,6 +209,46 @@ test("task new validates goal, targets and dependsOn before writing anything", (
     [],
     "no task file may be written when validation fails"
   );
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("task new atomically reopens a stored done goal and invalidates its QA verdict", () => {
+  const ws = makeWorkspace();
+  awo(ws, ["req", "new", "--title", "Thing"]);
+  approveRequirement(ws, "PL-R1");
+  awo(ws, ["goal", "new", "--from", "PL-R1"]);
+  awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Original", "--targets", "api"]);
+
+  const stateFile = path.join(ws, "goals", "PL-G1", "state.json");
+  const doneTask = {
+    status: "done", lastRunOutcome: "success", lastRunId: "old-run",
+    startedAt: null, finishedAt: new Date().toISOString(), attempts: 1,
+    worktree: null, blockedReason: null,
+  };
+  fs.writeFileSync(
+    stateFile,
+    JSON.stringify({
+      rev: 2, goalId: "PL-G1", goalStatus: "done", updatedAt: new Date().toISOString(),
+      tasks: { "PL-T1": doneTask },
+      qa: {
+        briefRunId: "old-brief", briefRecordedAt: new Date().toISOString(), verdict: "pass",
+        summary: "old pass", verdictRunId: "old-verdict", verdictRecordedAt: new Date().toISOString(),
+        model: "fixture",
+      },
+    }, null, 2)
+  );
+
+  const created = awo(ws, [
+    "task", "new", "--goal", "PL-G1", "--name", "Late-discovered work", "--targets", "api",
+  ]);
+  assert.equal(created.code, 0, created.stderr);
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8")) as {
+    goalStatus: string; tasks: Record<string, { status: string }>; qa?: unknown;
+  };
+  assert.equal(state.tasks["PL-T2"].status, "todo");
+  assert.equal(state.goalStatus, "planning");
+  assert.equal(state.qa, undefined, "new work makes an earlier QA pass stale immediately");
+  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t1\/2 done/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -397,7 +444,7 @@ test("only medium and high effort are selectable; low is normalized", () => {
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
+test("goal verify attaches the gate, readiness enforces evidence, and verdict routes pass vs gap", () => {
   const ws = makeWorkspace();
   const repoPath = JSON.parse(
     fs.readFileSync(path.join(ws, ".workspace", "manifest.json"), "utf8")
@@ -412,13 +459,23 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Tested bit", "--targets", "api"]);
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Untested bit", "--targets", "api"]);
 
+  const anonymousException = awo(ws, [
+    "task", "evidence", "PL-T1", "--criterion", "1", "--kind", "exception", "--ref", "not applicable",
+  ]);
+  assert.equal(anonymousException.code, 1);
+  assert.match(anonymousException.stderr, /requires --who <human>/);
+
   // One task with evidence, one excused — the gate must be able to tell them apart.
   awo(ws, ["task", "run", "PL-T1"]);
   // Measured, because an unmeasured claim no longer satisfies the gate.
   awo(ws, ["task", "event", "PL-T1", "test", "--run", "true"]);
-  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--gate"]);
+  awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--gate", "--unchanged", "fixture"]);
   awo(ws, ["task", "run", "PL-T2"]);
-  awo(ws, ["task", "complete", "PL-T2", "--outcome", "success", "--gate", "--untested", "no db"]);
+  awo(ws, ["task", "complete", "PL-T2", "--outcome", "success", "--gate", "--untested", "no db", "--unchanged", "fixture"]);
+  const evidence = awo(ws, [
+    "task", "evidence", "PL-T1", "--criterion", "1", "--kind", "test", "--ref", "run true",
+  ]);
+  assert.equal(evidence.code, 0, evidence.stderr);
 
   const v = awo(ws, ["goal", "verify", "PL-G1"]);
   assert.equal(v.code, 0, v.stderr);
@@ -445,24 +502,55 @@ test("goal verify assembles the gate, and verdict routes pass vs gap", () => {
   assert.match(brief, /feature\/PL-T1/);
   assert.match(brief, /closed WITHOUT test evidence/);
 
-  // GAP files a requirement rather than fixing silently, and leaves tasks alone.
-  const gap = awo(ws, ["goal", "verdict", "PL-G1", "--gap", "--summary", "contracts disagree", "--note", "unwrap the response"]);
-  assert.equal(gap.code, 0, gap.stderr);
-  assert.match(gap.stdout, /GAP recorded/);
-  assert.match(gap.stdout, /filed: {4}PL-R2/);
-  assert.match(awo(ws, ["task", "list"]).stdout, /PL-T1\tin-review/, "a gap must not close tasks");
+  // Before the verdict the work is passable, but not yet READY: the QA decision
+  // is a first-class part of completion rather than an untracked side effect.
+  const beforePass = awo(ws, ["goal", "readiness", "PL-G1", "--json"]);
+  assert.equal(beforePass.code, 1);
+  const readiness = JSON.parse(beforePass.stdout) as { ready: boolean; canPassVerdict: boolean; blockers: Array<{ code: string }> };
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.canPassVerdict, true);
+  assert.deepEqual(readiness.blockers.map((b) => b.code), ["qa-verdict-missing"]);
+
+  const bypass = awo(ws, ["task", "verify", "PL-T1"]);
+  assert.equal(bypass.code, 1);
+  assert.match(bypass.stderr, /cannot be approved independently/);
+  assert.match(awo(ws, ["task", "show", "PL-T1"]).stdout, /status:   in-review/);
 
   // PASS verifies the in-review tasks, which rolls the goal up to done.
-  const pass = awo(ws, ["goal", "verdict", "PL-G1", "--pass", "--summary", "meets DoD", "--model", "gpt-5.6-sol"]);
+  const unattributed = awo(ws, ["goal", "verdict", "PL-G1", "--pass", "--summary", "meets DoD"]);
+  assert.equal(unattributed.code, 1);
+  assert.match(unattributed.stderr, /requires --who <human>/);
+  const pass = awo(ws, ["goal", "verdict", "PL-G1", "--pass", "--summary", "meets DoD", "--who", "supanut", "--model", "gpt-5.6-sol"]);
   assert.equal(pass.code, 0, pass.stderr);
   assert.match(pass.stdout, /verified: PL-T1, PL-T2/);
   assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t2\/2 done/);
+  assert.equal(awo(ws, ["goal", "readiness", "PL-G1"]).code, 0);
 
-  // Both verdicts are in the log, attributed to qa-engineer.
+  // A finding that is genuinely outside the approved scope re-enters intake.
+  const outside = awo(ws, [
+    "goal", "verdict", "PL-G1", "--gap", "--new-scope",
+    "--summary", "support a second identity provider", "--who", "supanut",
+  ]);
+  assert.equal(outside.code, 0, outside.stderr);
+  assert.match(outside.stdout, /filed: {4}PL-R2/);
+  assert.ok(!/repair:/.test(outside.stdout));
+
+  // The normal GAP path stays inside the goal as an explicit repair task.
+  const gap = awo(ws, [
+    "goal", "verdict", "PL-G1", "--gap", "--summary", "contracts disagree",
+    "--who", "supanut", "--note", "unwrap the response",
+  ]);
+  assert.equal(gap.code, 0, gap.stderr);
+  assert.match(gap.stdout, /GAP recorded/);
+  assert.match(gap.stdout, /repair: {3}PL-T3/);
+  assert.match(awo(ws, ["task", "list"]).stdout, /PL-T3\ttodo/, "an in-scope gap must reopen the goal");
+  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t2\/3 done/);
+
+  // Every verdict is in the log, attributed to qa-engineer.
   const runs = dayRows(ws);
   const gates = runs.filter((r) => String(r.runId).includes("qa-gate-PL-G1"));
-  assert.equal(gates.length, 2);
-  assert.deepEqual(gates.map((g) => g.status).sort(), ["failed", "success"]);
+  assert.equal(gates.length, 3);
+  assert.deepEqual(gates.map((g) => g.status).sort(), ["failed", "failed", "success"]);
 
   const both = awo(ws, ["goal", "verdict", "PL-G1", "--pass", "--gap", "--summary", "x"]);
   assert.equal(both.code, 1);
