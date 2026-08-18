@@ -1,5 +1,5 @@
 {
-  "libraryVersion": "0.3.0",
+  "libraryVersion": "0.4.0",
   "files": {
     ".gitignore": "sha256-fade07ad783a7cc18e0936d07d0122fa913e20ffefd2426ebc33a029ab4fb8d0",
     ".vscode/settings.json": "sha256-e840a4fd9901e647654b323b9d4945b720a052ab8f4b6166e3e93adfbd12f260",
