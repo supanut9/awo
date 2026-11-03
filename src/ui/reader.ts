@@ -38,6 +38,9 @@ export interface GoalView {
   title: string;
   status: GoalStatus;
   tasks: TaskView[];
+  /** Filed under `goals/archive/`. Carried, not filtered out, so the dashboard
+   *  can still show finished work; `awo context` is the view that hides it. */
+  archived: boolean;
 }
 
 export interface AgentView {
@@ -241,6 +244,7 @@ export class FileReader implements WorkspaceReader {
         title: goal.title,
         status: state.goalStatus,
         tasks: tasks.map((t) => toView(t, state.tasks[t.id] ?? newTaskState(t.authoredStatus))),
+        archived: goal.archived,
       });
     }
     return out;

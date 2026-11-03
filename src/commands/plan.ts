@@ -230,6 +230,17 @@ _In scope / out of scope / non-goals / constraints._
 
 ## Task breakdown
 _Short rationale for how this goal splits into its tasks._
+
+## Decisions so far
+<!-- An INDEX, not a store: one line per resolved decision task, enough to judge
+     relevance, pointing at the task that holds the detail. A decision written out
+     in two places disagrees with itself within a fortnight. -->
+
+## Not yet specified
+<!-- Questions you can tell are coming but cannot phrase sharply yet. The test is
+     whether you can state the question now, not whether you can answer it: a sharp
+     question is a decision task, a vague area belongs here. See skills/chart-the-unknown.
+     Delete this section when the goal was never foggy. -->
 `,
       {
         id,

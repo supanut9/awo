@@ -35,6 +35,12 @@ import {
 import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 import { runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
+import {
+  runGoalArchive,
+  runGoalRestore,
+  runGoalList,
+  formatGoalProgress,
+} from "./commands/goal-archive.js";
 import { runGoalTrace, runTaskEvidence } from "./commands/traceability.js";
 import {
   runPrFinalize,
@@ -52,6 +58,11 @@ import { findAllTasks } from "./tasks.js";
 import { newTaskState, readState } from "./state.js";
 import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
+import {
+  runAgentSkillList,
+  runAgentSkillSync,
+  formatSyncResults,
+} from "./commands/agent-skills.js";
 import { formatContext, runContext } from "./commands/context.js";
 import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
 import { runGoalReadiness, runGoalReconcile } from "./commands/readiness.js";
@@ -864,6 +875,34 @@ goal
   });
 
 goal
+  .command("archive <goalId>")
+  .description("Move a finished or cancelled goal into goals/archive/, so the live list is only live work.")
+  .option("--force", "archive a goal that is not done or cancelled (abandoned without being marked)")
+  .action(async (goalId: string, opts: { force?: boolean }) => {
+    try {
+      const r = await runGoalArchive(goalId, { force: opts.force });
+      console.log(`${r.id} (${r.status}) archived: ${r.from} -> ${r.to}`);
+      console.log(`Its tasks, state and runs moved with it. Undo with: awo goal restore ${r.id}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("restore <goalId>")
+  .description("Pull an archived goal back into goals/.")
+  .action(async (goalId: string) => {
+    try {
+      const r = await runGoalRestore(goalId);
+      console.log(`${r.id} (${r.status}) restored: ${r.from} -> ${r.to}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
   .command("plan <goalId>")
   .description(
     "Assemble the tech-lead's task-decomposition brief and hand back a plan-mode invocation: the breakdown is proposed for your approval before any task file exists (§7.2)."
@@ -1056,30 +1095,25 @@ goal
 
 goal
   .command("list")
-  .description("List goals with rolled-up task status.")
-  .action(async () => {
+  .description("List goals with rolled-up task status — live by default, so the list is what is in flight.")
+  .option("--archived", "list archived goals instead")
+  .option("--all", "list both")
+  .action(async (opts: { archived?: boolean; all?: boolean }) => {
     try {
-      const rows = await runTaskList();
-      const byGoal = new Map<string, { total: number; done: number; cancelled: number; blocked: number }>();
-      for (const r of rows) {
-        const g = byGoal.get(r.goalId) ?? { total: 0, done: 0, cancelled: 0, blocked: 0 };
-        g.total += 1;
-        if (r.status === "done") g.done += 1;
-        if (r.status === "cancelled") g.cancelled += 1;
-        if (r.status === "blocked") g.blocked += 1;
-        byGoal.set(r.goalId, g);
-      }
-      if (byGoal.size === 0) {
-        console.log("No goals yet. Start with `awo req new --title \"…\"`.");
+      // Reads goals directly rather than grouping task rows: a goal that has no
+      // tasks yet is still a goal, and grouping by task made it invisible.
+      const rows = await runGoalList({ archived: opts.archived, all: opts.all });
+      if (rows.length === 0) {
+        console.log(
+          opts.archived
+            ? "No archived goals."
+            : "No live goals. Start with `awo req new --title \"…\"`."
+        );
         return;
       }
-      for (const [id, g] of byGoal) {
-        const closed = g.done + g.cancelled;
-        console.log(
-          `${id}\t${g.done}/${g.total} done` +
-            `${g.cancelled ? `, ${g.cancelled} cancelled, ${closed}/${g.total} closed` : ""}` +
-            `${g.blocked ? `, ${g.blocked} blocked` : ""}`
-        );
+      for (const r of rows) {
+        const where = r.archived ? "\t[archived]" : "";
+        console.log(`${r.id}\t${r.status}\t${formatGoalProgress(r)}${where}\t${r.title}`);
       }
     } catch (err) {
       console.error((err as Error).message);
@@ -1670,6 +1704,61 @@ for (const kind of ["agent", "skill"] as CatalogKind[]) {
         process.exitCode = 1;
       }
     });
+
+  if (kind === "skill") {
+    // External agent skills (§7.2) live under the same noun as the catalog because
+    // an agent looking for "another skill" should find one command group, not two.
+    group
+      .command("external")
+      .description("Show external agent skills declared in .workspace/agent-skills.json.")
+      .option("--json", "machine-readable declaration plus install state")
+      .action(async (opts: { json?: boolean }) => {
+        try {
+          const skills = await runAgentSkillList();
+          if (opts.json) {
+            console.log(JSON.stringify(skills, null, 2));
+            return;
+          }
+          if (skills.length === 0) {
+            console.log("no external agent skills declared.");
+            return;
+          }
+          for (const s of skills) {
+            const state =
+              s.installed.where === "workspace"
+                ? "installed"
+                : s.installed.where === "user"
+                  ? "user-global only"
+                  : s.installed.where === "partial"
+                    ? `partial, missing ${s.installed.missing.join(", ")}`
+                    : "not installed";
+            const bundle = s.skills.length > 1 ? ` (${s.skills.length} skills)` : "";
+            console.log(`${s.tier === "default" ? "*" : " "} ${s.name}${bundle}  [${state}]  ${s.source}`);
+            console.log(`    ${s.summary}`);
+          }
+          console.log("\n* = installed by `awo skill sync`; others need naming explicitly.");
+        } catch (err) {
+          console.error((err as Error).message);
+          process.exitCode = 1;
+        }
+      });
+
+    group
+      .command("sync [names...]")
+      .description("Install declared external agent skills into .claude/skills via the skills CLI.")
+      .option("--all", "include catalog-tier skills, not just default-tier")
+      .option("--dry-run", "report what would be installed, change nothing")
+      .action(async (names: string[], opts: { all?: boolean; dryRun?: boolean }) => {
+        try {
+          const results = await runAgentSkillSync(names, { all: opts.all, dryRun: opts.dryRun });
+          console.log(formatSyncResults(results));
+          if (results.some((r) => r.outcome === "failed")) process.exitCode = 1;
+        } catch (err) {
+          console.error((err as Error).message);
+          process.exitCode = 1;
+        }
+      });
+  }
 
   if (kind === "agent") {
     group

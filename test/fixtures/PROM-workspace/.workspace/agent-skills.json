@@ -1,0 +1,76 @@
+{
+  "$comment": [
+    "External agent skills (§7.2). These are NOT awo skills: awo's own skills are flat",
+    "markdown in skills/, read by an agent that was told to read them. These are open-",
+    "ecosystem skills — a directory with a SKILL.md under .claude/skills/, surfaced by",
+    "the harness itself. awo declares them here and `awo skill sync` installs them with",
+    "the `skills` CLI, so upstream stays live and the references/ directories that hold",
+    "the real payload come along.",
+    "",
+    "tier `default` installs on a bare `awo skill sync`; tier `catalog` waits to be named",
+    "(`awo skill sync seo`). Keep default-tier to things every workspace needs, or the",
+    "list turns into noise and stops being read — see rules/use-declared-skills.md.",
+    "",
+    "Nothing here duplicates an awo skill or rule. Deliberately excluded, because we",
+    "already have a sharper version and two procedures for one job is worse than one:",
+    "  verification-before-completion -> rule evidence-not-claims + tests-must-pass",
+    "  writing-plans / executing-plans -> instructions/plan-a-goal + `awo goal plan`",
+    "  using-git-worktrees            -> skills/create-task-worktree + isolate-task-worktrees",
+    "  requesting-code-review         -> skills/open-pr + rule pr-requirements",
+    "  skill-creator                  -> skills/author-a-skill (measured on real runs here)"
+  ],
+  "external": [
+    {
+      "name": "find-skills",
+      "source": "vercel-labs/skills",
+      "tier": "default",
+      "summary": "use when a task needs a capability this workspace has no skill for — search the ecosystem before hand-rolling the procedure."
+    },
+    {
+      "name": "agent-browser",
+      "source": "vercel-labs/agent-browser",
+      "tier": "default",
+      "summary": "use for anything that must be seen in a real browser — visual bugs, UAT journeys, form flows; it is the driver, judging from source is what it replaces.",
+      "requires": [
+        "npm i -g agent-browser && agent-browser install",
+        "the SKILL.md is a stub on purpose — run `agent-browser skills get core` for the real workflow"
+      ]
+    },
+    {
+      "name": "research",
+      "source": "mattpocock/skills",
+      "tier": "default",
+      "summary": "use before answering any question you would otherwise answer from memory or one file — it forces primary sources and leaves a cited markdown file behind."
+    },
+    {
+      "name": "diagnosing-bugs",
+      "source": "mattpocock/skills",
+      "tier": "default",
+      "summary": "use the moment something is broken, throwing, failing or slow — build a loop that goes red on the bug first, before proposing any fix."
+    },
+    {
+      "name": "seo",
+      "source": "addyosmani/web-quality-skills",
+      "tier": "catalog",
+      "summary": "use when asked to improve search visibility, meta tags, sitemaps or structured data — it audits against Lighthouse rather than guessing at ranking factors."
+    },
+    {
+      "name": "vercel-react-best-practices",
+      "source": "vercel-labs/agent-skills",
+      "tier": "catalog",
+      "summary": "use when writing or reviewing React/Next.js — 70 rules ranked by impact, with waterfalls and bundle size first."
+    },
+    {
+      "name": "frontend-design",
+      "source": "anthropics/skills",
+      "tier": "catalog",
+      "summary": "use when building a new UI surface and the look matters — it forces an aesthetic direction up front instead of the default templated result."
+    },
+    {
+      "name": "playwright-best-practices",
+      "source": "currents-dev/playwright-best-practices-skill",
+      "tier": "catalog",
+      "summary": "use before writing or debugging a Playwright spec — selectors, fixtures and parallelism are where these tests go flaky."
+    }
+  ]
+}

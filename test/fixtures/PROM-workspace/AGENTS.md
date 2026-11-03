@@ -29,13 +29,24 @@ requirements/archive/PROM-R2.md  suspended, cancelled or rejected
 goals/PROM-G1/goal.md            the objective and its definition of done
                     /requirement.md         the ask it came from
                     /tasks/PROM-T1.md   executable units
+goals/archive/PROM-G2/           done or cancelled — the whole folder moves
 logs/<date>/runs.jsonl                      every event + one row per run
 logs/<date>/runs.md                         every run's record, one section each
 logs/<date>/workers/                        raw worker output, when dispatched
 ```
 
 **See `instructions/full-workflow.md` for the canonical end-to-end sequence**
-— intake → plan → build & ship (per task) → QA gate → done.
+— intake → plan → build & ship (per task) → QA gate → done → archive.
+
+A goal that reaches `done` or `cancelled` is filed away with
+`awo goal archive <goal>`: the whole folder moves under `goals/archive/`, tasks,
+`state.json` and all, so `awo context` and `awo goal list` show only live work.
+Nothing is lost — history still resolves by id, and `awo goal restore <goal>`
+brings it back. `awo context` names the finished goals waiting to be filed.
+
+If a goal is too foggy to break into tasks at all — every draft task starts
+"depending on whether…" — plan its **decisions** first with `chart-the-unknown`,
+not its tasks.
 
 ## PR control loop
 Before working a pull request, run `awo pr preflight --repo <repo>`. Link it to
@@ -81,6 +92,7 @@ appears in the generated list.
 - `record-every-run` — every piece of work leaves a log entry; non-task work uses `awo log add`.
 - `stay-in-scope` — only touch repos declared as a task's `targets`.
 - `tests-must-pass` — a task/PR can't proceed with failing or unverified tests.
+- `use-declared-skills` — if a skill covers the step you are about to take, open it first and name it in the run — deciding it "looks straightforward" is how skills go unused.
 <!-- /awo:generated -->
 
 ## Choosing a role — you usually don't need to be told
@@ -102,6 +114,7 @@ boundaries. A human naming a role explicitly always overrides the above.
 
 ## Available skills
 <!-- awo:generated skills -->
+- `chart-the-unknown` — use when a goal is too big or too foggy to break into tasks — plan the DECISIONS first, one per session, before any task that touches a repo.
 - `create-commit` — stage + commit with a conventional message.
 - `create-task-worktree` — give a task its own isolated git worktree + branch.
 - `file-bug` — promote a human-confirmed new-scope gap to a requirement.
@@ -112,6 +125,33 @@ boundaries. A human naming a role explicitly always overrides the above.
 - `sync-repos` — reconcile `repos/` with the manifest before starting work.
 - `verify-acceptance-criteria` — check a goal's definition-of-done as a whole.
 <!-- /awo:generated -->
+
+## External agent skills
+These are **not** awo skills. awo's skills above are flat markdown you read; these
+are open-ecosystem skills installed under `.claude/skills/` and surfaced by the
+harness itself, so you invoke them the way you invoke any skill. They are declared
+in `.workspace/agent-skills.json` and installed by `awo skill sync`.
+
+Reach for them under the same rule as everything else (`use-declared-skills`): if
+one covers the step you are about to take, use it. The two that get skipped most
+are the two that feel like thinking rather than procedure — **`research`** before
+answering from memory or a single file, and **`diagnosing-bugs`** before proposing
+a fix for anything broken, throwing, failing or slow.
+
+<!-- awo:generated agent-skills -->
+- `find-skills` — use when a task needs a capability this workspace has no skill for — search the ecosystem before hand-rolling the procedure. _(user-global only — not in this workspace)_
+- `agent-browser` — use for anything that must be seen in a real browser — visual bugs, UAT journeys, form flows; it is the driver, judging from source is what it replaces. _(not installed — `awo skill sync agent-browser`)_
+- `research` — use before answering any question you would otherwise answer from memory or one file — it forces primary sources and leaves a cited markdown file behind. _(not installed — `awo skill sync research`)_
+- `diagnosing-bugs` — use the moment something is broken, throwing, failing or slow — build a loop that goes red on the bug first, before proposing any fix. _(not installed — `awo skill sync diagnosing-bugs`)_
+- `seo` — use when asked to improve search visibility, meta tags, sitemaps or structured data — it audits against Lighthouse rather than guessing at ranking factors. _(not installed — `awo skill sync seo`)_
+- `vercel-react-best-practices` — use when writing or reviewing React/Next.js — 70 rules ranked by impact, with waterfalls and bundle size first. _(not installed — `awo skill sync vercel-react-best-practices`)_
+- `frontend-design` — use when building a new UI surface and the look matters — it forces an aesthetic direction up front instead of the default templated result. _(user-global only — not in this workspace)_
+- `playwright-best-practices` — use before writing or debugging a Playwright spec — selectors, fixtures and parallelism are where these tests go flaky. _(not installed — `awo skill sync playwright-best-practices`)_
+<!-- /awo:generated -->
+
+`awo skill external` shows what is declared and whether it is really installed;
+`awo skill sync [name]` installs it. A line marked _user-global only_ works on this
+machine and will not survive a clone or a scheduled run.
 
 ## Agents
 <!-- awo:generated agents -->

@@ -142,7 +142,7 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
   assert.equal(awo(ws, ["task", "run", "PL-T2"]).code, 0);
 
   const goals = awo(ws, ["goal", "list"]);
-  assert.match(goals.stdout, /PL-G1\t0\/2 done/);
+  assert.match(goals.stdout, /PL-G1\t\S+\t0\/2 done/);
 
   fs.rmSync(ws, { recursive: true, force: true });
 });
@@ -248,7 +248,7 @@ test("task new atomically reopens a stored done goal and invalidates its QA verd
   assert.equal(state.tasks["PL-T2"].status, "todo");
   assert.equal(state.goalStatus, "planning");
   assert.equal(state.qa, undefined, "new work makes an earlier QA pass stale immediately");
-  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t1\/2 done/);
+  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t\S+\t1\/2 done/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -361,7 +361,7 @@ test("context orients a new session and says what to do next", () => {
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /^PL · PL · awo /m);
   assert.match(out.stdout, /repos {9}1 linked, 1 present/);
-  assert.match(out.stdout, /goals {9}none yet/);
+  assert.match(out.stdout, /goals {9}none live/);
   assert.match(out.stdout, /NEXT.*awo req new/);
 
   // A requirement in intake is surfaced — it is invisible on the board otherwise.
@@ -523,7 +523,7 @@ test("goal verify attaches the gate, readiness enforces evidence, and verdict ro
   const pass = awo(ws, ["goal", "verdict", "PL-G1", "--pass", "--summary", "meets DoD", "--who", "supanut", "--model", "gpt-5.6-sol"]);
   assert.equal(pass.code, 0, pass.stderr);
   assert.match(pass.stdout, /verified: PL-T1, PL-T2/);
-  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t2\/2 done/);
+  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t\S+\t2\/2 done/);
   assert.equal(awo(ws, ["goal", "readiness", "PL-G1"]).code, 0);
 
   // A finding that is genuinely outside the approved scope re-enters intake.
@@ -544,7 +544,7 @@ test("goal verify attaches the gate, readiness enforces evidence, and verdict ro
   assert.match(gap.stdout, /GAP recorded/);
   assert.match(gap.stdout, /repair: {3}PL-T3/);
   assert.match(awo(ws, ["task", "list"]).stdout, /PL-T3\ttodo/, "an in-scope gap must reopen the goal");
-  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t2\/3 done/);
+  assert.match(awo(ws, ["goal", "list"]).stdout, /PL-G1\t\S+\t2\/3 done/);
 
   // Every verdict is in the log, attributed to qa-engineer.
   const runs = dayRows(ws);

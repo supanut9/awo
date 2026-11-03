@@ -779,7 +779,7 @@ test("goal progress distinguishes cancelled work from completed work", () => {
   awo(ws, ["task", "status", "TEST-T2", "cancelled"]);
 
   const listed = awo(ws, ["goal", "list"]);
-  assert.match(listed.stdout, /TEST-G1\t0\/2 done, 2 cancelled, 2\/2 closed/);
+  assert.match(listed.stdout, /TEST-G1\t\S+\t0\/2 done, 2 cancelled, 2\/2 closed/);
   const context = awo(ws, ["context"]);
   assert.match(context.stdout, /0\/2 done \+ 2 cancelled \(2\/2 closed\)/);
   assert.match(context.stdout, /all tasks are closed/);

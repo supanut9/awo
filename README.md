@@ -196,6 +196,7 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 |---|---|
 | `awo agent add <name>` · `agent list` | Install an agent from `catalog/agents` (e.g. `data-engineer`). |
 | `awo skill add <name>` · `skill list` | Install a skill from `catalog/skills`. |
+| `awo skill external` · `skill sync [names]` | List and install **external agent skills** — open-ecosystem skills (`SKILL.md` under `.claude/skills/`) declared in `.workspace/agent-skills.json`. Declared, not vendored: `sync` shells out to the `skills` CLI so upstream stays current. |
 | `awo publish [--dry-run]` | Push a projection to MongoDB for the hosted dashboard. Off unless credentials exist. |
 
 ## How work is organised

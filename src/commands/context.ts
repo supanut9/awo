@@ -5,6 +5,7 @@ import { resolveOrchestrator } from "../models.js";
 import type { Snapshot } from "../ui/reader.js";
 import type { RunIndexEntry } from "../runs.js";
 import { findGoals } from "../tasks.js";
+import { findArchivableGoals, type ArchivableGoal } from "./goal-archive.js";
 
 export interface ContextResult {
   snapshot: Snapshot;
@@ -12,6 +13,8 @@ export interface ContextResult {
   orchestrator: string;
   looseRequirements: string[];
   recent: RunIndexEntry[];
+  /** Finished goals still sitting in the live list, waiting to be filed away. */
+  archivable: ArchivableGoal[];
   next: string;
 }
 
@@ -90,6 +93,7 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
     orchestrator: `${orchestrator.runtime}:${orchestrator.model}`,
     looseRequirements,
     recent: snapshot.runs.slice(0, 3),
+    archivable: await findArchivableGoals(root),
     next,
   };
 }
@@ -112,14 +116,29 @@ export function formatContext(c: ContextResult): string {
     `repos         ${repos.length} linked, ${present} present${bad.length ? ` — ATTENTION: ${bad.map((r) => `${r.name}:${r.status}`).join(", ")}` : ""}`
   );
 
-  if (goals.length === 0) lines.push("goals         none yet");
-  for (const g of goals) {
+  // Archived goals are deliberately not listed. This digest answers "what is live
+  // right now", and a finished goal is not — it stays one `awo goal restore` away,
+  // and the count keeps it from vanishing silently.
+  const live = goals.filter((g) => !g.archived);
+  const archivedCount = goals.length - live.length;
+
+  if (live.length === 0) lines.push("goals         none live");
+  for (const g of live) {
     const done = g.tasks.filter((t) => t.status === "done").length;
     const cancelled = g.tasks.filter((t) => t.status === "cancelled").length;
     const cancelledText = cancelled
       ? ` + ${cancelled} cancelled (${done + cancelled}/${g.tasks.length} closed)`
       : "";
     lines.push(`goal          ${g.id} ${g.status} — ${done}/${g.tasks.length} done${cancelledText} · ${g.title}`);
+  }
+  if (archivedCount > 0) lines.push(`              (${archivedCount} archived — \`awo goal list --archived\`)`);
+
+  // Finished goals still in the live list. Named, because an archive you have to
+  // remember to use is an archive that stays empty.
+  if (c.archivable.length > 0) {
+    lines.push(
+      `to archive    ${c.archivable.map((g) => `${g.id} (${g.status})`).join(", ")} — \`awo goal archive <id>\``
+    );
   }
 
   const byStatus = Object.entries(stats.byStatus)

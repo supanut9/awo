@@ -9,6 +9,7 @@ import { newTaskState, readState, reconcileGoalState } from "../state.js";
 import { readEvents } from "../runs.js";
 import { listWorktrees, unsafeReason } from "../worktrees.js";
 import { runAgentOrg } from "./agent-org.js";
+import { readAgentSkills, findInstalled } from "../agent-skills.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -141,6 +142,47 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
       }
     }
   }
+  // ---- declared external agent skills that are not actually here (§7.2) ----
+  // Declaring a skill and installing it are two acts, and only the second one puts
+  // anything in the model's context. A skill present only in `~/.claude/skills` is
+  // reported separately from a missing one because it is a different failure: it
+  // works on this machine and vanishes on a clone, a CI box, or a scheduled run.
+  try {
+    const declared = await readAgentSkills(root);
+    const present = await findInstalled(root, declared);
+    for (const skill of declared) {
+      const state = present.get(skill.name);
+      if (!state || state.where === "workspace") continue;
+      // A catalog-tier skill that is simply absent is absent on purpose — that is
+      // what opt-in means. A *partly* installed one never is.
+      if (skill.tier !== "default" && state.where === "absent") continue;
+
+      const message =
+        state.where === "user"
+          ? `agent skill "${skill.name}" is only in ~/.claude/skills — a clone of this workspace will not have it`
+          : state.where === "partial"
+            ? `agent skill "${skill.name}" is partly installed; missing ${state.missing.join(", ")}`
+            : `agent skill "${skill.name}" is declared but not installed, so nothing can reach it`;
+      add({
+        severity: state.where === "user" ? "info" : "warn",
+        area: "workspace",
+        message,
+        fix: `awo skill sync ${skill.name}`,
+        group:
+          state.where === "user"
+            ? "workspace:agent-skill-user-global"
+            : "workspace:agent-skill-missing",
+      });
+    }
+  } catch (err) {
+    add({
+      severity: "error",
+      area: "workspace",
+      message: (err as Error).message,
+      fix: "fix .workspace/agent-skills.json — every entry needs name, source and summary",
+    });
+  }
+
   for (const rel of conflicts) {
     add({
       severity: "warn",
