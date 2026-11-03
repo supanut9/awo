@@ -69,6 +69,9 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
     next = goalPolicies.get(candidate.goalId)?.qaRequired
       ? `inspect ${candidate.goalId} completion blockers — \`awo goal readiness ${candidate.goalId}\`, then \`awo goal verify ${candidate.goalId}\``
       : `verify ${candidate.id} — \`awo task verify ${candidate.id}\``;
+  } else if (snapshot.goals.some((g) => !g.archived && g.status === "qa-review")) {
+    const goal = snapshot.goals.find((g) => !g.archived && g.status === "qa-review")!;
+    next = `inspect ${goal.id} completion blockers — \`awo goal readiness ${goal.id}\``;
   } else if (looseRequirements.length > 0) {
     const { readRequirement } = await import("./intake.js");
     const requirement = await readRequirement(root, looseRequirements[0]);

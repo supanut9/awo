@@ -4,6 +4,26 @@ All notable changes to AWO are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Serialize state and daily log writes across processes; reserve run IDs before
+  recording events, including allocations that cross midnight.
+- Use governed QA/evidence readiness in goal views and archival. Preserve QA on
+  duplicate evidence retries and retain prior verdicts when evidence changes.
+- Pin test checkouts and comparison bases, include dirty/untracked changes, reject
+  missing checkouts and invalid refs, preserve the base across rechecks, and retain
+  immutable candidate/baseline measurement artifacts.
+- Treat unregistered archived-task targets as historical diagnostics; preserve
+  errors for active tasks. Add `doctor --scope active|all` and `--json`.
+- Align package-lock version metadata and track missing init fixture placeholders.
+
+### Added
+
+- `version --verbose` / `--json` with build commit, source hash and dirty-source flag.
+- `verify:package` to install a packed artifact and smoke-test its CLI and template.
+- Cross-process and lifecycle regression tests; documented stopped-writer rollout
+  and explicit lock recovery in `docs/features/stabilization-rollout.md`.
+
 ## [0.7.1] - 2026-08-27
 
 ### Fixed

@@ -1,3 +1,4 @@
+import { evaluateGoalReadiness } from "../commands/readiness.js";
 import path from "path";
 import { readManifest } from "../manifest.js";
 import { runList, type RepoStatusEntry } from "../commands/list.js";
@@ -238,11 +239,14 @@ export class FileReader implements WorkspaceReader {
     const out: GoalView[] = [];
     for (const goal of await findGoals(this.root)) {
       const tasks = await findTasksInGoal(goal.dir);
-      const state = reconcileGoalState(await readState(goal.dir, goal.id), tasks).state;
+      const raw = await readState(goal.dir, goal.id);
+      const state = reconcileGoalState(raw, tasks).state;
       out.push({
         id: goal.id,
         title: goal.title,
-        status: state.goalStatus,
+        status: state.goalStatus === "done"
+          ? (await evaluateGoalReadiness(this.root, goal, raw, tasks)).status
+          : state.goalStatus,
         tasks: tasks.map((t) => toView(t, state.tasks[t.id] ?? newTaskState(t.authoredStatus))),
         archived: goal.archived,
       });

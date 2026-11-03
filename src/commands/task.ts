@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import fs from "fs-extra";
 import path from "path";
 import { simpleGit } from "simple-git";
 import { findWorkspaceRoot } from "../workspace.js";
 import {
   branchPoint,
+  treeFingerprint,
   changedFiles,
   diagnose,
   measure,
@@ -75,9 +77,7 @@ async function taskCheckouts(
     const dir = path.isAbsolute(recordedPath)
       ? recordedPath
       : path.join(workspaceRoot, recordedPath);
-    if (await simpleGit(dir).checkIsRepo().catch(() => false)) {
-      out.push({ repo, dir, recordedPath });
-    }
+    out.push({ repo, dir, recordedPath });
   }
   return out;
 }
@@ -229,8 +229,9 @@ export async function runTaskStatus(
   assertTransition(task.id, current.status, target, actor);
 
   await mutateState(goal.dir, goal.id, (state) => {
-    if (current.status !== target) delete state.qa;
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
+    assertTransition(task.id, ts.status, target, actor);
+    if (ts.status !== target) delete state.qa;
     ts.status = target;
     ts.blockedReason = target === "blocked" ? (options.reason ?? ts.blockedReason) : null;
     state.tasks[task.id] = ts;
@@ -376,6 +377,7 @@ export async function runTaskRun(
     // Any new execution makes an earlier goal-level QA brief/verdict stale.
     delete s.qa;
     const ts = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
+    if (ts.status === "running") throw new Error(`${task.id} is already running (run ${ts.lastRunId}).`);
     if (ts.status === "todo") {
       assertTransition(task.id, ts.status, "queued", "runner");
       ts.status = "queued";
@@ -427,11 +429,13 @@ export async function runTaskRun(
     });
   }
 
+  const runCheckouts = await taskCheckouts(workspaceRoot, manifest, task, usable);
   await appendEvent(workspaceRoot, runId, "run.start", {
     taskId: task.id,
     goalId: goal.id,
     agent: task.agent,
     targets: task.targets,
+    checkouts: runCheckouts.map(({ repo, recordedPath }) => ({ repo, checkout: recordedPath })),
     tier: model.tier,
     tierFrom: model.tierSource,
     model: `${model.runtime}:${model.model}`,
@@ -440,7 +444,7 @@ export async function runTaskRun(
   await recordRepositoryBaselines(
     workspaceRoot,
     runId,
-    await taskCheckouts(workspaceRoot, manifest, task, usable)
+    runCheckouts
   );
 
   // Recorded at open, not at close, and composed here rather than by the caller —
@@ -489,6 +493,8 @@ export async function runTaskEvent(
     baseline?: boolean;
     repo?: string;
     timeoutMinutes?: number;
+    checkout?: string;
+    base?: string;
   } = {}
 ): Promise<{ measured: boolean; diagnosis?: string; needsHuman?: boolean }> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
@@ -526,31 +532,43 @@ export async function runTaskEvent(
       `${task.id} has no targets, so there is no repo to run "${options.run}" in. Pass --repo <name>.`
     );
   }
-  const worktree = path.join(workspaceRoot, "repos", ".worktrees", repoName, task.id);
-  const repoDir = (await fs.pathExists(worktree))
-    ? worktree
-    : path.join(workspaceRoot, "repos", repoName);
-  if (!(await fs.pathExists(repoDir))) {
-    throw new Error(`no repo at ${path.relative(workspaceRoot, repoDir)} to run "${options.run}" in.`);
-  }
-
-  // A cloned repo has a declared ref; a symlinked local checkout does not, so the
-  // base is whatever branch that checkout is on — which is what its task worktrees
-  // were branched from.
+  if (!task.targets.includes(repoName)) throw new Error(`${task.id} does not target ${repoName}.`);
   const entry = manifest.repos.find((r) => r.name === repoName);
-  const baseRef =
-    entry && entry.type === "git"
-      ? entry.ref
-      : (await simpleGit(path.join(workspaceRoot, "repos", repoName))
-          .revparse(["--abbrev-ref", "HEAD"])
-          .catch(() => "HEAD")).trim();
+  if (!entry) throw new Error(`Unknown repo ${repoName}.`);
+  const events = await readEvents(workspaceRoot, ts.lastRunId);
+  const recorded = events.find((event) => event.kind === "repo.baseline" && event.repo === repoName);
+  const start = events.find((event) => event.kind === "run.start");
+  const startedCheckout = Array.isArray(start?.checkouts)
+    ? start.checkouts.find((item: { repo: string; checkout: string }) => item.repo === repoName)?.checkout
+    : undefined;
+  const conventional = path.join(workspaceRoot, "repos", ".worktrees", repoName, task.id);
+  const checkout = options.checkout ?? (typeof recorded?.checkout === "string" ? recorded.checkout : undefined)
+    ?? (typeof startedCheckout === "string" ? startedCheckout : undefined)
+    ?? (task.targets[0] === repoName ? ts.worktree : null)
+    ?? (await fs.pathExists(conventional) ? conventional : null);
+  if (!checkout) {
+    throw new Error(`No recorded checkout for ${task.id}/${repoName}. Pass --checkout <path>; refusing to guess the shared checkout.`);
+  }
+  const repoDir = path.resolve(workspaceRoot, checkout);
+  if (!(await fs.pathExists(repoDir))) throw new Error(`Recorded checkout is missing: ${repoDir}. Restore it or pass --checkout <path>.`);
+  const git = simpleGit(repoDir);
+  const isGit = await git.checkIsRepo();
+  const headSha = isGit ? (await git.revparse(["HEAD"])).trim() : null;
+  const baseRef = options.base ?? (typeof recorded?.sha === "string" && recorded.sha ? recorded.sha : undefined)
+    ?? (entry.type === "git" ? entry.ref : undefined);
+  if (isGit && !baseRef) throw new Error(`No pinned base for ${task.id}/${repoName}; pass --base <ref>.`);
+  const resolvedBase = isGit ? (await git.revparse([`${baseRef}^{commit}`])).trim() : null;
+  const baseSha = isGit ? await branchPoint(repoDir, resolvedBase!) : null;
+  if (isGit && !baseSha) throw new Error(`No merge-base between HEAD and ${baseRef}.`);
+  const beforeTree = isGit ? await treeFingerprint(repoDir) : null;
   const measured = await measure(options.run, repoDir, options.timeoutMinutes);
-  const changed = await changedFiles(repoDir, baseRef);
+  const afterTree = isGit ? await treeFingerprint(repoDir) : null;
+  const changed = isGit ? await changedFiles(repoDir, baseSha!) : { all: [], tests: [], newTests: [], testsAndCodeTogether: [] };
 
   let base: Measurement | null = null;
   let baselineError: string | undefined;
   if (options.baseline) {
-    const point = await branchPoint(repoDir, baseRef);
+    const point = isGit ? await branchPoint(repoDir, baseSha!) : null;
     if (!point) {
       baselineError = `no merge-base between HEAD and ${baseRef}`;
     } else {
@@ -567,12 +585,22 @@ export async function runTaskEvent(
     }
   }
 
-  const verdict = diagnose(measured, base, changed);
+  const verdict = beforeTree !== afterTree
+    ? { diagnosis: "unknown", needsHuman: true, explanation: "The tested tree changed while the command ran; rerun against a stable tree." }
+    : diagnose(measured, base, changed);
+  const artifact = path.join("logs", ts.lastRunId.slice(0, 10), "measurements", `${randomUUID()}.json`);
+  await fs.outputJson(path.join(workspaceRoot, artifact), { candidate: measured, baseline: base, baselineError }, { spaces: 2 });
 
   await appendEvent(workspaceRoot, ts.lastRunId, kind as EventKind, {
     ...fields,
     repo: repoName,
     verified: true,
+    checkout: repoDir,
+    headSha,
+    baseSha,
+    treeFingerprint: beforeTree,
+    treeFingerprintAfter: afterTree,
+    artifact,
     command: measured.command,
     exitCode: measured.exitCode,
     durationSec: measured.durationSec,
@@ -848,7 +876,7 @@ export interface RecheckResult {
 
 export async function runTaskRecheck(
   taskId: string,
-  options: { cwd?: string; run?: string; baseline?: boolean; repo?: string; timeoutMinutes?: number } = {}
+  options: { cwd?: string; run?: string; baseline?: boolean; repo?: string; timeoutMinutes?: number; base?: string; checkout?: string } = {}
 ): Promise<RecheckResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { task, goal } = await locateTask(workspaceRoot, taskId);
@@ -873,6 +901,13 @@ export async function runTaskRecheck(
     );
   }
 
+  // A recheck tests newer work against the original comparison baseline, not
+  // against the current HEAD that the new run is about to record.
+  const prior = before.lastRunId ? await readEvents(workspaceRoot, before.lastRunId) : [];
+  const priorTest = prior.filter((event) => event.kind === "test" && event.repo === repoName).at(-1);
+  const priorBaseline = prior.find((event) => event.kind === "repo.baseline" && event.repo === repoName);
+  const previousBase = priorTest?.baseSha ?? priorBaseline?.sha;
+
   // Human-initiated correction, so the transition is attributed to a human.
   await runTaskStatus(task.id, before.status === "done" ? "todo" : "todo", {
     cwd: workspaceRoot,
@@ -893,6 +928,8 @@ export async function runTaskRecheck(
     baseline: options.baseline,
     repo: options.repo,
     timeoutMinutes: options.timeoutMinutes,
+    base: options.base ?? (typeof previousBase === "string" && previousBase ? previousBase : undefined),
+    checkout: options.checkout,
     label: `retrospective verification of work closed before the evidence gate`,
   });
 

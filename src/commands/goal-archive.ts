@@ -1,9 +1,10 @@
 import fs from "fs-extra";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
-import { findGoals, findTasksInGoal, goalsDir, goalArchiveDir } from "../tasks.js";
+import { findGoals, findTasksInGoal, goalsDir, goalArchiveDir, type GoalDefinition } from "../tasks.js";
 import { readState, reconcileGoalState } from "../state.js";
 import type { GoalStatus } from "../state.js";
+import { evaluateGoalReadiness } from "./readiness.js";
 
 /**
  * A goal's status must be RECONCILED against its task files before it is judged,
@@ -16,9 +17,13 @@ import type { GoalStatus } from "../state.js";
  * prevent. The reader has always reconciled, which is why `awo context` showed
  * `inconsistent` on the same goal this said was done.
  */
-async function reconciledStatus(goalDir: string, goalId: string): Promise<GoalStatus> {
-  const tasks = await findTasksInGoal(goalDir);
-  return reconcileGoalState(await readState(goalDir, goalId), tasks).state.goalStatus;
+async function reconciledStatus(root: string, goal: GoalDefinition): Promise<GoalStatus> {
+  const tasks = await findTasksInGoal(goal.dir);
+  const raw = await readState(goal.dir, goal.id);
+  const status = reconcileGoalState(raw, tasks).state.goalStatus;
+  return status === "done"
+    ? (await evaluateGoalReadiness(root, goal, raw, tasks)).status
+    : status;
 }
 
 /**
@@ -65,7 +70,7 @@ export async function runGoalArchive(
     throw new Error(`${goalId} is already archived at ${path.relative(root, goal.dir)}.`);
   }
 
-  const status = await reconciledStatus(goal.dir, goalId);
+  const status = await reconciledStatus(root, goal);
   // Archiving live work would hide it from `awo context`, which is the one place a
   // session looks to find out what is in flight. `--force` exists for a goal that
   // was abandoned without ever being marked cancelled, and says so out loud.
@@ -114,7 +119,7 @@ export async function runGoalRestore(
     throw new Error(`${path.relative(root, target)} already exists — resolve it by hand.`);
   }
 
-  const status = await reconciledStatus(goal.dir, goalId);
+  const status = await reconciledStatus(root, goal);
   await fs.move(goal.dir, target);
 
   return {
@@ -161,12 +166,15 @@ export async function runGoalList(
   for (const goal of await findGoals(root)) {
     if (!options.all && goal.archived !== Boolean(options.archived)) continue;
     const tasks = await findTasksInGoal(goal.dir);
-    const state = reconcileGoalState(await readState(goal.dir, goal.id), tasks).state;
+    const raw = await readState(goal.dir, goal.id);
+    const state = reconcileGoalState(raw, tasks).state;
     const statuses = Object.values(state.tasks).map((t) => t.status);
     rows.push({
       id: goal.id,
       title: goal.title,
-      status: state.goalStatus,
+      status: state.goalStatus === "done"
+        ? (await evaluateGoalReadiness(root, goal, raw, tasks)).status
+        : state.goalStatus,
       done: statuses.filter((s) => s === "done").length,
       cancelled: statuses.filter((s) => s === "cancelled").length,
       blocked: statuses.filter((s) => s === "blocked").length,
@@ -191,7 +199,7 @@ export interface ArchivableGoal {
 export async function findArchivableGoals(workspaceRoot: string): Promise<ArchivableGoal[]> {
   const out: ArchivableGoal[] = [];
   for (const goal of await findGoals(workspaceRoot, { includeArchived: false })) {
-    const status = await reconciledStatus(goal.dir, goal.id);
+    const status = await reconciledStatus(workspaceRoot, goal);
     if (isTerminal(status)) out.push({ id: goal.id, title: goal.title, status });
   }
   return out;

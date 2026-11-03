@@ -394,3 +394,13 @@ checking for the presence of a sentence.
 
 §16 covers where the human belongs and why reviewing every diff cannot work; §17
 covers customising a workspace without fighting the upgrade.
+
+## State and evidence integrity
+
+See [stabilization rollout and recovery](docs/features/stabilization-rollout.md)
+for concurrency guarantees, QA readiness, measurement provenance and upgrade limits.
+`awo version --verbose` identifies the installed build; `awo doctor --scope active`
+focuses on live work, while `awo doctor --json` retains structured diagnostics.
+Tests with legacy provenance can select `--checkout <path> --base <ref>` on
+`task event --run` or `task recheck`. Run `npm run verify:package` after a build to
+check the actual packed CLI in a disposable installation.

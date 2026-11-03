@@ -1,11 +1,12 @@
 import { findWorkspaceRoot } from "../workspace.js";
-import { findGoals, findTasksInGoal } from "../tasks.js";
+import { findGoals, findTasksInGoal, type GoalDefinition, type TaskDefinition } from "../tasks.js";
 import {
   mutateState,
   newTaskState,
   readState,
   reconcileGoalState,
   type GoalStatus,
+  type GoalState,
   type TaskStatus,
 } from "../state.js";
 import { runGoalTrace } from "./traceability.js";
@@ -59,6 +60,14 @@ export async function runGoalReadiness(
 
   const authored = await findTasksInGoal(goal.dir);
   const raw = await readState(goal.dir, goal.id);
+  return evaluateGoalReadiness(root, goal, raw, authored);
+}
+
+/** Shared evaluator for bulk readers: reuse their inventory instead of scanning
+ * every task in the entire workspace once per goal. */
+export async function evaluateGoalReadiness(
+  root: string, goal: GoalDefinition, raw: GoalState, authored: TaskDefinition[]
+): Promise<GoalReadiness> {
   const reconciliation = reconcileGoalState(raw, authored);
   const state = reconciliation.state;
   const blockers: ReadinessBlocker[] = [];
@@ -97,7 +106,7 @@ export async function runGoalReadiness(
   let criteria: GoalReadiness["criteria"] = null;
   if (goal.completionPolicy.acceptanceEvidenceRequired) {
     try {
-      const trace = await runGoalTrace(goal.id, { cwd: root });
+      const trace = await runGoalTrace(goal.id, { cwd: root, goal, state: raw });
       let covered = 0;
       let exceptions = 0;
       let missing = 0;
@@ -177,7 +186,8 @@ export async function runGoalReadiness(
 
   return {
     goalId: goal.id,
-    status: state.goalStatus,
+    // A task rollup is not acceptance. All readers use this projection.
+    status: state.goalStatus === "done" && blockers.length > 0 ? "qa-review" : state.goalStatus,
     ready,
     canPassVerdict: preVerdict.length === 0,
     policy: goal.completionPolicy,

@@ -3,10 +3,11 @@ import matter from "gray-matter";
 import path from "path";
 import { findCriteria } from "./intake.js";
 import { findWorkspaceRoot } from "../workspace.js";
-import { findGoals, locateTask } from "../tasks.js";
+import { findGoals, locateTask, type GoalDefinition } from "../tasks.js";
 import {
   mutateState,
   readState,
+  type GoalState,
   type CriterionEvidence,
   type CriterionEvidenceKind,
 } from "../state.js";
@@ -18,8 +19,8 @@ export interface CriterionTrace {
   status: "covered" | "exception" | "unapproved-exception" | "missing";
 }
 
-async function criteriaForGoal(root: string, goalId: string) {
-  const goal = (await findGoals(root)).find((candidate) => candidate.id === goalId);
+async function criteriaForGoal(root: string, goalId: string, knownGoal?: GoalDefinition) {
+  const goal = knownGoal ?? (await findGoals(root)).find((candidate) => candidate.id === goalId);
   if (!goal) throw new Error(`Unknown goal "${goalId}".`);
   const requirement = path.join(goal.dir, "requirement.md");
   if (!(await fs.pathExists(requirement))) {
@@ -67,20 +68,21 @@ export async function runTaskEvidence(options: {
     ...(options.kind === "exception" ? { acceptedBy: options.who!.trim() } : {}),
   };
   await mutateState(goal.dir, goal.id, (state) => {
-    delete state.qa;
     state.criteria ??= {};
     const entries = (state.criteria[String(options.criterion)] ??= []);
-    if (!entries.some((item) => item.taskId === evidence.taskId && item.kind === evidence.kind && item.ref === evidence.ref)) {
+    if (!entries.some((item) => item.taskId === evidence.taskId && item.kind === evidence.kind && item.ref === evidence.ref && item.acceptedBy === evidence.acceptedBy)) {
+      if (state.qa) (state.qaHistory ??= []).push(state.qa);
+      delete state.qa;
       entries.push(evidence);
     }
   });
   return evidence;
 }
 
-export async function runGoalTrace(goalId: string, options: { cwd?: string } = {}): Promise<CriterionTrace[]> {
+export async function runGoalTrace(goalId: string, options: { cwd?: string; goal?: GoalDefinition; state?: GoalState } = {}): Promise<CriterionTrace[]> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
-  const { goal, criteria } = await criteriaForGoal(root, goalId);
-  const state = await readState(goal.dir, goal.id);
+  const { goal, criteria } = await criteriaForGoal(root, goalId, options.goal);
+  const state = options.state ?? await readState(goal.dir, goal.id);
   return criteria.map((criterion, i) => {
     const evidence = state.criteria?.[String(i + 1)] ?? [];
     const status = evidence.some((item) => item.kind === "test" || item.kind === "manual")

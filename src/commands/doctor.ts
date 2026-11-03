@@ -70,7 +70,7 @@ export function groupFindings(findings: Finding[]): FindingGroup[] {
  * on purpose: a diagnostic that silently repairs things hides the problem it
  * was run to find.
  */
-export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding[]> {
+export async function runDoctor(options: { cwd?: string; scope?: "active" | "all" } = {}): Promise<Finding[]> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const findings: Finding[] = [];
   const add = (f: Finding): void => {
@@ -270,17 +270,22 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
 
   // ---- tasks & goals ----
   const known = new Set(manifest.repos.map((r) => r.name));
-  const located = await findAllTasks(root);
-  const taskIds = new Set(located.map((t) => t.task.id));
+  const inventory = await findAllTasks(root);
+  const located = inventory.filter(({ goal }) => options.scope !== "active" || !goal.archived);
+  // Archived tasks still satisfy references from active work.
+  const taskIds = new Set(inventory.map((t) => t.task.id));
 
   for (const { task, goal } of located) {
     for (const target of task.targets) {
       if (!known.has(target)) {
         add({
-          severity: "error",
+          severity: goal.archived ? "info" : "error",
           area: "tasks",
-          message: `${task.id}: targets "${target}", which is not in the manifest`,
-          fix: `link it, or fix \`targets:\` in ${path.relative(root, task.file)}`,
+          message: `${task.id}: ${goal.archived ? "historical target" : "targets"} "${target}", which is not in the manifest`,
+          fix: goal.archived
+            ? "preserve historical targets; register this repo again before restoring its work"
+            : `link it, or fix \`targets:\` in ${path.relative(root, task.file)}`,
+          group: `${goal.archived ? "historical" : "active"}:missing-target:${target}`,
         });
       }
     }
@@ -358,7 +363,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
     }
   }
 
-  for (const goal of await findGoals(root)) {
+  for (const goal of await findGoals(root, { includeArchived: options.scope !== "active" })) {
     const goalFile = path.join(goal.dir, "goal.md");
     const fm = matter(await fs.readFile(goalFile, "utf8")).data as Record<string, unknown>;
     const declared = new Set((Array.isArray(fm.taskIds) ? fm.taskIds : []).map(String));

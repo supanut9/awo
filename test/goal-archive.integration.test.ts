@@ -56,6 +56,8 @@ function setGoalStatus(root: string, goalDir: string, status: string): void {
   const file = path.join(root, goalDir, "state.json");
   const state = JSON.parse(fs.readFileSync(file, "utf8"));
   state.goalStatus = status;
+  state.qa = { briefRunId: "fixture-brief", verdict: "pass", verdictBy: "tester" };
+  state.criteria = { "1": [{ taskId: "TST-T1", kind: "manual", ref: "fixture-proof", recordedAt: new Date().toISOString() }] };
   for (const id of Object.keys(state.tasks ?? {})) state.tasks[id].status = "done";
   fs.writeFileSync(file, JSON.stringify(state, null, 2));
 }

@@ -1,5 +1,6 @@
 import fs from "fs-extra";
 import path from "path";
+import { atomicWriteFile, withFileLock } from "./file-lock.js";
 
 /**
  * §7.4 — task LIFECYCLE, distinct from a run's OUTCOME. A board shows this;
@@ -135,6 +136,8 @@ export interface GoalState {
   criteria?: Record<string, CriterionEvidence[]>;
   /** Goal-level QA is separate from task success and is invalidated by new work. */
   qa?: GoalQaState;
+  /** Prior verdicts invalidated by changed evidence, retained for audit. */
+  qaHistory?: GoalQaState[];
 }
 
 /** The authored task files are the inventory; state.json supplies their runtime state. */
@@ -257,51 +260,26 @@ export async function readState(goalDir: string, goalId: string): Promise<GoalSt
   return raw;
 }
 
-/**
- * §7.4 concurrency rules: the ONLY writer of state.json. Atomic via
- * tmp+rename so a reader never sees a partial file, and optimistic on `rev` —
- * if the file changed under us, re-read and re-apply the mutation rather than
- * blindly overwriting.
- */
+/** The only state writer. Lock the entire read/modify/write, across processes. */
 export async function mutateState(
   goalDir: string,
   goalId: string,
-  mutate: (state: GoalState) => void,
-  attemptsLeft = 5
+  mutate: (state: GoalState) => void
 ): Promise<GoalState> {
-  const before = await readState(goalDir, goalId);
-  const next: GoalState = JSON.parse(JSON.stringify(before));
-  mutate(next);
-
-  // Import lazily to avoid a runtime cycle: tasks.ts needs TASK_STATUSES above.
-  // A write is an appropriate time to persist a newly authored task into state.
-  const { findTasksInGoal } = await import("./tasks.js");
-  const authored = await findTasksInGoal(goalDir);
-  const reconciled = reconcileGoalState(next, authored);
-
-  const persisted = reconciled.state;
-  // A mutation is an explicit repair point. Removed task files must not keep
-  // contributing a phantom status after the next legitimate state transition.
-  for (const id of reconciled.orphanedTaskIds) delete persisted.tasks[id];
-  persisted.goalId = goalId;
-  persisted.goalStatus = rollupGoalStatus(persisted.tasks);
-  persisted.rev = before.rev + 1;
-  persisted.updatedAt = new Date().toISOString();
-
-  const file = statePath(goalDir);
-  const current = await readState(goalDir, goalId);
-  if (current.rev !== before.rev) {
-    if (attemptsLeft <= 1) {
-      throw new Error(
-        `state.json for ${goalId} kept changing under concurrent writes; giving up rather than clobbering it.`
-      );
-    }
-    return mutateState(goalDir, goalId, mutate, attemptsLeft - 1);
-  }
-
-  await fs.ensureDir(goalDir);
-  const tmp = `${file}.tmp`;
-  await fs.writeJson(tmp, persisted, { spaces: 2 });
-  await fs.rename(tmp, file);
-  return persisted;
+  return withFileLock(statePath(goalDir), async () => {
+    const before = await readState(goalDir, goalId);
+    const next: GoalState = JSON.parse(JSON.stringify(before));
+    mutate(next);
+    // Lazy import avoids a runtime cycle with tasks.ts.
+    const { findTasksInGoal } = await import("./tasks.js");
+    const reconciled = reconcileGoalState(next, await findTasksInGoal(goalDir));
+    const persisted = reconciled.state;
+    for (const id of reconciled.orphanedTaskIds) delete persisted.tasks[id];
+    persisted.goalId = goalId;
+    persisted.goalStatus = rollupGoalStatus(persisted.tasks);
+    persisted.rev = before.rev + 1;
+    persisted.updatedAt = new Date().toISOString();
+    await atomicWriteFile(statePath(goalDir), JSON.stringify(persisted, null, 2) + "\n");
+    return persisted;
+  });
 }

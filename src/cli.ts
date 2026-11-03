@@ -100,6 +100,19 @@ program
   .version(version, "-v, --version", "print the installed awo version");
 
 program
+  .command("version")
+  .description("Show installed package/build provenance (independent of workspace version).")
+  .option("--verbose", "include executable path and immutable build metadata")
+  .option("--json", "machine-readable provenance")
+  .action((opts: { verbose?: boolean; json?: boolean }) => {
+    const file = path.join(PACKAGE_ROOT, "dist", "build-info.json");
+    const build = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+    const info = { version, executable: fileURLToPath(import.meta.url), build };
+    if (opts.json || opts.verbose) console.log(JSON.stringify(info, null, 2));
+    else console.log(version);
+  });
+
+program
   .command("init")
   .description("Scaffold a new awo workspace in the current directory.")
   .requiredOption("--key <key>", "short, permanent project code (2-5 uppercase letters, e.g. PROM)")
@@ -375,9 +388,17 @@ program
   .command("doctor")
   .description("Diagnose the workspace: version skew, broken links, bad targets, abandoned runs.")
   .option("--all", "list every instance instead of collapsing repeated findings")
-  .action(async (opts: { all?: boolean }) => {
+  .option("--json", "machine-readable findings")
+  .option("--scope <scope>", "active or all (includes historical findings)", "all")
+  .action(async (opts: { all?: boolean; json?: boolean; scope: string }) => {
     try {
-      const findings = await runDoctor();
+      if (opts.scope !== "active" && opts.scope !== "all") throw new Error("--scope must be active or all");
+      const findings = await runDoctor({ scope: opts.scope });
+      if (opts.json) {
+        console.log(JSON.stringify(findings, null, 2));
+        process.exitCode = doctorExitCode(findings);
+        return;
+      }
       if (findings.length === 0) {
         console.log("No problems found.");
         return;
@@ -1317,6 +1338,8 @@ task
   )
   .option("--baseline", "also run it at the branch point, so a failure can be attributed")
   .option("--repo <name>", "which target repo to run in (default: the task's first target)")
+  .option("--checkout <path>", "explicit checkout; otherwise use the recorded task checkout")
+  .option("--base <ref>", "explicit comparison base; otherwise use the pinned run baseline")
   .option("--timeout <minutes>", "kill the command after this long (default 30)", (v) => parseInt(v, 10))
   .action(
     async (
@@ -1330,6 +1353,8 @@ task
         baseline?: boolean;
         repo?: string;
         timeout?: number;
+        checkout?: string;
+        base?: string;
       }
     ) => {
     try {
@@ -1354,11 +1379,13 @@ task
   .option("--run <command>", "command to verify with (default: the repo's testCommand)")
   .option("--baseline", "also run it at the branch point, so a failure can be attributed")
   .option("--repo <name>", "which target repo to run in")
+  .option("--checkout <path>", "explicit checkout for verification")
+  .option("--base <ref>", "explicit comparison base; otherwise preserve the earlier run base")
   .option("--timeout <minutes>", "kill the command after this long (default 30)", (v) => parseInt(v, 10))
   .action(
     async (
       taskId: string,
-      opts: { run?: string; baseline?: boolean; repo?: string; timeout?: number }
+      opts: { run?: string; baseline?: boolean; repo?: string; timeout?: number; base?: string; checkout?: string }
     ) => {
       try {
         const r = await runTaskRecheck(taskId, { ...opts, timeoutMinutes: opts.timeout });
