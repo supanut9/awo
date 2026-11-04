@@ -6,6 +6,9 @@ All notable changes to AWO are documented in this file.
 
 ### Fixed
 
+- Task completion rejects failed or stale measurements even when routed to QA;
+  only the latest rerun of the same repo/command replaces an earlier result.
+
 - Serialize state and daily log writes across processes; reserve run IDs before
   recording events, including allocations that cross midnight.
 - Use governed QA/evidence readiness in goal views and archival. Preserve QA on

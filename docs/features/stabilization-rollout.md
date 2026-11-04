@@ -26,6 +26,11 @@ groups, release obligations or scheduled work; those remain separate proposals.
   in classification, Git errors fail closed, and changes during a command require
   re-verification. A fingerprint excludes Git-ignored files and is not an environment
   fingerprint; it is not sufficient for automatic cross-task test reuse.
+- Completion checks the latest measurement of every repo/command pair. A failed
+  or timed-out check blocks success, including `--gate`; a successful rerun of the
+  same command replaces the failure. Git receipts must still match the current
+  checkout, and commands that changed their own tested tree must be rerun.
+  Legacy/non-Git receipts without fingerprints retain their existing limitations.
 - `doctor --scope active` focuses on live goals. Default `--scope all` retains
   historical diagnostics, but an unregistered target in an archived goal is
   information rather than an active-work error. `doctor --json` emits structured

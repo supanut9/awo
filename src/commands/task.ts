@@ -671,9 +671,24 @@ export async function runTaskComplete(
   const requiresMeasuredCheck =
     !task.kindExplicit || task.kind === "implementation" || task.kind === "verification";
   if (outcome === "success" && requiresMeasuredCheck && !options.untested) {
-    const measuredPasses = priorEvents.filter(
-      (e) => e.kind === "test" && e.verified === true && e.exitCode === 0
-    );
+    // A command's latest measurement supersedes its earlier attempts. A pass
+    // from a different command must never hide a failed check in the same run.
+    const latest = new Map<string, (typeof priorEvents)[number]>();
+    for (const event of priorEvents) {
+      if (event.kind === "test" && event.verified === true) {
+        latest.set(JSON.stringify([event.repo ?? null, event.command ?? null]), event);
+      }
+    }
+    const measurements = [...latest.values()];
+    const failing = measurements.filter((event) => event.exitCode !== 0 || event.timedOut === true);
+    if (failing.length > 0) {
+      throw new Error(
+        `${task.id} cannot close as success with failing measured checks.\n` +
+          failing.map((event) => `  ${event.repo ?? "repo"}: ${event.command ?? "test"} (exit ${event.exitCode})`).join("\n") +
+          `\n  Fix and rerun each failing command; routing to review does not make a failure pass.`
+      );
+    }
+    const measuredPasses = measurements.filter((event) => event.exitCode === 0);
     const claims = priorEvents.filter((e) => e.kind === "test" && e.verified !== true);
 
     if (measuredPasses.length === 0 && claims.length > 0) {
@@ -687,6 +702,25 @@ export async function runTaskComplete(
           `   passed" as a string is the weakest signal in the workflow.)`
       );
     }
+    // Receipts identify the tree actually tested, not whatever happens to be in
+    // the checkout at completion. Review cannot repair missing test coverage.
+    const currentTrees = new Map<string, string>();
+    for (const event of measuredPasses) {
+      if (typeof event.treeFingerprint !== "string") continue; // Legacy/non-Git receipt.
+      if (event.treeFingerprintAfter !== event.treeFingerprint) {
+        throw new Error(`${task.id}: the tested tree changed during ${event.command}; rerun against a stable tree.`);
+      }
+      if (typeof event.checkout !== "string") {
+        throw new Error(`${task.id}: the test receipt has no checkout; rerun the measurement.`);
+      }
+      if (!currentTrees.has(event.checkout)) {
+        currentTrees.set(event.checkout, await treeFingerprint(event.checkout));
+      }
+      if (currentTrees.get(event.checkout) !== event.treeFingerprint) {
+        throw new Error(`${task.id}: stale test receipt for ${event.command}; the checkout tree changed after testing. Rerun the check.`);
+      }
+    }
+
     // A measurement can pass and still be inconclusive — a test edited alongside the
     // code it covers, or new tests asserting a contract nobody has checked against
     // the acceptance criteria. Those may close, but only into review.

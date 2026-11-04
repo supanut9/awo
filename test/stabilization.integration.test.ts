@@ -140,3 +140,85 @@ test("doctor treats unregistered historical targets as information but active ta
   await fs.writeFile(path.join(active, "tasks/TST-T2.md"), "---\nid: TST-T2\ngoalId: TST-G2\ndependsOn: [TST-T1]\n---\n");
   assert.ok(!(await runDoctor({ cwd: root, scope: "active" })).some((f: any) => f.message.includes('dependsOn "TST-T1"')));
 });
+
+async function measuredFixture(t: { after: (fn: () => Promise<void>) => void }) {
+  const data = await fixture(t);
+  const checkout = path.join(data.root, "candidate");
+  await fs.mkdir(checkout);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: checkout, stdio: "pipe", encoding: "utf8" });
+  git("init", "-b", "main");
+  await fs.writeFile(path.join(checkout, "code.txt"), "original");
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "core.hooksPath=/dev/null", "commit", "-m", "test: fixture");
+  const manifestFile = path.join(data.root, ".workspace/manifest.json");
+  const manifest = JSON.parse(await fs.readFile(manifestFile, "utf8"));
+  manifest.repos = [{ name: "api", type: "local", path: checkout }];
+  await fs.writeFile(manifestFile, JSON.stringify(manifest));
+  await fs.writeFile(path.join(data.goal, "tasks/TST-T1.md"), "---\nid: TST-T1\ngoalId: TST-G1\nstatus: running\ntargets: [api]\n---\n");
+  const runId = "2026-11-04T01-00-00_TST-T1";
+  data.state.tasks["TST-T1"] = { ...data.state.tasks["TST-T1"], status: "running", lastRunId: runId, worktree: checkout };
+  await fs.writeFile(path.join(data.goal, "state.json"), JSON.stringify(data.state));
+  const { appendEvent } = await load("runs.js");
+  await appendEvent(data.root, runId, "repo.baseline", { repo: "api", checkout, sha: git("rev-parse", "HEAD").trim() });
+  const { runTaskEvent, runTaskComplete } = await load("commands/task.js");
+  return { ...data, checkout,
+    measure: (run: string) => runTaskEvent("TST-T1", "test", { cwd: data.root, run }),
+    complete: () => runTaskComplete("TST-T1", { cwd: data.root, outcome: "success", gate: true }),
+  };
+}
+
+test("completion refuses a failed measurement even when routed to review", async (t) => {
+  const f = await measuredFixture(t);
+  await f.measure("node -e 'process.exit(7)'");
+  await assert.rejects(f.complete(), /failing|failed|passing/i);
+});
+
+test("a later failing rerun supersedes a passing receipt", async (t) => {
+  const f = await measuredFixture(t);
+  const command = "node -e 'process.exit(require(\"fs\").readFileSync(\"code.txt\", \"utf8\") === \"original\" ? 0 : 1)'";
+  await f.measure(command);
+  await fs.writeFile(path.join(f.checkout, "code.txt"), "broken");
+  await f.measure(command);
+  await assert.rejects(f.complete(), /failing|failed|passing/i);
+});
+
+test("completion refuses an exit-zero command that changes its tested tree", async (t) => {
+  const f = await measuredFixture(t);
+  const result = await f.measure("node -e 'require(\"fs\").writeFileSync(\"code.txt\", \"changed by test\")'");
+  assert.equal(result.diagnosis, "unknown");
+  await assert.rejects(f.complete(), /tree|stable|stale/i);
+});
+
+test("completion refuses a receipt after a later untested source edit", async (t) => {
+  const f = await measuredFixture(t);
+  await f.measure("node -e 'process.exit(0)'");
+  await fs.writeFile(path.join(f.checkout, "code.txt"), "untested edit");
+  await assert.rejects(f.complete(), /tree|stable|stale/i);
+});
+
+test("a passing rerun of the same command replaces an earlier failure", async (t) => {
+  const f = await measuredFixture(t);
+  const command = "node -e 'process.exit(require(\"fs\").readFileSync(\"code.txt\", \"utf8\") === \"original\" ? 0 : 1)'";
+  await fs.writeFile(path.join(f.checkout, "code.txt"), "broken");
+  await f.measure(command);
+  await fs.writeFile(path.join(f.checkout, "code.txt"), "original");
+  await f.measure(command);
+  assert.equal((await f.complete()).status, "in-review");
+});
+
+test("a passing different command cannot hide a failing check", async (t) => {
+  const f = await measuredFixture(t);
+  await f.measure("node -e 'process.exit(1)'");
+  await f.measure("node -e 'process.exit(0)'");
+  await assert.rejects(f.complete(), /failing|failed|passing/i);
+});
+
+test("rerunning against the changed tree replaces a stale receipt", async (t) => {
+  const f = await measuredFixture(t);
+  const command = "node -e 'process.exit(0)'";
+  await f.measure(command);
+  await fs.writeFile(path.join(f.checkout, "code.txt"), "new implementation");
+  await assert.rejects(f.complete(), /stale|tree/i);
+  await f.measure(command);
+  assert.equal((await f.complete()).status, "in-review");
+});
