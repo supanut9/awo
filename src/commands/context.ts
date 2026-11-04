@@ -4,6 +4,8 @@ import { readLibraryVersion } from "../template.js";
 import { resolveOrchestrator } from "../models.js";
 import type { Snapshot } from "../ui/reader.js";
 import type { RunIndexEntry } from "../runs.js";
+import { findGoals } from "../tasks.js";
+import { findArchivableGoals, type ArchivableGoal } from "./goal-archive.js";
 
 export interface ContextResult {
   snapshot: Snapshot;
@@ -11,6 +13,8 @@ export interface ContextResult {
   orchestrator: string;
   looseRequirements: string[];
   recent: RunIndexEntry[];
+  /** Finished goals still sitting in the live list, waiting to be filed away. */
+  archivable: ArchivableGoal[];
   next: string;
 }
 
@@ -32,6 +36,9 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
 
   const snapshot = await reader.snapshot();
   const orchestrator = await resolveOrchestrator(root);
+  const goalPolicies = new Map(
+    (await findGoals(root)).map((goal) => [goal.id, goal.completionPolicy])
+  );
 
   // Requirements still sitting in intake — invisible on the board, so a new
   // session would otherwise never learn they exist.
@@ -53,12 +60,18 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
   let next: string;
   if (running.length > 0) {
     next = `${running[0].id} is running — close it with \`awo task complete ${running[0].id} --outcome <success|failed>\``;
-  } else if (review.length > 0) {
-    next = `verify ${review[0].id} — \`awo task verify ${review[0].id}\``;
   } else if (blocked.length > 0) {
     next = `unblock ${blocked[0].id} (${blocked[0].blockedReason ?? "no reason recorded"}) — \`awo task status ${blocked[0].id} todo\``;
   } else if (todo.length > 0) {
     next = `start ${todo[0].id} — \`awo task run ${todo[0].id}\``;
+  } else if (review.length > 0) {
+    const candidate = review[0];
+    next = goalPolicies.get(candidate.goalId)?.qaRequired
+      ? `inspect ${candidate.goalId} completion blockers — \`awo goal readiness ${candidate.goalId}\`, then \`awo goal verify ${candidate.goalId}\``
+      : `verify ${candidate.id} — \`awo task verify ${candidate.id}\``;
+  } else if (snapshot.goals.some((g) => !g.archived && g.status === "qa-review")) {
+    const goal = snapshot.goals.find((g) => !g.archived && g.status === "qa-review")!;
+    next = `inspect ${goal.id} completion blockers — \`awo goal readiness ${goal.id}\``;
   } else if (looseRequirements.length > 0) {
     const { readRequirement } = await import("./intake.js");
     const requirement = await readRequirement(root, looseRequirements[0]);
@@ -74,7 +87,7 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
   } else if (snapshot.goals.length === 0) {
     next = `nothing planned yet — \`awo req new --title "…"\``;
   } else {
-    next = "all tasks are done — verify the goal's definition-of-done";
+    next = "all tasks are closed — inspect `awo goal readiness <goalId>` and verify the definition-of-done";
   }
 
   return {
@@ -83,6 +96,7 @@ export async function runContext(options: { cwd?: string } = {}): Promise<Contex
     orchestrator: `${orchestrator.runtime}:${orchestrator.model}`,
     looseRequirements,
     recent: snapshot.runs.slice(0, 3),
+    archivable: await findArchivableGoals(root),
     next,
   };
 }
@@ -105,10 +119,29 @@ export function formatContext(c: ContextResult): string {
     `repos         ${repos.length} linked, ${present} present${bad.length ? ` — ATTENTION: ${bad.map((r) => `${r.name}:${r.status}`).join(", ")}` : ""}`
   );
 
-  if (goals.length === 0) lines.push("goals         none yet");
-  for (const g of goals) {
+  // Archived goals are deliberately not listed. This digest answers "what is live
+  // right now", and a finished goal is not — it stays one `awo goal restore` away,
+  // and the count keeps it from vanishing silently.
+  const live = goals.filter((g) => !g.archived);
+  const archivedCount = goals.length - live.length;
+
+  if (live.length === 0) lines.push("goals         none live");
+  for (const g of live) {
     const done = g.tasks.filter((t) => t.status === "done").length;
-    lines.push(`goal          ${g.id} ${g.status} — ${done}/${g.tasks.length} done · ${g.title}`);
+    const cancelled = g.tasks.filter((t) => t.status === "cancelled").length;
+    const cancelledText = cancelled
+      ? ` + ${cancelled} cancelled (${done + cancelled}/${g.tasks.length} closed)`
+      : "";
+    lines.push(`goal          ${g.id} ${g.status} — ${done}/${g.tasks.length} done${cancelledText} · ${g.title}`);
+  }
+  if (archivedCount > 0) lines.push(`              (${archivedCount} archived — \`awo goal list --archived\`)`);
+
+  // Finished goals still in the live list. Named, because an archive you have to
+  // remember to use is an archive that stays empty.
+  if (c.archivable.length > 0) {
+    lines.push(
+      `to archive    ${c.archivable.map((g) => `${g.id} (${g.status})`).join(", ")} — \`awo goal archive <id>\``
+    );
   }
 
   const byStatus = Object.entries(stats.byStatus)

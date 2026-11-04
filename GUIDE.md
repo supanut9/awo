@@ -188,7 +188,8 @@ your review pile.
 ```sh
 awo goal new --from SHOP-R1          # moves the requirement in as requirement.md
 awo task new --goal SHOP-G1 --name "FAQ data model" \
-             --targets learn-shop-online-server --agent software-engineer
+             --targets learn-shop-online-server --agent software-engineer \
+             --kind implementation
 awo task new --goal SHOP-G1 --name "Public read endpoint" \
              --targets learn-shop-online-server --depends-on SHOP-T1
 ```
@@ -236,11 +237,16 @@ awo task event SHOP-T1 test --run "npx jest --silent" --baseline
 Close it:
 
 ```sh
-awo task complete SHOP-T1 --outcome success --gate --summary "…"
+awo task complete SHOP-T1 --outcome success --summary "…"
 ```
 
-`--gate` routes success to `in-review` instead of `done`. Use it whenever a human
-should look.
+New goals require goal-level QA, so success routes to `in-review` automatically.
+Legacy goals without that policy can still opt in per run with `--gate`. A task kind
+sets the evidence contract: implementation and verification need a measured check;
+investigation, decision, and deployment-data work need a concrete `--summary` but no
+invented commit. Git baselines, resulting commit SHAs, and diffs are captured where
+available. If implementation correctly changes nothing, make that exception visible
+with `--unchanged "<reason>"`.
 
 ---
 
@@ -383,7 +389,7 @@ would change, and `awo pr link --no-meta` links without touching the PR.
 
 ## 7. The QA gate
 
-Per task:
+Per task, for legacy/non-governed goals:
 
 ```sh
 awo task verify SHOP-T1              # in-review -> done
@@ -395,9 +401,19 @@ Per goal — the one that catches what per-task checks cannot:
 ```sh
 awo goal verify SHOP-G1               # assembles the brief for a high-tier review
 awo goal trace SHOP-G1                # each acceptance criterion vs its evidence
-awo goal verdict SHOP-G1 --pass --summary "meets the definition of done"
-awo goal verdict SHOP-G1 --gap  --summary "FAQ ordering is not applied on the BFF route"
+awo goal readiness SHOP-G1            # every current completion blocker
+awo goal verdict SHOP-G1 --pass --summary "meets the definition of done" --who "QA owner"
+awo goal verdict SHOP-G1 --gap  --summary "FAQ ordering is not applied on the BFF route" --who "QA owner"
 ```
+
+For a governed goal, individual `task verify` approvals cannot bypass this gate.
+`--pass` requires every task closed, every criterion covered (or an exception named
+with `--who <human>`), and the attached QA brief. A normal `--gap` creates a repair
+task inside the same goal and reopens it. Use `--new-scope` only when the finding is
+outside the approved requirement; that creates a new intake requirement instead.
+
+If authored task files and `state.json` drift, readers report the conservative
+state. `awo goal reconcile SHOP-G1` persists the repair and records it in the log.
 
 This exists because of a real result: six tasks each passed their own checks and
 composed into a functionally broken feature. Only a cross-branch review at high effort

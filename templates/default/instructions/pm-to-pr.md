@@ -26,9 +26,10 @@ expected outcome is a review-ready pull request.
    measured evidence with `awo task event <id> test --run "..."`, then send the
    task through its QA gate. Link every test/manual check to the requirement with
    `awo task evidence <id> --criterion <n> --kind test|manual --ref "..."`.
-4. **Verify the feature** — `qa-engineer` checks the goal's acceptance criteria
-   across tasks using `awo goal trace <goal>`. A gap becomes a follow-up
-   requirement/task; it is not hidden by a passing unit suite.
+4. **Verify the feature** — `qa-engineer` checks `awo goal readiness <goal>`,
+   attaches the read-only gate with `awo goal verify <goal>`, and records the
+   verdict. An in-scope gap becomes a repair task on the same goal; only explicit
+   `--new-scope` becomes a follow-up requirement.
 5. **Open and maintain the PR** — `release-engineer` commits, pushes the task
    branch, opens a PR with evidence, runs `awo pr link <task> --repo <repo>
    --number <n>`, then repeatedly runs `awo pr reconcile <task>` to address

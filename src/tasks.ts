@@ -12,6 +12,8 @@ export interface TaskDefinition {
   agent: string | null;
   /** Evidence contracts differ for code, investigation, QA, and human decisions. */
   kind: TaskKind;
+  /** Legacy tasks had no kind; do not retroactively impose implementation evidence. */
+  kindExplicit: boolean;
   /** Frontmatter `status:` is the AUTHORED starting state only (§7.2). */
   authoredStatus: TaskStatus;
   /**
@@ -48,8 +50,11 @@ export interface GoalDefinition {
   id: string;
   title: string;
   dir: string;
+  targets: string[];
   taskIds: string[];
   completionPolicy: CompletionPolicy;
+  /** True when the goal directory currently sits under `goals/archive/`. */
+  archived: boolean;
 }
 
 /**
@@ -72,14 +77,36 @@ function asArray(value: unknown): string[] {
   return [];
 }
 
+export function goalsDir(workspaceRoot: string): string {
+  return path.join(workspaceRoot, "goals");
+}
+
+/**
+ * Where a finished or abandoned goal is kept (§7.2), mirroring
+ * `requirements/archive/`.
+ *
+ * A goal whose work is over stayed in `goals/` forever, so the list an agent
+ * scans to answer "what is actually live?" grew without bound and every session
+ * paid to skim goals that were closed months ago. The status is still the truth;
+ * the directory follows it.
+ */
+export function goalArchiveDir(workspaceRoot: string): string {
+  return path.join(workspaceRoot, "goals", "archive");
+}
+
 async function goalDirs(workspaceRoot: string): Promise<string[]> {
-  const goalsRoot = path.join(workspaceRoot, "goals");
+  const goalsRoot = goalsDir(workspaceRoot);
   if (!(await fs.pathExists(goalsRoot))) return [];
-  const entries = await fs.readdir(goalsRoot, { withFileTypes: true });
-  return entries
-    .filter((e) => e.isDirectory())
-    .map((e) => path.join(goalsRoot, e.name))
-    .sort();
+
+  const read = async (dir: string): Promise<string[]> =>
+    (await fs.readdir(dir, { withFileTypes: true }).catch(() => []))
+      .filter((e) => e.isDirectory())
+      // `archive` is a container, not a goal — without this it reads as one with
+      // no goal.md and every archived goal underneath it goes unseen.
+      .filter((e) => path.join(dir, e.name) !== goalArchiveDir(workspaceRoot))
+      .map((e) => path.join(dir, e.name));
+
+  return [...(await read(goalsRoot)), ...(await read(goalArchiveDir(workspaceRoot)))].sort();
 }
 
 export async function readTaskFile(file: string): Promise<TaskDefinition> {
@@ -109,6 +136,7 @@ export async function readTaskFile(file: string): Promise<TaskDefinition> {
     dependsOn: asArray(fm.dependsOn),
     agent: typeof fm.agent === "string" ? fm.agent : null,
     kind: TASK_KINDS.includes(fm.kind as TaskKind) ? (fm.kind as TaskKind) : "implementation",
+    kindExplicit: TASK_KINDS.includes(fm.kind as TaskKind),
     authoredStatus: authored as TaskStatus,
     tier:
       fm.tier === "high" || fm.tier === "standard" || fm.tier === "low" ? fm.tier : null,
@@ -126,11 +154,29 @@ function completionPolicy(value: unknown): CompletionPolicy {
   };
 }
 
-export async function findGoals(workspaceRoot: string): Promise<GoalDefinition[]> {
+/**
+ * Every goal, archived ones included, unless asked otherwise.
+ *
+ * Including the archive is the safe default and deliberately so: `locateTask`,
+ * `awo log show`, and the traceability chain all resolve a task through its goal,
+ * so hiding archived goals here would make every historical task unlocatable and
+ * silently break history — which is the opposite of what archiving is for.
+ * Filtering belongs in the few places that want the short list of live work.
+ */
+export async function findGoals(
+  workspaceRoot: string,
+  options: { includeArchived?: boolean } = {}
+): Promise<GoalDefinition[]> {
+  const includeArchived = options.includeArchived ?? true;
+  const archiveRoot = goalArchiveDir(workspaceRoot);
+
   const goals: GoalDefinition[] = [];
   for (const dir of await goalDirs(workspaceRoot)) {
     const goalFile = path.join(dir, "goal.md");
     if (!(await fs.pathExists(goalFile))) continue;
+
+    const archived = path.dirname(dir) === archiveRoot;
+    if (archived && !includeArchived) continue;
 
     const fm = matter(await fs.readFile(goalFile, "utf8")).data as Record<string, unknown>;
     const id = typeof fm.id === "string" ? fm.id.trim() : path.basename(dir);
@@ -139,8 +185,10 @@ export async function findGoals(workspaceRoot: string): Promise<GoalDefinition[]
       id,
       title: typeof fm.title === "string" ? fm.title : id,
       dir,
+      targets: asArray(fm.targets),
       taskIds: tasks.map((t) => t.id),
       completionPolicy: completionPolicy(fm.completionPolicy),
+      archived,
     });
   }
   return goals;

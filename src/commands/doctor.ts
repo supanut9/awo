@@ -9,6 +9,7 @@ import { newTaskState, readState, reconcileGoalState } from "../state.js";
 import { readEvents } from "../runs.js";
 import { listWorktrees, unsafeReason } from "../worktrees.js";
 import { runAgentOrg } from "./agent-org.js";
+import { readAgentSkills, findInstalled } from "../agent-skills.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -69,7 +70,7 @@ export function groupFindings(findings: Finding[]): FindingGroup[] {
  * on purpose: a diagnostic that silently repairs things hides the problem it
  * was run to find.
  */
-export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding[]> {
+export async function runDoctor(options: { cwd?: string; scope?: "active" | "all" } = {}): Promise<Finding[]> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const findings: Finding[] = [];
   const add = (f: Finding): void => {
@@ -141,6 +142,47 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
       }
     }
   }
+  // ---- declared external agent skills that are not actually here (§7.2) ----
+  // Declaring a skill and installing it are two acts, and only the second one puts
+  // anything in the model's context. A skill present only in `~/.claude/skills` is
+  // reported separately from a missing one because it is a different failure: it
+  // works on this machine and vanishes on a clone, a CI box, or a scheduled run.
+  try {
+    const declared = await readAgentSkills(root);
+    const present = await findInstalled(root, declared);
+    for (const skill of declared) {
+      const state = present.get(skill.name);
+      if (!state || state.where === "workspace") continue;
+      // A catalog-tier skill that is simply absent is absent on purpose — that is
+      // what opt-in means. A *partly* installed one never is.
+      if (skill.tier !== "default" && state.where === "absent") continue;
+
+      const message =
+        state.where === "user"
+          ? `agent skill "${skill.name}" is only in ~/.claude/skills — a clone of this workspace will not have it`
+          : state.where === "partial"
+            ? `agent skill "${skill.name}" is partly installed; missing ${state.missing.join(", ")}`
+            : `agent skill "${skill.name}" is declared but not installed, so nothing can reach it`;
+      add({
+        severity: state.where === "user" ? "info" : "warn",
+        area: "workspace",
+        message,
+        fix: `awo skill sync ${skill.name}`,
+        group:
+          state.where === "user"
+            ? "workspace:agent-skill-user-global"
+            : "workspace:agent-skill-missing",
+      });
+    }
+  } catch (err) {
+    add({
+      severity: "error",
+      area: "workspace",
+      message: (err as Error).message,
+      fix: "fix .workspace/agent-skills.json — every entry needs name, source and summary",
+    });
+  }
+
   for (const rel of conflicts) {
     add({
       severity: "warn",
@@ -228,17 +270,22 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
 
   // ---- tasks & goals ----
   const known = new Set(manifest.repos.map((r) => r.name));
-  const located = await findAllTasks(root);
-  const taskIds = new Set(located.map((t) => t.task.id));
+  const inventory = await findAllTasks(root);
+  const located = inventory.filter(({ goal }) => options.scope !== "active" || !goal.archived);
+  // Archived tasks still satisfy references from active work.
+  const taskIds = new Set(inventory.map((t) => t.task.id));
 
   for (const { task, goal } of located) {
     for (const target of task.targets) {
       if (!known.has(target)) {
         add({
-          severity: "error",
+          severity: goal.archived ? "info" : "error",
           area: "tasks",
-          message: `${task.id}: targets "${target}", which is not in the manifest`,
-          fix: `link it, or fix \`targets:\` in ${path.relative(root, task.file)}`,
+          message: `${task.id}: ${goal.archived ? "historical target" : "targets"} "${target}", which is not in the manifest`,
+          fix: goal.archived
+            ? "preserve historical targets; register this repo again before restoring its work"
+            : `link it, or fix \`targets:\` in ${path.relative(root, task.file)}`,
+          group: `${goal.archived ? "historical" : "active"}:missing-target:${target}`,
         });
       }
     }
@@ -257,11 +304,25 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
     const state = await readState(goal.dir, goal.id);
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
 
-    // Work claimed with no evidence. The QA gate caught six such tasks composing
-    // into a broken feature (§9 item 47); this is the cheap version of that check.
-    if ((ts.status === "done" || ts.status === "in-review") && ts.lastRunId) {
+    // Evidence follows the authored task kind. Legacy tasks did not declare one,
+    // so retroactively calling every investigation "implementation" produced 112
+    // false commit warnings in SHOP and buried the real integrity error.
+    if (
+      task.kindExplicit &&
+      (ts.status === "done" || ts.status === "in-review") &&
+      ts.lastRunId
+    ) {
       const events = await readEvents(root, ts.lastRunId);
-      if (!events.some((e) => e.kind === "commit" || e.kind === "repo.diff")) {
+      if (
+        task.kind === "implementation" &&
+        events.some((e) => e.kind === "repo.baseline") &&
+        !events.some(
+          (e) =>
+            e.kind === "commit" ||
+            e.kind === "repo.diff" ||
+            (e.kind === "note" && e.category === "no-change")
+        )
+      ) {
         add({
           severity: "warn",
           area: "runs",
@@ -270,7 +331,10 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
           group: "runs:no-commit-or-diff",
         });
       }
-      if (!events.some((e) => e.kind === "test")) {
+      if (
+        (task.kind === "implementation" || task.kind === "verification") &&
+        !events.some((e) => e.kind === "test")
+      ) {
         add({
           severity: "warn",
           area: "runs",
@@ -299,7 +363,7 @@ export async function runDoctor(options: { cwd?: string } = {}): Promise<Finding
     }
   }
 
-  for (const goal of await findGoals(root)) {
+  for (const goal of await findGoals(root, { includeArchived: options.scope !== "active" })) {
     const goalFile = path.join(goal.dir, "goal.md");
     const fm = matter(await fs.readFile(goalFile, "utf8")).data as Record<string, unknown>;
     const declared = new Set((Array.isArray(fm.taskIds) ? fm.taskIds : []).map(String));

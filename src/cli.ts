@@ -35,6 +35,12 @@ import {
 import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 import { runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
+import {
+  runGoalArchive,
+  runGoalRestore,
+  runGoalList,
+  formatGoalProgress,
+} from "./commands/goal-archive.js";
 import { runGoalTrace, runTaskEvidence } from "./commands/traceability.js";
 import {
   runPrFinalize,
@@ -52,8 +58,14 @@ import { findAllTasks } from "./tasks.js";
 import { newTaskState, readState } from "./state.js";
 import { planHasWork, runUpgrade } from "./commands/upgrade.js";
 import { runCatalogAdd, runCatalogList, type CatalogKind } from "./commands/catalog.js";
+import {
+  runAgentSkillList,
+  runAgentSkillSync,
+  formatSyncResults,
+} from "./commands/agent-skills.js";
 import { formatContext, runContext } from "./commands/context.js";
 import { runGoalVerdict, runGoalVerify } from "./commands/verify.js";
+import { runGoalReadiness, runGoalReconcile } from "./commands/readiness.js";
 import { credentialPath, runPublish, runPublishWatch } from "./commands/publish.js";
 import { runDispatch } from "./commands/dispatch.js";
 import { formatAgentOrg, runAgentOrg } from "./commands/agent-org.js";
@@ -86,6 +98,19 @@ program
   .name("awo")
   .description("Scaffolds and orchestrates AI-agent development workspaces.")
   .version(version, "-v, --version", "print the installed awo version");
+
+program
+  .command("version")
+  .description("Show installed package/build provenance (independent of workspace version).")
+  .option("--verbose", "include executable path and immutable build metadata")
+  .option("--json", "machine-readable provenance")
+  .action((opts: { verbose?: boolean; json?: boolean }) => {
+    const file = path.join(PACKAGE_ROOT, "dist", "build-info.json");
+    const build = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+    const info = { version, executable: fileURLToPath(import.meta.url), build };
+    if (opts.json || opts.verbose) console.log(JSON.stringify(info, null, 2));
+    else console.log(version);
+  });
 
 program
   .command("init")
@@ -363,9 +388,17 @@ program
   .command("doctor")
   .description("Diagnose the workspace: version skew, broken links, bad targets, abandoned runs.")
   .option("--all", "list every instance instead of collapsing repeated findings")
-  .action(async (opts: { all?: boolean }) => {
+  .option("--json", "machine-readable findings")
+  .option("--scope <scope>", "active or all (includes historical findings)", "all")
+  .action(async (opts: { all?: boolean; json?: boolean; scope: string }) => {
     try {
-      const findings = await runDoctor();
+      if (opts.scope !== "active" && opts.scope !== "all") throw new Error("--scope must be active or all");
+      const findings = await runDoctor({ scope: opts.scope });
+      if (opts.json) {
+        console.log(JSON.stringify(findings, null, 2));
+        process.exitCode = doctorExitCode(findings);
+        return;
+      }
       if (findings.length === 0) {
         console.log("No problems found.");
         return;
@@ -863,6 +896,34 @@ goal
   });
 
 goal
+  .command("archive <goalId>")
+  .description("Move a finished or cancelled goal into goals/archive/, so the live list is only live work.")
+  .option("--force", "archive a goal that is not done or cancelled (abandoned without being marked)")
+  .action(async (goalId: string, opts: { force?: boolean }) => {
+    try {
+      const r = await runGoalArchive(goalId, { force: opts.force });
+      console.log(`${r.id} (${r.status}) archived: ${r.from} -> ${r.to}`);
+      console.log(`Its tasks, state and runs moved with it. Undo with: awo goal restore ${r.id}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("restore <goalId>")
+  .description("Pull an archived goal back into goals/.")
+  .action(async (goalId: string) => {
+    try {
+      const r = await runGoalRestore(goalId);
+      console.log(`${r.id} (${r.status}) restored: ${r.from} -> ${r.to}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
   .command("plan <goalId>")
   .description(
     "Assemble the tech-lead's task-decomposition brief and hand back a plan-mode invocation: the breakdown is proposed for your approval before any task file exists (§7.2)."
@@ -917,6 +978,52 @@ goal
   });
 
 goal
+  .command("readiness <goalId>")
+  .description("Report every blocker between the goal's current state and a truthful QA-ready result.")
+  .option("--json", "machine-readable result")
+  .action(async (goalId: string, opts: { json?: boolean }) => {
+    try {
+      const r = await runGoalReadiness(goalId);
+      if (opts.json) {
+        console.log(JSON.stringify(r, null, 2));
+      } else {
+        console.log(`${r.goalId} ${r.ready ? "READY" : "NOT READY"} (${r.status})`);
+        console.log(`tasks: ${Object.entries(r.tasks.byStatus).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`);
+        if (r.criteria) {
+          console.log(
+            `criteria: ${r.criteria.covered} covered, ${r.criteria.exceptions} accepted exception, ${r.criteria.missing} missing`
+          );
+        }
+        console.log(
+          `qa: ${r.qa.briefRunId ?? "no brief"} · ${r.qa.verdict ?? "no verdict"}` +
+            `${r.qa.verdictBy ? ` by ${r.qa.verdictBy}` : ""}`
+        );
+        for (const blocker of r.blockers) console.log(`- ${blocker.code}: ${blocker.message}`);
+      }
+      if (!r.ready) process.exitCode = 1;
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("reconcile <goalId>")
+  .description("Persist authored-task/runtime-state reconciliation and record the repair in the run log.")
+  .action(async (goalId: string) => {
+    try {
+      const r = await runGoalReconcile(goalId);
+      console.log(`${r.goalId} reconciled — ${r.status}`);
+      console.log(`added:   ${r.added.join(", ") || "none"}`);
+      console.log(`removed: ${r.removed.join(", ") || "none"}`);
+      console.log(`log:     ${r.runId}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
   .command("verify <goalId>")
   .description(
     "Assemble the goal-level QA gate: the definition-of-done, every task's branch and diff, and the high-tier invocation to review it read-only (§7.1)."
@@ -935,7 +1042,7 @@ goal
         console.log(`\nNOT READY: ${r.unfinished.join(", ")} — the gate judges finished work.`);
       }
       console.log(`\nreview with: ${r.invocation}`);
-      console.log(`then record: awo goal verdict ${goalId} --pass|--gap --summary "…"`);
+      console.log(`then record: awo goal verdict ${goalId} --pass|--gap --summary "…" --who "<human>"`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -951,7 +1058,10 @@ goal
       for (const row of rows) {
         console.log(`${row.index}\t${row.status}\t${row.criterion}`);
         for (const evidence of row.evidence) {
-          console.log(`  ${evidence.kind}\t${evidence.taskId}\t${evidence.ref}`);
+          console.log(
+            `  ${evidence.kind}\t${evidence.taskId}\t${evidence.ref}` +
+              `${evidence.acceptedBy ? `\taccepted by ${evidence.acceptedBy}` : ""}`
+          );
         }
       }
     } catch (err) {
@@ -962,13 +1072,29 @@ goal
 
 goal
   .command("verdict <goalId>")
-  .description("Record the QA gate's outcome: --pass verifies the in-review tasks, --gap files a new requirement.")
+  .description("Record the QA gate's outcome: --pass enforces readiness; --gap creates an in-goal repair task unless --new-scope is explicit.")
   .option("--pass", "the goal meets its definition of done")
-  .option("--gap", "it does not — file the finding as a requirement")
+  .option("--gap", "it does not — create a repair task on this goal")
+  .option("--new-scope", "the gap is outside the approved goal — file a new requirement")
+  .option("--targets <repos>", "repair-task repos; defaults to the goal targets", (v) => v.split(","))
+  .option("--agent <agent>", "repair-task owner (default: software-engineer)")
+  .option("--kind <kind>", "repair-task evidence contract")
   .requiredOption("--summary <text>", "the verdict, in one or two sentences")
+  .option("--who <human>", "human responsible for the verdict; required by governed goals")
   .option("--note <text...>", "the prioritised changes, risks, follow-ups")
   .option("--model <model>", "which model produced the verdict")
-  .action(async (goalId: string, opts: { pass?: boolean; gap?: boolean; summary: string; note?: string[]; model?: string }) => {
+  .action(async (goalId: string, opts: {
+    pass?: boolean;
+    gap?: boolean;
+    newScope?: boolean;
+    targets?: string[];
+    agent?: string;
+    kind?: "implementation" | "investigation" | "verification" | "decision" | "deployment-data";
+    summary: string;
+    who?: string;
+    note?: string[];
+    model?: string;
+  }) => {
     try {
       if (opts.pass === Boolean(opts.gap)) {
         throw new Error("Pass exactly one of --pass or --gap.");
@@ -976,6 +1102,9 @@ goal
       const r = await runGoalVerdict(goalId, { ...opts, pass: Boolean(opts.pass) });
       console.log(`${goalId}: ${r.pass ? "PASS" : "GAP"} recorded.`);
       if (r.verifiedTasks.length > 0) console.log(`verified: ${r.verifiedTasks.join(", ")}`);
+      if (r.createdTask) {
+        console.log(`repair:   ${r.createdTask} — stays on ${goalId}; run goal-level QA again after it closes`);
+      }
       if (r.filedRequirement) {
         console.log(`filed:    ${r.filedRequirement} — turn it into a goal with \`awo goal new --from ${r.filedRequirement}\``);
       }
@@ -987,24 +1116,25 @@ goal
 
 goal
   .command("list")
-  .description("List goals with rolled-up task status.")
-  .action(async () => {
+  .description("List goals with rolled-up task status — live by default, so the list is what is in flight.")
+  .option("--archived", "list archived goals instead")
+  .option("--all", "list both")
+  .action(async (opts: { archived?: boolean; all?: boolean }) => {
     try {
-      const rows = await runTaskList();
-      const byGoal = new Map<string, { total: number; done: number; blocked: number }>();
-      for (const r of rows) {
-        const g = byGoal.get(r.goalId) ?? { total: 0, done: 0, blocked: 0 };
-        g.total += 1;
-        if (r.status === "done") g.done += 1;
-        if (r.status === "blocked") g.blocked += 1;
-        byGoal.set(r.goalId, g);
-      }
-      if (byGoal.size === 0) {
-        console.log("No goals yet. Start with `awo req new --title \"…\"`.");
+      // Reads goals directly rather than grouping task rows: a goal that has no
+      // tasks yet is still a goal, and grouping by task made it invisible.
+      const rows = await runGoalList({ archived: opts.archived, all: opts.all });
+      if (rows.length === 0) {
+        console.log(
+          opts.archived
+            ? "No archived goals."
+            : "No live goals. Start with `awo req new --title \"…\"`."
+        );
         return;
       }
-      for (const [id, g] of byGoal) {
-        console.log(`${id}\t${g.done}/${g.total} done${g.blocked ? `, ${g.blocked} blocked` : ""}`);
+      for (const r of rows) {
+        const where = r.archived ? "\t[archived]" : "";
+        console.log(`${r.id}\t${r.status}\t${formatGoalProgress(r)}${where}\t${r.title}`);
       }
     } catch (err) {
       console.error((err as Error).message);
@@ -1095,7 +1225,8 @@ task
   .requiredOption("--criterion <n>", "1-based acceptance-criterion number", (v) => parseInt(v, 10))
   .requiredOption("--kind <kind>", "test | manual | exception")
   .requiredOption("--ref <text>", "test command/run ID, manual evidence URL, or exception reference")
-  .action(async (taskId: string, opts: { criterion: number; kind: "test" | "manual" | "exception"; ref: string }) => {
+  .option("--who <human>", "human accepting an exception; required for --kind exception")
+  .action(async (taskId: string, opts: { criterion: number; kind: "test" | "manual" | "exception"; ref: string; who?: string }) => {
     try {
       const evidence = await runTaskEvidence({ taskId, ...opts });
       console.log(`criterion ${opts.criterion} <- ${evidence.kind} evidence from ${taskId}`);
@@ -1207,6 +1338,8 @@ task
   )
   .option("--baseline", "also run it at the branch point, so a failure can be attributed")
   .option("--repo <name>", "which target repo to run in (default: the task's first target)")
+  .option("--checkout <path>", "explicit checkout; otherwise use the recorded task checkout")
+  .option("--base <ref>", "explicit comparison base; otherwise use the pinned run baseline")
   .option("--timeout <minutes>", "kill the command after this long (default 30)", (v) => parseInt(v, 10))
   .action(
     async (
@@ -1220,6 +1353,8 @@ task
         baseline?: boolean;
         repo?: string;
         timeout?: number;
+        checkout?: string;
+        base?: string;
       }
     ) => {
     try {
@@ -1244,11 +1379,13 @@ task
   .option("--run <command>", "command to verify with (default: the repo's testCommand)")
   .option("--baseline", "also run it at the branch point, so a failure can be attributed")
   .option("--repo <name>", "which target repo to run in")
+  .option("--checkout <path>", "explicit checkout for verification")
+  .option("--base <ref>", "explicit comparison base; otherwise preserve the earlier run base")
   .option("--timeout <minutes>", "kill the command after this long (default 30)", (v) => parseInt(v, 10))
   .action(
     async (
       taskId: string,
-      opts: { run?: string; baseline?: boolean; repo?: string; timeout?: number }
+      opts: { run?: string; baseline?: boolean; repo?: string; timeout?: number; base?: string; checkout?: string }
     ) => {
       try {
         const r = await runTaskRecheck(taskId, { ...opts, timeoutMinutes: opts.timeout });
@@ -1283,9 +1420,13 @@ task
   .option("--note <text...>", "deferred items, risks, follow-ups")
   .option("--gate", "route a success to in-review for the QA gate instead of done")
   .option("--untested <why>", "close as success without test evidence, stating why (tests-must-pass)")
+  // Commander reserves every `--no-*` flag for boolean negation, so a reasoned
+  // exception needs a positive flag name or the supplied string is discarded.
+  .option("--unchanged <why>", "implementation intentionally produced no commit or diff")
   .action(async (taskId: string, opts: Record<string, never>) => {
     try {
-      const r = await runTaskComplete(taskId, opts as unknown as { outcome: string });
+      const input = opts as unknown as { outcome: string; unchanged?: string };
+      const r = await runTaskComplete(taskId, { ...input, noChange: input.unchanged });
       console.log(`${r.taskId} run ${r.runId} -> ${r.outcome}; task is now ${r.status}.`);
       console.log(`log: ${r.detail}`);
     } catch (err) {
@@ -1590,6 +1731,61 @@ for (const kind of ["agent", "skill"] as CatalogKind[]) {
         process.exitCode = 1;
       }
     });
+
+  if (kind === "skill") {
+    // External agent skills (§7.2) live under the same noun as the catalog because
+    // an agent looking for "another skill" should find one command group, not two.
+    group
+      .command("external")
+      .description("Show external agent skills declared in .workspace/agent-skills.json.")
+      .option("--json", "machine-readable declaration plus install state")
+      .action(async (opts: { json?: boolean }) => {
+        try {
+          const skills = await runAgentSkillList();
+          if (opts.json) {
+            console.log(JSON.stringify(skills, null, 2));
+            return;
+          }
+          if (skills.length === 0) {
+            console.log("no external agent skills declared.");
+            return;
+          }
+          for (const s of skills) {
+            const state =
+              s.installed.where === "workspace"
+                ? "installed"
+                : s.installed.where === "user"
+                  ? "user-global only"
+                  : s.installed.where === "partial"
+                    ? `partial, missing ${s.installed.missing.join(", ")}`
+                    : "not installed";
+            const bundle = s.skills.length > 1 ? ` (${s.skills.length} skills)` : "";
+            console.log(`${s.tier === "default" ? "*" : " "} ${s.name}${bundle}  [${state}]  ${s.source}`);
+            console.log(`    ${s.summary}`);
+          }
+          console.log("\n* = installed by `awo skill sync`; others need naming explicitly.");
+        } catch (err) {
+          console.error((err as Error).message);
+          process.exitCode = 1;
+        }
+      });
+
+    group
+      .command("sync [names...]")
+      .description("Install declared external agent skills into .claude/skills via the skills CLI.")
+      .option("--all", "include catalog-tier skills, not just default-tier")
+      .option("--dry-run", "report what would be installed, change nothing")
+      .action(async (names: string[], opts: { all?: boolean; dryRun?: boolean }) => {
+        try {
+          const results = await runAgentSkillSync(names, { all: opts.all, dryRun: opts.dryRun });
+          console.log(formatSyncResults(results));
+          if (results.some((r) => r.outcome === "failed")) process.exitCode = 1;
+        } catch (err) {
+          console.error((err as Error).message);
+          process.exitCode = 1;
+        }
+      });
+  }
 
   if (kind === "agent") {
     group

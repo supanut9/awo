@@ -40,13 +40,15 @@ next, so you don't spend tokens scanning the tree.
 | `awo req list [--all\|--archived]` | Intake by default; the shelved ones on request. |
 | `awo goal new --from {{PROJECT_KEY}}-R#` | Distil an approved requirement into a goal. |
 | `awo goal plan {{PROJECT_KEY}}-G#` | Brief the tech-lead to decompose it — in plan mode, so you approve the breakdown before any task exists. |
-| `awo task new --goal {{PROJECT_KEY}}-G# --name "…" --targets <repo>` | Add a task; allocates `{{PROJECT_KEY}}-T#`. |
+| `awo task new --goal {{PROJECT_KEY}}-G# --name "…" --targets <repo> --kind implementation` | Add a typed task; allocates `{{PROJECT_KEY}}-T#` and updates state. |
 | `awo task run {{PROJECT_KEY}}-T#` | Open a run: creates the worktree, prints the model to use. |
 | `awo task event {{PROJECT_KEY}}-T# test --data '{"repo":"…","pass":42}'` | Record what ran. |
-| `awo task complete {{PROJECT_KEY}}-T# --outcome success --gate` | Close it for review. |
+| `awo task complete {{PROJECT_KEY}}-T# --outcome success` | Close it; governed goals route success to review automatically. |
 | `awo task evidence {{PROJECT_KEY}}-T# --criterion 1 --kind test --ref "<run or command>"` | Trace task evidence to an acceptance criterion. |
 | `awo goal trace {{PROJECT_KEY}}-G#` | Show criterion coverage and any accepted exceptions. |
-| `awo goal verify {{PROJECT_KEY}}-G#` → `awo goal verdict … --pass\|--gap` | The QA gate, and its outcome. |
+| `awo goal readiness {{PROJECT_KEY}}-G#` | Show all task, criterion, and QA blockers. |
+| `awo goal reconcile {{PROJECT_KEY}}-G#` | Persist and log authored-task/state repair. |
+| `awo goal verify {{PROJECT_KEY}}-G#` → `awo goal verdict … --pass\|--gap` | Attach the QA gate, then pass or create an in-goal repair task. Use `--new-scope` to file a requirement. |
 | `awo pr preflight [--repo <repo>]` | Confirm `gh` authentication and repository access before PR work. |
 | `awo pr link {{PROJECT_KEY}}-T# --repo <repo> --number <n>` | Persist the task-to-PR link and live GitHub snapshot. |
 | `awo pr reconcile {{PROJECT_KEY}}-T#` | Refresh checks/reviews and create repair tasks for new review threads. |

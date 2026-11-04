@@ -8,6 +8,9 @@
 # Runtime: run logs and task state (machine-specific)
 /logs/
 **/state.json
+**/state.json.lock/
+**/state.json.*.tmp
+/.workspace/run-id-reservations/
 
 # Connector credentials / secrets — never commit the contents,
 # but keep the folder + its README so the "no config in ~" rule is documented

@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import matter from "gray-matter";
 import path from "path";
+import { describeAgentSkills } from "./agent-skills.js";
 
 /**
  * §17 — the lists in AGENTS.md are derived, so awo derives them.
@@ -21,8 +22,17 @@ import path from "path";
  * Adding a rule is now dropping a file in `rules/`. Nothing to edit, nothing to
  * conflict, nothing to forget. Everything outside the markers is yours.
  */
-export const BLOCKS = ["rules", "skills", "agents", "instructions"] as const;
+export const BLOCKS = ["rules", "skills", "agents", "instructions", "agent-skills"] as const;
 export type BlockName = (typeof BLOCKS)[number];
+
+/**
+ * `agent-skills` is the one block not derived from a directory of markdown: it is
+ * derived from `.workspace/agent-skills.json` plus what is actually present under
+ * `.claude/skills/`. It renders here anyway, because the reason the other three
+ * lists are generated applies exactly: a capability an agent cannot see listed is
+ * a capability that goes unused.
+ */
+const FROM_DIRECTORY = new Set<BlockName>(["rules", "skills", "agents", "instructions"]);
 
 const OPEN = (name: string): string => `<!-- awo:generated ${name} -->`;
 const CLOSE = "<!-- /awo:generated -->";
@@ -75,7 +85,9 @@ export async function refreshManagedBlocks(
       missing.push(name);
       continue;
     }
-    const lines = await describe(path.join(workspaceRoot, name));
+    const lines = FROM_DIRECTORY.has(name)
+      ? await describe(path.join(workspaceRoot, name))
+      : await describeAgentSkills(workspaceRoot);
     const body = lines.length > 0 ? `\n${lines.join("\n")}\n` : "\n_none installed_\n";
     text = `${text.slice(0, bodyStart)}${body}${text.slice(end)}`;
     replaced.push(name);

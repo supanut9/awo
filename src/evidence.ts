@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawn } from "child_process";
 import fs from "fs-extra";
 import path from "path";
@@ -212,11 +213,16 @@ const TEST_NAME = /\.(test|spec)\.[jt]sx?$|_test\.(go|py)$|Test\.java$|_spec\.rb
 /** What this branch changed relative to where it started. */
 export async function changedFiles(repoDir: string, baseRef: string): Promise<ChangedFiles> {
   const git = simpleGit(repoDir);
-  const raw = await git.raw(["diff", "--name-status", `${baseRef}...HEAD`]).catch(() => "");
-  const rows = raw
-    .split("\n")
-    .filter((l) => l.trim())
-    .map((l) => l.split("\t"));
+  // Include the actual tested working tree, not just committed HEAD. A failed
+  // diff is unknown evidence, never proof that no files changed.
+  const point = (await git.raw(["merge-base", "HEAD", baseRef])).trim();
+  const raw = await git.raw(["diff", "--no-renames", "--name-status", "-z", point, "--"]);
+  const fields = raw.split("\0").filter(Boolean);
+  const rows: string[][] = [];
+  for (let i = 0; i < fields.length; i += 2) rows.push([fields[i], fields[i + 1]]);
+  const untracked = (await git.raw(["ls-files", "--others", "--exclude-standard", "-z"]))
+    .split("\0").filter(Boolean);
+  rows.push(...untracked.map((file) => ["A", file]));
 
   const all = rows.map((r) => r[r.length - 1]).filter(Boolean);
   const isTest = (f: string): boolean => TEST_PATH.test(f) || TEST_NAME.test(f);
@@ -238,6 +244,24 @@ export async function changedFiles(repoDir: string, baseRef: string): Promise<Ch
   const testsAndCodeTogether = tests.filter((f) => codeStems.has(stem(f)));
 
   return { all, tests, newTests, testsAndCodeTogether };
+}
+
+/** Identity of all non-ignored content that the command can test. */
+export async function treeFingerprint(repoDir: string): Promise<string> {
+  const git = simpleGit(repoDir);
+  const hash = createHash("sha256");
+  hash.update(await git.revparse(["HEAD"]));
+  hash.update(await git.raw(["diff", "--binary", "HEAD", "--"]));
+  const untracked = (await git.raw(["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean).sort();
+  for (const name of untracked) {
+    hash.update(name + "\0");
+    const file = path.join(repoDir, name);
+    const stat = await fs.lstat(file);
+    hash.update(String(stat.mode) + "\0");
+    hash.update(stat.isSymbolicLink() ? await fs.readlink(file) : await fs.readFile(file));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
 }
 
 /** The commit a task's branch started from, for baseline comparison. */
@@ -267,10 +291,10 @@ export async function measureBaseline(
   const git = simpleGit(repoDir);
   // NOT under repoDir/.git: inside a worktree that is a FILE, not a directory, so
   // creating anything beneath it fails. The caller supplies a scratch path it owns.
-  const tmp = path.join(scratchDir, ref.slice(0, 12));
+  await fs.ensureDir(scratchDir);
+  const tmp = await fs.mkdtemp(path.join(scratchDir, `${ref.slice(0, 12)}-`));
   try {
-    await fs.remove(tmp);
-    await fs.ensureDir(path.dirname(tmp));
+
     await git.raw(["worktree", "add", "--detach", tmp, ref]);
     const deps = path.join(repoDir, "node_modules");
     if (await fs.pathExists(deps)) {

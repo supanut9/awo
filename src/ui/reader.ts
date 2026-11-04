@@ -1,3 +1,4 @@
+import { evaluateGoalReadiness } from "../commands/readiness.js";
 import path from "path";
 import { readManifest } from "../manifest.js";
 import { runList, type RepoStatusEntry } from "../commands/list.js";
@@ -38,6 +39,9 @@ export interface GoalView {
   title: string;
   status: GoalStatus;
   tasks: TaskView[];
+  /** Filed under `goals/archive/`. Carried, not filtered out, so the dashboard
+   *  can still show finished work; `awo context` is the view that hides it. */
+  archived: boolean;
 }
 
 export interface AgentView {
@@ -159,7 +163,7 @@ function coverage(criteria: string[], state?: Awaited<ReturnType<typeof readStat
   for (let i = 1; i <= criteria.length; i += 1) {
     const evidence = state?.criteria?.[String(i)] ?? [];
     if (evidence.some((item) => item.kind === "test" || item.kind === "manual")) covered += 1;
-    else if (evidence.some((item) => item.kind === "exception")) exceptions += 1;
+    else if (evidence.some((item) => item.kind === "exception" && item.acceptedBy?.trim())) exceptions += 1;
   }
   return { total: criteria.length, covered, exceptions };
 }
@@ -235,12 +239,16 @@ export class FileReader implements WorkspaceReader {
     const out: GoalView[] = [];
     for (const goal of await findGoals(this.root)) {
       const tasks = await findTasksInGoal(goal.dir);
-      const state = reconcileGoalState(await readState(goal.dir, goal.id), tasks).state;
+      const raw = await readState(goal.dir, goal.id);
+      const state = reconcileGoalState(raw, tasks).state;
       out.push({
         id: goal.id,
         title: goal.title,
-        status: state.goalStatus,
+        status: state.goalStatus === "done"
+          ? (await evaluateGoalReadiness(this.root, goal, raw, tasks)).status
+          : state.goalStatus,
         tasks: tasks.map((t) => toView(t, state.tasks[t.id] ?? newTaskState(t.authoredStatus))),
+        archived: goal.archived,
       });
     }
     return out;

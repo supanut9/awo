@@ -44,7 +44,12 @@ const files = (packed[0]?.files ?? []).map((f) => f.path);
 const missing = [
   "templates/default/.workspace/manifest.json",
   "templates/default/AGENTS.md",
+  // §7.2 — without the declaration, `awo skill sync` has nothing to install and a
+  // fresh workspace silently ships without the research and debugging skills that
+  // rules/use-declared-skills.md names by hand.
+  "templates/default/.workspace/agent-skills.json",
   "dist/cli.js",
+  "dist/build-info.json",
   // The prebuilt dashboard (§7.5) — without it `awo ui` serves nothing.
   "dist/dashboard/index.html",
   "dist/dashboard/app.js",

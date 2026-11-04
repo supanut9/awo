@@ -29,13 +29,24 @@ requirements/archive/{{PROJECT_KEY}}-R2.md  suspended, cancelled or rejected
 goals/{{PROJECT_KEY}}-G1/goal.md            the objective and its definition of done
                     /requirement.md         the ask it came from
                     /tasks/{{PROJECT_KEY}}-T1.md   executable units
+goals/archive/{{PROJECT_KEY}}-G2/           done or cancelled — the whole folder moves
 logs/<date>/runs.jsonl                      every event + one row per run
 logs/<date>/runs.md                         every run's record, one section each
 logs/<date>/workers/                        raw worker output, when dispatched
 ```
 
 **See `instructions/full-workflow.md` for the canonical end-to-end sequence**
-— intake → plan → build & ship (per task) → QA gate → done.
+— intake → plan → build & ship (per task) → QA gate → done → archive.
+
+A goal that reaches `done` or `cancelled` is filed away with
+`awo goal archive <goal>`: the whole folder moves under `goals/archive/`, tasks,
+`state.json` and all, so `awo context` and `awo goal list` show only live work.
+Nothing is lost — history still resolves by id, and `awo goal restore <goal>`
+brings it back. `awo context` names the finished goals waiting to be filed.
+
+If a goal is too foggy to break into tasks at all — every draft task starts
+"depending on whether…" — plan its **decisions** first with `chart-the-unknown`,
+not its tasks.
 
 ## PR control loop
 Before working a pull request, run `awo pr preflight --repo <repo>`. Link it to
@@ -92,6 +103,25 @@ boundaries. A human naming a role explicitly always overrides the above.
 ## Available skills
 <!-- awo:generated skills -->
 <!-- /awo:generated -->
+
+## External agent skills
+These are **not** awo skills. awo's skills above are flat markdown you read; these
+are open-ecosystem skills installed under `.claude/skills/` and surfaced by the
+harness itself, so you invoke them the way you invoke any skill. They are declared
+in `.workspace/agent-skills.json` and installed by `awo skill sync`.
+
+Reach for them under the same rule as everything else (`use-declared-skills`): if
+one covers the step you are about to take, use it. The two that get skipped most
+are the two that feel like thinking rather than procedure — **`research`** before
+answering from memory or a single file, and **`diagnosing-bugs`** before proposing
+a fix for anything broken, throwing, failing or slow.
+
+<!-- awo:generated agent-skills -->
+<!-- /awo:generated -->
+
+`awo skill external` shows what is declared and whether it is really installed;
+`awo skill sync [name]` installs it. A line marked _user-global only_ works on this
+machine and will not survive a clone or a scheduled run.
 
 ## Agents
 <!-- awo:generated agents -->

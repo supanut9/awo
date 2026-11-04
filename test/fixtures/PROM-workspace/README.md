@@ -40,13 +40,15 @@ next, so you don't spend tokens scanning the tree.
 | `awo req list [--all\|--archived]` | Intake by default; the shelved ones on request. |
 | `awo goal new --from PROM-R#` | Distil an approved requirement into a goal. |
 | `awo goal plan PROM-G#` | Brief the tech-lead to decompose it — in plan mode, so you approve the breakdown before any task exists. |
-| `awo task new --goal PROM-G# --name "…" --targets <repo>` | Add a task; allocates `PROM-T#`. |
+| `awo task new --goal PROM-G# --name "…" --targets <repo> --kind implementation` | Add a typed task; allocates `PROM-T#` and updates state. |
 | `awo task run PROM-T#` | Open a run: creates the worktree, prints the model to use. |
 | `awo task event PROM-T# test --data '{"repo":"…","pass":42}'` | Record what ran. |
-| `awo task complete PROM-T# --outcome success --gate` | Close it for review. |
+| `awo task complete PROM-T# --outcome success` | Close it; governed goals route success to review automatically. |
 | `awo task evidence PROM-T# --criterion 1 --kind test --ref "<run or command>"` | Trace task evidence to an acceptance criterion. |
 | `awo goal trace PROM-G#` | Show criterion coverage and any accepted exceptions. |
-| `awo goal verify PROM-G#` → `awo goal verdict … --pass\|--gap` | The QA gate, and its outcome. |
+| `awo goal readiness PROM-G#` | Show all task, criterion, and QA blockers. |
+| `awo goal reconcile PROM-G#` | Persist and log authored-task/state repair. |
+| `awo goal verify PROM-G#` → `awo goal verdict … --pass\|--gap` | Attach the QA gate, then pass or create an in-goal repair task. Use `--new-scope` to file a requirement. |
 | `awo pr preflight [--repo <repo>]` | Confirm `gh` authentication and repository access before PR work. |
 | `awo pr link PROM-T# --repo <repo> --number <n>` | Persist the task-to-PR link and live GitHub snapshot. |
 | `awo pr reconcile PROM-T#` | Refresh checks/reviews and create repair tasks for new review threads. |

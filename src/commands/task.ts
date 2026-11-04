@@ -1,22 +1,25 @@
+import { randomUUID } from "node:crypto";
 import fs from "fs-extra";
 import path from "path";
 import { simpleGit } from "simple-git";
 import { findWorkspaceRoot } from "../workspace.js";
 import {
   branchPoint,
+  treeFingerprint,
   changedFiles,
   diagnose,
   measure,
   measureBaseline,
   type Measurement,
 } from "../evidence.js";
-import { readManifest } from "../manifest.js";
-import { findAllTasks, locateTask, type TaskDefinition } from "../tasks.js";
+import { readManifest, type Manifest } from "../manifest.js";
+import { findAllTasks, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
 import {
   assertTransition,
   mutateState,
   newTaskState,
   readState,
+  reconcileGoalState,
   RUN_OUTCOMES,
   TASK_STATUSES,
   type Actor,
@@ -50,6 +53,99 @@ export interface TaskRow {
 /** Frontmatter is the authored starting point; state.json wins once it exists (§7.2). */
 function effectiveState(state: GoalState, task: TaskDefinition) {
   return state.tasks[task.id] ?? newTaskState(task.authoredStatus);
+}
+
+interface TaskCheckout {
+  repo: string;
+  dir: string;
+  recordedPath: string;
+}
+
+async function taskCheckouts(
+  workspaceRoot: string,
+  manifest: Manifest,
+  task: TaskDefinition,
+  worktrees: Worktree[]
+): Promise<TaskCheckout[]> {
+  const out: TaskCheckout[] = [];
+  for (const repo of task.targets) {
+    const worktree = worktrees.find((candidate) => candidate.repo === repo && !candidate.error);
+    const entry = manifest.repos.find((candidate) => candidate.name === repo);
+    if (!entry) continue;
+    const recordedPath = worktree?.path ??
+      (entry.type === "local" ? entry.path : path.join("repos", repo));
+    const dir = path.isAbsolute(recordedPath)
+      ? recordedPath
+      : path.join(workspaceRoot, recordedPath);
+    out.push({ repo, dir, recordedPath });
+  }
+  return out;
+}
+
+async function recordRepositoryBaselines(
+  workspaceRoot: string,
+  runId: string,
+  checkouts: TaskCheckout[]
+): Promise<void> {
+  for (const checkout of checkouts) {
+    const git = simpleGit(checkout.dir);
+    const sha = (await git.revparse(["HEAD"]).catch(() => "")).trim();
+    if (!sha) continue;
+    const status = (await git.raw(["status", "--short"]).catch(() => "")).trim();
+    await appendEvent(workspaceRoot, runId, "repo.baseline", {
+      repo: checkout.repo,
+      sha,
+      checkout: checkout.recordedPath,
+      dirty: status !== "",
+      status,
+    });
+  }
+}
+
+/** Capture what Git can prove instead of relying on the worker to narrate it. */
+async function captureRepositoryEvidence(workspaceRoot: string, runId: string): Promise<void> {
+  const before = await readEvents(workspaceRoot, runId);
+  const baselines = before.filter(
+    (event) => event.kind === "repo.baseline" && typeof event.repo === "string" && typeof event.checkout === "string"
+  );
+  for (const baseline of baselines) {
+    const repo = String(baseline.repo);
+    const recordedPath = String(baseline.checkout);
+    const dir = path.isAbsolute(recordedPath)
+      ? recordedPath
+      : path.join(workspaceRoot, recordedPath);
+    const git = simpleGit(dir);
+    if (!(await git.checkIsRepo().catch(() => false))) continue;
+
+    const sha = (await git.revparse(["HEAD"]).catch(() => "")).trim();
+    if (
+      sha &&
+      sha !== String(baseline.sha ?? "") &&
+      !before.some((event) => event.kind === "commit" && event.repo === repo && event.sha === sha)
+    ) {
+      await appendEvent(workspaceRoot, runId, "commit", {
+        repo,
+        sha,
+        previousSha: baseline.sha,
+        auto: true,
+      });
+    }
+
+    const status = (await git.raw(["status", "--short"]).catch(() => "")).trim();
+    if (
+      status !== String(baseline.status ?? "") &&
+      !before.some((event) => event.kind === "repo.diff" && event.repo === repo)
+    ) {
+      const files = status.split("\n").filter(Boolean);
+      await appendEvent(workspaceRoot, runId, "repo.diff", {
+        repo,
+        files: files.slice(0, 50),
+        fileCount: files.length,
+        clean: status === "",
+        auto: true,
+      });
+    }
+  }
 }
 
 export async function runTaskList(options: { cwd?: string; status?: string } = {}): Promise<TaskRow[]> {
@@ -95,7 +191,8 @@ export async function runTaskShow(
 ): Promise<TaskShowResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { task, goal } = await locateTask(workspaceRoot, taskId);
-  const state = await readState(goal.dir, goal.id);
+  const tasks = await findTasksInGoal(goal.dir);
+  const state = reconcileGoalState(await readState(goal.dir, goal.id), tasks).state;
   const ts = effectiveState(state, task);
   return {
     task,
@@ -111,7 +208,7 @@ export async function runTaskShow(
 export async function runTaskStatus(
   taskId: string,
   to: string,
-  options: { cwd?: string; actor?: Actor; reason?: string } = {}
+  options: { cwd?: string; actor?: Actor; reason?: string; goalVerdict?: boolean } = {}
 ): Promise<TaskStatus> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   if (!TASK_STATUSES.includes(to as TaskStatus)) {
@@ -121,11 +218,20 @@ export async function runTaskStatus(
   const actor: Actor = options.actor ?? "human";
 
   const { task, goal } = await locateTask(workspaceRoot, taskId);
+  if (target === "done" && goal.completionPolicy.qaRequired && !options.goalVerdict) {
+    throw new Error(
+      `${task.id} belongs to a governed goal, so one task cannot be approved independently.\n` +
+        `  Attach goal-level QA with \`awo goal verify ${goal.id}\`, then record the verdict with\n` +
+        `  \`awo goal verdict ${goal.id} --pass --summary "…" --who "<human>"\`.`
+    );
+  }
   const current = effectiveState(await readState(goal.dir, goal.id), task);
   assertTransition(task.id, current.status, target, actor);
 
   await mutateState(goal.dir, goal.id, (state) => {
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
+    assertTransition(task.id, ts.status, target, actor);
+    if (ts.status !== target) delete state.qa;
     ts.status = target;
     ts.blockedReason = target === "blocked" ? (options.reason ?? ts.blockedReason) : null;
     state.tasks[task.id] = ts;
@@ -229,7 +335,9 @@ export async function runTaskRun(
     );
   }
 
-  // Dependencies must be `done` — `in-review` is not yet verified.
+  // A governed goal verifies the feature only after every task has completed, so
+  // successful `in-review` work must unblock dependent build tasks. Requiring
+  // `done` here deadlocked every strict dependency chain before goal-level QA.
   const unmet: string[] = [];
   for (const depId of task.dependsOn) {
     const dep = await locateTask(workspaceRoot, depId).catch(() => null);
@@ -238,7 +346,9 @@ export async function runTaskRun(
       continue;
     }
     const depState = effectiveState(await readState(dep.goal.dir, dep.goal.id), dep.task);
-    if (depState.status !== "done") unmet.push(`${depId} (${depState.status})`);
+    if (depState.status !== "done" && depState.status !== "in-review") {
+      unmet.push(`${depId} (${depState.status})`);
+    }
   }
 
   if (unmet.length > 0 && !options.ignoreDependencies) {
@@ -264,7 +374,10 @@ export async function runTaskRun(
   const startedAt = new Date().toISOString();
 
   await mutateState(goal.dir, goal.id, (s) => {
+    // Any new execution makes an earlier goal-level QA brief/verdict stale.
+    delete s.qa;
     const ts = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
+    if (ts.status === "running") throw new Error(`${task.id} is already running (run ${ts.lastRunId}).`);
     if (ts.status === "todo") {
       assertTransition(task.id, ts.status, "queued", "runner");
       ts.status = "queued";
@@ -316,16 +429,23 @@ export async function runTaskRun(
     });
   }
 
+  const runCheckouts = await taskCheckouts(workspaceRoot, manifest, task, usable);
   await appendEvent(workspaceRoot, runId, "run.start", {
     taskId: task.id,
     goalId: goal.id,
     agent: task.agent,
     targets: task.targets,
+    checkouts: runCheckouts.map(({ repo, recordedPath }) => ({ repo, checkout: recordedPath })),
     tier: model.tier,
     tierFrom: model.tierSource,
     model: `${model.runtime}:${model.model}`,
     ...(model.effort ? { effort: model.effort } : {}),
   });
+  await recordRepositoryBaselines(
+    workspaceRoot,
+    runId,
+    runCheckouts
+  );
 
   // Recorded at open, not at close, and composed here rather than by the caller —
   // so the log holds what the worker was told even if the run is abandoned, and
@@ -373,6 +493,8 @@ export async function runTaskEvent(
     baseline?: boolean;
     repo?: string;
     timeoutMinutes?: number;
+    checkout?: string;
+    base?: string;
   } = {}
 ): Promise<{ measured: boolean; diagnosis?: string; needsHuman?: boolean }> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
@@ -410,31 +532,43 @@ export async function runTaskEvent(
       `${task.id} has no targets, so there is no repo to run "${options.run}" in. Pass --repo <name>.`
     );
   }
-  const worktree = path.join(workspaceRoot, "repos", ".worktrees", repoName, task.id);
-  const repoDir = (await fs.pathExists(worktree))
-    ? worktree
-    : path.join(workspaceRoot, "repos", repoName);
-  if (!(await fs.pathExists(repoDir))) {
-    throw new Error(`no repo at ${path.relative(workspaceRoot, repoDir)} to run "${options.run}" in.`);
-  }
-
-  // A cloned repo has a declared ref; a symlinked local checkout does not, so the
-  // base is whatever branch that checkout is on — which is what its task worktrees
-  // were branched from.
+  if (!task.targets.includes(repoName)) throw new Error(`${task.id} does not target ${repoName}.`);
   const entry = manifest.repos.find((r) => r.name === repoName);
-  const baseRef =
-    entry && entry.type === "git"
-      ? entry.ref
-      : (await simpleGit(path.join(workspaceRoot, "repos", repoName))
-          .revparse(["--abbrev-ref", "HEAD"])
-          .catch(() => "HEAD")).trim();
+  if (!entry) throw new Error(`Unknown repo ${repoName}.`);
+  const events = await readEvents(workspaceRoot, ts.lastRunId);
+  const recorded = events.find((event) => event.kind === "repo.baseline" && event.repo === repoName);
+  const start = events.find((event) => event.kind === "run.start");
+  const startedCheckout = Array.isArray(start?.checkouts)
+    ? start.checkouts.find((item: { repo: string; checkout: string }) => item.repo === repoName)?.checkout
+    : undefined;
+  const conventional = path.join(workspaceRoot, "repos", ".worktrees", repoName, task.id);
+  const checkout = options.checkout ?? (typeof recorded?.checkout === "string" ? recorded.checkout : undefined)
+    ?? (typeof startedCheckout === "string" ? startedCheckout : undefined)
+    ?? (task.targets[0] === repoName ? ts.worktree : null)
+    ?? (await fs.pathExists(conventional) ? conventional : null);
+  if (!checkout) {
+    throw new Error(`No recorded checkout for ${task.id}/${repoName}. Pass --checkout <path>; refusing to guess the shared checkout.`);
+  }
+  const repoDir = path.resolve(workspaceRoot, checkout);
+  if (!(await fs.pathExists(repoDir))) throw new Error(`Recorded checkout is missing: ${repoDir}. Restore it or pass --checkout <path>.`);
+  const git = simpleGit(repoDir);
+  const isGit = await git.checkIsRepo();
+  const headSha = isGit ? (await git.revparse(["HEAD"])).trim() : null;
+  const baseRef = options.base ?? (typeof recorded?.sha === "string" && recorded.sha ? recorded.sha : undefined)
+    ?? (entry.type === "git" ? entry.ref : undefined);
+  if (isGit && !baseRef) throw new Error(`No pinned base for ${task.id}/${repoName}; pass --base <ref>.`);
+  const resolvedBase = isGit ? (await git.revparse([`${baseRef}^{commit}`])).trim() : null;
+  const baseSha = isGit ? await branchPoint(repoDir, resolvedBase!) : null;
+  if (isGit && !baseSha) throw new Error(`No merge-base between HEAD and ${baseRef}.`);
+  const beforeTree = isGit ? await treeFingerprint(repoDir) : null;
   const measured = await measure(options.run, repoDir, options.timeoutMinutes);
-  const changed = await changedFiles(repoDir, baseRef);
+  const afterTree = isGit ? await treeFingerprint(repoDir) : null;
+  const changed = isGit ? await changedFiles(repoDir, baseSha!) : { all: [], tests: [], newTests: [], testsAndCodeTogether: [] };
 
   let base: Measurement | null = null;
   let baselineError: string | undefined;
   if (options.baseline) {
-    const point = await branchPoint(repoDir, baseRef);
+    const point = isGit ? await branchPoint(repoDir, baseSha!) : null;
     if (!point) {
       baselineError = `no merge-base between HEAD and ${baseRef}`;
     } else {
@@ -451,12 +585,22 @@ export async function runTaskEvent(
     }
   }
 
-  const verdict = diagnose(measured, base, changed);
+  const verdict = beforeTree !== afterTree
+    ? { diagnosis: "unknown", needsHuman: true, explanation: "The tested tree changed while the command ran; rerun against a stable tree." }
+    : diagnose(measured, base, changed);
+  const artifact = path.join("logs", ts.lastRunId.slice(0, 10), "measurements", `${randomUUID()}.json`);
+  await fs.outputJson(path.join(workspaceRoot, artifact), { candidate: measured, baseline: base, baselineError }, { spaces: 2 });
 
   await appendEvent(workspaceRoot, ts.lastRunId, kind as EventKind, {
     ...fields,
     repo: repoName,
     verified: true,
+    checkout: repoDir,
+    headSha,
+    baseSha,
+    treeFingerprint: beforeTree,
+    treeFingerprintAfter: afterTree,
+    artifact,
     command: measured.command,
     exitCode: measured.exitCode,
     durationSec: measured.durationSec,
@@ -499,6 +643,8 @@ export async function runTaskComplete(
     gate?: boolean;
     /** Close as success without test evidence — requires stating why. */
     untested?: string;
+    /** Implementation intentionally produced no repository change. */
+    noChange?: string;
   }
 ): Promise<TaskCompleteResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
@@ -515,16 +661,34 @@ export async function runTaskComplete(
     throw new Error(`${task.id} has no open run to complete (status: ${ts.status}).`);
   }
   const runId = ts.lastRunId;
+  await captureRepositoryEvidence(workspaceRoot, runId);
+  const priorEvents = await readEvents(workspaceRoot, runId);
 
   // §7.1 `tests-must-pass` was unenforceable: a task could close as `success` with
   // no evidence of anything having run, and six such tasks composed into a broken
   // feature (§9 item 47). A successful run must therefore carry a `test` event, or
   // say out loud why it cannot.
-  if (outcome === "success" && !options.untested) {
-    const priorEvents = await readEvents(workspaceRoot, runId);
-    const measuredPasses = priorEvents.filter(
-      (e) => e.kind === "test" && e.verified === true && e.exitCode === 0
-    );
+  const requiresMeasuredCheck =
+    !task.kindExplicit || task.kind === "implementation" || task.kind === "verification";
+  if (outcome === "success" && requiresMeasuredCheck && !options.untested) {
+    // A command's latest measurement supersedes its earlier attempts. A pass
+    // from a different command must never hide a failed check in the same run.
+    const latest = new Map<string, (typeof priorEvents)[number]>();
+    for (const event of priorEvents) {
+      if (event.kind === "test" && event.verified === true) {
+        latest.set(JSON.stringify([event.repo ?? null, event.command ?? null]), event);
+      }
+    }
+    const measurements = [...latest.values()];
+    const failing = measurements.filter((event) => event.exitCode !== 0 || event.timedOut === true);
+    if (failing.length > 0) {
+      throw new Error(
+        `${task.id} cannot close as success with failing measured checks.\n` +
+          failing.map((event) => `  ${event.repo ?? "repo"}: ${event.command ?? "test"} (exit ${event.exitCode})`).join("\n") +
+          `\n  Fix and rerun each failing command; routing to review does not make a failure pass.`
+      );
+    }
+    const measuredPasses = measurements.filter((event) => event.exitCode === 0);
     const claims = priorEvents.filter((e) => e.kind === "test" && e.verified !== true);
 
     if (measuredPasses.length === 0 && claims.length > 0) {
@@ -538,6 +702,25 @@ export async function runTaskComplete(
           `   passed" as a string is the weakest signal in the workflow.)`
       );
     }
+    // Receipts identify the tree actually tested, not whatever happens to be in
+    // the checkout at completion. Review cannot repair missing test coverage.
+    const currentTrees = new Map<string, string>();
+    for (const event of measuredPasses) {
+      if (typeof event.treeFingerprint !== "string") continue; // Legacy/non-Git receipt.
+      if (event.treeFingerprintAfter !== event.treeFingerprint) {
+        throw new Error(`${task.id}: the tested tree changed during ${event.command}; rerun against a stable tree.`);
+      }
+      if (typeof event.checkout !== "string") {
+        throw new Error(`${task.id}: the test receipt has no checkout; rerun the measurement.`);
+      }
+      if (!currentTrees.has(event.checkout)) {
+        currentTrees.set(event.checkout, await treeFingerprint(event.checkout));
+      }
+      if (currentTrees.get(event.checkout) !== event.treeFingerprint) {
+        throw new Error(`${task.id}: stale test receipt for ${event.command}; the checkout tree changed after testing. Rerun the check.`);
+      }
+    }
+
     // A measurement can pass and still be inconclusive — a test edited alongside the
     // code it covers, or new tests asserting a contract nobody has checked against
     // the acceptance criteria. Those may close, but only into review.
@@ -558,6 +741,38 @@ export async function runTaskComplete(
           `If tests genuinely could not run, say so:  --untested "<why>"`
       );
     }
+  }
+
+  if (outcome === "success" && task.kindExplicit) {
+    if (
+      (task.kind === "investigation" || task.kind === "decision" || task.kind === "deployment-data") &&
+      !options.summary?.trim()
+    ) {
+      throw new Error(
+        `${task.id} is ${task.kind} work, so success requires --summary with the finding, decision, or measured result.`
+      );
+    }
+
+    if (task.kind === "implementation") {
+      const hasGitBaseline = priorEvents.some((event) => event.kind === "repo.baseline");
+      const hasChange = priorEvents.some(
+        (event) => event.kind === "commit" || event.kind === "repo.diff"
+      );
+      if (hasGitBaseline && !hasChange && !options.noChange?.trim()) {
+        throw new Error(
+          `${task.id} is implementation work but Git shows no commit or diff.\n` +
+            `  Make the change, or state why no repository change is correct:\n` +
+            `    awo task complete ${task.id} --outcome success --unchanged "<reason>" ...`
+        );
+      }
+    }
+  }
+
+  if (options.noChange?.trim()) {
+    await appendEvent(workspaceRoot, runId, "note", {
+      category: "no-change",
+      label: options.noChange.trim(),
+    });
   }
 
   await appendEvent(workspaceRoot, runId, "run.end", { outcome });
@@ -658,12 +873,13 @@ export async function runTaskComplete(
 /** Convenience for the QA gate (§7.1): approve or reject an in-review task. */
 export async function runTaskVerify(
   taskId: string,
-  options: { cwd?: string; approve: boolean; reason?: string } = { approve: true }
+  options: { cwd?: string; approve: boolean; reason?: string; goalVerdict?: boolean } = { approve: true }
 ): Promise<TaskStatus> {
   return runTaskStatus(taskId, options.approve ? "done" : "todo", {
     cwd: options.cwd,
     actor: "qa",
     reason: options.reason,
+    goalVerdict: options.goalVerdict,
   });
 }
 
@@ -694,7 +910,7 @@ export interface RecheckResult {
 
 export async function runTaskRecheck(
   taskId: string,
-  options: { cwd?: string; run?: string; baseline?: boolean; repo?: string; timeoutMinutes?: number } = {}
+  options: { cwd?: string; run?: string; baseline?: boolean; repo?: string; timeoutMinutes?: number; base?: string; checkout?: string } = {}
 ): Promise<RecheckResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { task, goal } = await locateTask(workspaceRoot, taskId);
@@ -719,6 +935,13 @@ export async function runTaskRecheck(
     );
   }
 
+  // A recheck tests newer work against the original comparison baseline, not
+  // against the current HEAD that the new run is about to record.
+  const prior = before.lastRunId ? await readEvents(workspaceRoot, before.lastRunId) : [];
+  const priorTest = prior.filter((event) => event.kind === "test" && event.repo === repoName).at(-1);
+  const priorBaseline = prior.find((event) => event.kind === "repo.baseline" && event.repo === repoName);
+  const previousBase = priorTest?.baseSha ?? priorBaseline?.sha;
+
   // Human-initiated correction, so the transition is attributed to a human.
   await runTaskStatus(task.id, before.status === "done" ? "todo" : "todo", {
     cwd: workspaceRoot,
@@ -739,6 +962,8 @@ export async function runTaskRecheck(
     baseline: options.baseline,
     repo: options.repo,
     timeoutMinutes: options.timeoutMinutes,
+    base: options.base ?? (typeof previousBase === "string" && previousBase ? previousBase : undefined),
+    checkout: options.checkout,
     label: `retrospective verification of work closed before the evidence gate`,
   });
 
@@ -766,6 +991,9 @@ export async function runTaskRecheck(
       outcome === "skipped"
         ? `"${command}" was already failing at the branch point, so it cannot verify this task`
         : undefined,
+    // Recheck is verification of already-existing implementation, so the lack of
+    // a new diff is expected and must be recorded rather than treated as missing work.
+    noChange: passed ? "retrospective verification only; implementation already existed" : undefined,
     summary: passed
       ? `Re-checked with \`${command}\`: ${diagnosis}. Original run closed with no evidence.`
       : diagnosis === "pre-existing"

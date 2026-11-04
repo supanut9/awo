@@ -1,5 +1,6 @@
 import fs from "fs-extra";
 import path from "path";
+import { atomicWriteFile, withFileLock } from "./file-lock.js";
 import { type RunOutcome } from "./state.js";
 
 /**
@@ -55,15 +56,36 @@ export async function allocateRunId(
   taskId: string,
   at: Date = new Date()
 ): Promise<string> {
-  const taken = new Set((await readDayLines(workspaceRoot, at.toISOString().slice(0, 10))).map((l) => l.runId));
-  const when = new Date(at.getTime());
-  for (let bump = 0; bump < 120; bump += 1) {
-    const candidate = newRunId(taskId, when);
-    if (!taken.has(candidate)) return candidate;
-    when.setSeconds(when.getSeconds() + 1);
-  }
-  // 120 runs of one task inside two minutes is a runaway loop, not a real workload.
-  throw new Error(`could not allocate a runId for ${taskId}: 120 consecutive seconds are taken`);
+  // Reservation and allocation are one transaction. A caller can crash before
+  // writing its first event; its reserved identity must still never be reused.
+  const reservations = path.join(workspaceRoot, ".workspace", "run-id-reservations");
+  return withFileLock(path.join(reservations, "allocator"), async () => {
+    const when = new Date(at.getTime());
+    const days = new Map<string, string[]>();
+    for (let bump = 0; bump < 120; bump += 1) {
+      const date = when.toISOString().slice(0, 10);
+      const file = path.join(reservations, `${date}.json`);
+      if (!days.has(date)) {
+        const reserved: unknown = await fs.readJson(file).catch((error) => {
+          if (error.code === "ENOENT") return [];
+          throw error;
+        });
+        if (!Array.isArray(reserved) || reserved.some((id) => typeof id !== "string")) {
+          throw new Error(`Malformed run ID reservations: ${file}`);
+        }
+        days.set(date, [...new Set([...reserved, ...(await readDayLines(workspaceRoot, date)).map((l) => l.runId)])]);
+      }
+      const taken = days.get(date)!;
+      const candidate = newRunId(taskId, when);
+      if (!taken.includes(candidate)) {
+        taken.push(candidate);
+        await atomicWriteFile(file, JSON.stringify(taken) + "\n");
+        return candidate;
+      }
+      when.setUTCSeconds(when.getUTCSeconds() + 1);
+    }
+    throw new Error(`could not allocate a runId for ${taskId}: 120 consecutive seconds are taken`);
+  });
 }
 
 /** The day a runId belongs to, the slot it is for, and its time of day. */
@@ -91,6 +113,7 @@ export type EventKind =
    */
   | "brief"
   | "run.start"
+  | "repo.baseline"
   | "step.start"
   | "step.end"
   | "repo.diff"
@@ -279,15 +302,17 @@ export async function writeDetail(
   ].join("\n");
 
   const file = dayRecordFile(workspaceRoot, runId);
-  await fs.ensureDir(path.dirname(file));
-  const existing = (await fs.readFile(file, "utf8").catch(() => "")) as string;
-
-  if (existing.includes(recordMarker(runId))) {
-    await fs.writeFile(file, replaceSection(existing, runId, section));
-  } else {
+  await withFileLock(file, async () => {
+    const existing = await fs.readFile(file, "utf8").catch((error) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
     const header = existing.trim() === "" ? `# Runs on ${runSlot(runId).date}\n\n` : "";
-    await fs.appendFile(file, `${header}${section}\n`);
-  }
+    const next = existing.includes(recordMarker(runId))
+      ? replaceSection(existing, runId, section)
+      : `${header}${existing}${section}\n`;
+    await atomicWriteFile(file, next);
+  });
   return file;
 }
 
