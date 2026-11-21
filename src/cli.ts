@@ -218,17 +218,23 @@ program
   .action(async (opts: { dryRun?: boolean; watch?: boolean }) => {
     try {
       if (opts.watch) {
-        const first = await runPublish({});
+        const first = await runPublish({ dryRun: opts.dryRun });
         console.log(
-          `synced ${first.detail} · ${first.counts.requirements} requirements · ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs · ${first.counts.agents} agents` +
+          `${first.dryRun ? "would sync" : "synced"} ${first.detail} · ${first.counts.requirements} requirements · ${first.counts.goals} goals · ${first.counts.tasks} tasks · ${first.counts.runs} runs · ${first.counts.agents} agents` +
             `${first.uriHost ? ` -> ${first.uriHost}/${first.database}` : ""}`
         );
         console.log("watching for changes — Ctrl+C to stop.");
         const handle = await runPublishWatch({
+          dryRun: opts.dryRun,
           onPublish: (r) => {
             const at = new Date().toLocaleTimeString();
             if (r instanceof Error) console.error(`${at}  sync failed: ${r.message}`);
-            else console.log(`${at}  synced ${r.counts.requirements} requirements · ${r.counts.tasks} tasks · ${r.counts.runs} runs · ${r.counts.agents} agents`);
+            else {
+              console.log(`${at}  ${r.dryRun ? "would sync" : "synced"} ${r.counts.requirements} requirements · ${r.counts.tasks} tasks · ${r.counts.runs} runs · ${r.counts.agents} agents`);
+              if (r.purgedEvents > 0) {
+                console.log(`${at}  removed ${r.purgedEvents} event document(s) left by an earlier full-detail publish`);
+              }
+            }
           },
         });
         const stop = async (): Promise<void> => {
@@ -252,11 +258,12 @@ program
       // effect is invisible is a privacy control nobody can tell is broken — and
       // `redact.filePaths` was exactly that until 0.1.9.
       if (r.detail === "full") {
-        const { workerLogs, outputTails, prompts } = r.redacted;
+        const { workerLogs, outputTails, prompts, checkoutPaths } = r.redacted;
         const withheld = [
           workerLogs > 0 ? `${workerLogs} worker log(s)` : null,
           outputTails > 0 ? `${outputTails} captured command output(s)` : null,
           prompts > 0 ? `${prompts} prompt(s)` : null,
+          checkoutPaths > 0 ? `${checkoutPaths} checkout path(s)` : null,
         ].filter((part): part is string => part !== null);
         console.log(
           withheld.length > 0
@@ -269,6 +276,16 @@ program
           `  bodies, run logs and event streams stay local. For the hosted dashboard to show them,\n` +
             `  set "publish": { "detail": "full" } in .workspace/manifest.json — that sends prose\n` +
             `  describing your code and prompts, which is why it is not the default.`
+        );
+      }
+      // Secrets are masked at every detail level; saying so is how anyone finds out a
+      // credential was sitting in a log in the first place.
+      if (r.redacted.secrets > 0) {
+        console.log(`  masked credentials in ${r.redacted.secrets} field(s) before sending — the local logs still hold them`);
+      }
+      if (r.purgedEvents > 0) {
+        console.log(
+          `  removed ${r.purgedEvents} event document(s) left on the cluster by an earlier full-detail publish`
         );
       }
       if (r.dryRun && !r.uriHost) {
@@ -2111,9 +2128,10 @@ for (const kind of ["agent", "skill"] as CatalogKind[]) {
       .command("org")
       .description("Show installed agent reporting, delegation, review relationships, and task workload.")
       .option("--json", "machine-readable organization graph")
-      .action(async (opts: { json?: boolean }) => {
+      .option("--all", "count tasks in archived goals too (default: live goals only)")
+      .action(async (opts: { json?: boolean; all?: boolean }) => {
         try {
-          const result = await runAgentOrg();
+          const result = await runAgentOrg({ includeArchived: opts.all });
           console.log(opts.json ? JSON.stringify(result, null, 2) : formatAgentOrg(result));
           if (result.errors.length > 0) process.exitCode = 1;
         } catch (err) {

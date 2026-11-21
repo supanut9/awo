@@ -1,3 +1,53 @@
+/**
+ * The dashboard's read model is the server's read model.
+ *
+ * These used to be hand-copied from src/ui/reader.ts, and the copies drifted: the
+ * reader learned `suspended`/`cancelled` requirements and `archived` goals while the
+ * UI still typed requirement status as four values, so a shelved requirement fell
+ * through every branch and was offered "Plan: awo goal new --from …". `import type`
+ * is erased by the bundler, so none of the server code (fs, git) reaches the bundle
+ * — only the shapes do, and `typecheck:ui` now fails when they diverge.
+ */
+import type {
+  AgentView,
+  GoalView,
+  RequirementView,
+  Snapshot,
+  TaskDetailView,
+  TaskView,
+} from "../../src/ui/reader";
+import type { RepoStatusEntry } from "../../src/commands/list";
+import type { RunEvent, RunIndexEntry } from "../../src/runs";
+import type { GoalStatus, TaskStatus } from "../../src/state";
+import type { ReqStatus } from "../../src/commands/intake";
+
+export type {
+  AgentView,
+  GoalStatus,
+  GoalView,
+  ReqStatus,
+  RequirementView,
+  RunEvent,
+  RunIndexEntry,
+  Snapshot,
+  TaskStatus,
+  TaskView,
+};
+export type RepoView = RepoStatusEntry;
+export type TaskDetail = TaskDetailView;
+
+/**
+ * Frozen at archive time by `awo goal archive` (state.json `archivedStatus`). Optional
+ * because the reader may not carry it yet; when it does, an archived swimlane shows
+ * the status the goal actually finished in rather than a later re-derivation.
+ */
+export type GoalViewWithArchive = GoalView & { archivedStatus?: GoalStatus | null };
+
+/**
+ * Board columns, in workflow order. A runtime value, so it cannot be imported from
+ * the server module without bundling it; instead the compiler checks both
+ * directions — nothing here that is not a status, and no status missing here.
+ */
 export const TASK_STATUSES = [
   "todo",
   "queued",
@@ -6,114 +56,19 @@ export const TASK_STATUSES = [
   "in-review",
   "done",
   "cancelled",
-] as const;
-export type TaskStatus = (typeof TASK_STATUSES)[number];
+] as const satisfies readonly TaskStatus[];
+type AssertNever<T extends never> = T;
+export type EveryTaskStatusHasAColumn = AssertNever<Exclude<TaskStatus, (typeof TASK_STATUSES)[number]>>;
 
-export interface TaskView {
-  id: string;
-  goalId: string;
-  name: string;
-  status: TaskStatus;
-  lastRunOutcome: string | null;
-  lastRunId: string | null;
-  startedAt: string | null;
-  finishedAt: string | null;
-  attempts: number;
-  blockedReason: string | null;
-  targets: string[];
-  agent: string | null;
-  kind: string;
-}
+/**
+ * Parked (`suspended`) or killed (`cancelled`): kept for the record, but not intake.
+ * `rejected` is deliberately not here — a rejection is meant to be revised and
+ * proposed again, so it is still work waiting on someone.
+ */
+export const SHELVED_REQUIREMENT_STATUSES = ["suspended", "cancelled"] as const satisfies readonly ReqStatus[];
 
-export interface GoalView {
-  id: string;
-  title: string;
-  status: string;
-  tasks: TaskView[];
-}
-
-export interface AgentView {
-  id: string;
-  tier: string | null;
-  reportsTo: string | null;
-  delegatesTo: string[];
-  reviews: string[];
-  taskCount: number;
-  openTasks: number;
-}
-
-export interface RequirementView {
-  id: string;
-  title: string;
-  status: "draft" | "proposed" | "approved" | "rejected";
-  source: string;
-  goalId: string | null;
-  file: string;
-  criteria: { total: number; covered: number; exceptions: number };
-}
-
-export interface RepoView {
-  name: string;
-  type: string;
-  status: string;
-}
-
-export interface RunIndexEntry {
-  runId: string;
-  taskId: string | null;
-  agent: string | null;
-  tier?: string;
-  model?: string;
-  effort?: string;
-  attempts?: number;
-  status: string;
-  startedAt: string;
-  finishedAt: string | null;
-  durationSec: number | null;
-  reposChanged: string[];
-}
-
-export interface TierStat {
-  key: string;
-  tier: string;
-  effort: string | null;
-  runs: number;
-  succeeded: number;
-  successRate: number;
-  avgAttempts: number;
-  avgDurationSec: number | null;
-  totalDurationSec: number;
-}
-
-export interface Snapshot {
-  project: { workspaceId: string | null; projectKey: string; projectName: string; libraryVersion: string };
-  requirements: RequirementView[];
-  goals: GoalView[];
-  agents: AgentView[];
-  repos: RepoView[];
-  runs: RunIndexEntry[];
-  stats: {
-    byStatus: Record<string, number>;
-    totalTasks: number;
-    totalRuns: number;
-    successRate: number | null;
-    avgDurationSec: number | null;
-    openRuns: number;
-    untestedSuccesses: number;
-    byTier: TierStat[];
-  };
-}
-
-export interface RunEvent {
-  t: string;
-  kind: string;
-  [key: string]: unknown;
-}
-
-export interface TaskDetail extends TaskView {
-  body: string;
-  dependsOn: string[];
-  file: string;
+export function isShelved(requirement: Pick<RequirementView, "status">): boolean {
+  return (SHELVED_REQUIREMENT_STATUSES as readonly string[]).includes(requirement.status);
 }
 
 async function get<T>(url: string): Promise<T> {

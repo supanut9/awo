@@ -2,7 +2,8 @@ import fs from "fs-extra";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
 import { readAgent, type AgentDefinition } from "../models.js";
-import { findAllTasks } from "../tasks.js";
+import { findGoals, findTasksInGoal } from "../tasks.js";
+import { newTaskState, readState, reconcileGoalState, type TaskStatus } from "../state.js";
 
 export interface AgentOrgNode extends AgentDefinition {
   openTasks: number;
@@ -15,8 +16,44 @@ export interface AgentOrgResult {
   errors: string[];
 }
 
+export interface AgentOrgOptions {
+  cwd?: string;
+  /** Count work in archived goals too. Off by default: workload means live work. */
+  includeArchived?: boolean;
+}
+
+/**
+ * Each task's effective status: state.json's runtime status, falling back to the
+ * authored one only for a task that has never been touched.
+ *
+ * Counting `authoredStatus` meant a role's "open" work was whatever the task files
+ * said when they were written — nearly always `todo` — so finished, cancelled and
+ * archived work stayed open forever and the org view never went down.
+ */
+async function effectiveTaskStatuses(
+  root: string,
+  includeArchived: boolean
+): Promise<{ agent: string | null; status: TaskStatus }[]> {
+  const out: { agent: string | null; status: TaskStatus }[] = [];
+  for (const goal of await findGoals(root, { includeArchived })) {
+    const tasks = await findTasksInGoal(goal.dir);
+    // A workload count is no reason to fail: a malformed state.json is reported by
+    // the commands that write it and by doctor, so fall back to the authored status.
+    const state = await readState(goal.dir, goal.id)
+      .then((raw) => reconcileGoalState(raw, tasks).state)
+      .catch(() => null);
+    for (const task of tasks) {
+      out.push({
+        agent: task.agent,
+        status: (state?.tasks[task.id] ?? newTaskState(task.authoredStatus)).status,
+      });
+    }
+  }
+  return out;
+}
+
 /** Read only installed roles: catalog entries are not part of this workspace's org. */
-export async function runAgentOrg(options: { cwd?: string } = {}): Promise<AgentOrgResult> {
+export async function runAgentOrg(options: AgentOrgOptions = {}): Promise<AgentOrgResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const ids = (await fs.readdir(path.join(root, "agents")).catch(() => []))
     .filter((file) => file.endsWith(".md"))
@@ -26,12 +63,12 @@ export async function runAgentOrg(options: { cwd?: string } = {}): Promise<Agent
     (agent): agent is AgentDefinition => agent !== null
   );
   const workload = new Map<string, { taskCount: number; openTasks: number }>();
-  for (const { task } of await findAllTasks(root)) {
-    if (!task.agent) continue;
-    const row = workload.get(task.agent) ?? { taskCount: 0, openTasks: 0 };
+  for (const { agent, status } of await effectiveTaskStatuses(root, options.includeArchived ?? false)) {
+    if (!agent) continue;
+    const row = workload.get(agent) ?? { taskCount: 0, openTasks: 0 };
     row.taskCount += 1;
-    if (task.authoredStatus !== "done" && task.authoredStatus !== "cancelled") row.openTasks += 1;
-    workload.set(task.agent, row);
+    if (status !== "done" && status !== "cancelled") row.openTasks += 1;
+    workload.set(agent, row);
   }
   const agents = definitions.map((agent) => ({
     ...agent,

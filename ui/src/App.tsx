@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type AgentView, type RunEvent, type Snapshot, type TaskStatus } from "./api";
+import {
+  api,
+  isShelved,
+  type AgentView,
+  type ReqStatus,
+  type RequirementView,
+  type RunEvent,
+  type Snapshot,
+  type TaskStatus,
+} from "./api";
 import Board from "./components/Board";
 import TaskDrawer from "./components/TaskDrawer";
 import Timeline from "./components/Timeline";
@@ -29,6 +38,37 @@ const STATUS_TONE: Record<string, string> = {
   missing: "bg-red-100 text-red-800",
 };
 
+const REQUIREMENT_TONE: Record<ReqStatus, string> = {
+  draft: "bg-stone-200 text-stone-700",
+  proposed: "bg-amber-100 text-amber-900",
+  approved: "bg-emerald-100 text-emerald-800",
+  rejected: "bg-red-100 text-red-800",
+  suspended: "bg-sky-100 text-sky-800",
+  cancelled: "bg-stone-200 text-stone-500",
+};
+
+/**
+ * The next move for a requirement, keyed on every status so a new one cannot fall
+ * through to a default. It used to: `suspended` and `cancelled` landed in the final
+ * `else` and were offered "Plan: awo goal new --from …" for work nobody wants built.
+ */
+function requirementNext(requirement: RequirementView, archivedGoalIds: Set<string>): string {
+  if (requirement.goalId) {
+    return archivedGoalIds.has(requirement.goalId)
+      ? `Planned in ${requirement.goalId} · goal archived`
+      : `Planned in ${requirement.goalId}`;
+  }
+  const next: Record<ReqStatus, string> = {
+    draft: `Refine: awo req refine ${requirement.id}`,
+    proposed: `Human gate: awo req approve ${requirement.id}`,
+    rejected: "Revise and propose again",
+    approved: `Plan: awo goal new --from ${requirement.id}`,
+    suspended: `Suspended, not now. Resume: awo req resume ${requirement.id}`,
+    cancelled: `Cancelled. Reopening is deliberate: awo req resume ${requirement.id}`,
+  };
+  return next[requirement.status];
+}
+
 function duration(seconds: number | null): string {
   if (seconds === null) return "-";
   if (seconds < 60) return `${seconds}s`;
@@ -41,6 +81,9 @@ export default function App() {
   const [live, setLive] = useState(false);
   const [tab, setTab] = useState<Tab>("board");
   const [groupByGoal, setGroupByGoal] = useState(true);
+  // Archived goals are finished history; the board is for live work. Hidden by
+  // default, one click away rather than gone.
+  const [showArchived, setShowArchived] = useState(false);
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
   const [openRun, setOpenRun] = useState<{ id: string; events: RunEvent[]; markdown: string | null } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -102,13 +145,29 @@ export default function App() {
   // the server is restarted or sends the new shape.
   const requirements = snap.requirements ?? [];
   const pct = stats.successRate === null ? "—" : `${Math.round(stats.successRate * 100)}%`;
-  const intakeRequirements = requirements.filter((requirement) => requirement.goalId === null);
-  const proposedRequirements = intakeRequirements.filter((requirement) => requirement.status === "proposed");
-  const plannedRequirements = requirements.filter((requirement) => requirement.goalId !== null);
-  const coveredCriteria = requirements.reduce((total, requirement) => total + requirement.criteria.covered, 0);
-  const totalCriteria = requirements.reduce((total, requirement) => total + requirement.criteria.total, 0);
 
-  const attention = goals.flatMap((goal) => goal.tasks).filter((task) =>
+  // A pre-0.7 server sends no `archived`; treat that as live rather than hiding it.
+  const liveGoals = goals.filter((goal) => goal.archived !== true);
+  const archivedGoalIds = new Set(goals.filter((goal) => goal.archived === true).map((goal) => goal.id));
+  const visibleGoals = showArchived ? goals : liveGoals;
+  const boardTasks = visibleGoals.flatMap((goal) => goal.tasks);
+  const countTasks = (status: TaskStatus): number => boardTasks.filter((task) => task.status === status).length;
+
+  // Shelved requirements are a decision record, not intake: counting them made the
+  // intake number grow with every "not now", and they need nobody's attention.
+  const shelvedRequirements = requirements.filter(isShelved);
+  const activeRequirements = requirements.filter(
+    (requirement) =>
+      !isShelved(requirement) &&
+      (showArchived || requirement.goalId === null || !archivedGoalIds.has(requirement.goalId))
+  );
+  const intakeRequirements = activeRequirements.filter((requirement) => requirement.goalId === null);
+  const proposedRequirements = intakeRequirements.filter((requirement) => requirement.status === "proposed");
+  const plannedRequirements = activeRequirements.filter((requirement) => requirement.goalId !== null);
+  const coveredCriteria = activeRequirements.reduce((total, requirement) => total + requirement.criteria.covered, 0);
+  const totalCriteria = activeRequirements.reduce((total, requirement) => total + requirement.criteria.total, 0);
+
+  const attention = liveGoals.flatMap((goal) => goal.tasks).filter((task) =>
     task.status === "blocked" || task.status === "running" || task.status === "in-review"
   );
   const currentTab = TAB_COPY[tab];
@@ -169,9 +228,9 @@ export default function App() {
                   ["Criteria covered", totalCriteria === 0 ? "-" : `${coveredCriteria}/${totalCriteria}`, "bg-moss text-white"],
                 ]
               : [
-                  ["In flight", stats.openRuns, "bg-sun/15 text-amber-950"],
-                  ["Blocked", stats.byStatus.blocked ?? 0, "bg-red-100 text-red-900"],
-                  ["Completed", stats.byStatus.done ?? 0, "bg-emerald-100 text-emerald-950"],
+                  ["In flight", countTasks("running"), "bg-sun/15 text-amber-950"],
+                  ["Blocked", countTasks("blocked"), "bg-red-100 text-red-900"],
+                  ["Completed", countTasks("done"), "bg-emerald-100 text-emerald-950"],
                   ["Evidence rate", pct, "bg-moss text-white"],
                 ]
             ).map(([label, value, color]) => (
@@ -190,18 +249,27 @@ export default function App() {
                 <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-moss">{currentTab.eyebrow}</p>
                 <h3 className="mt-1 font-display text-2xl">{currentTab.title}</h3>
               </div>
-              {tab === "board" && (
-                <label className="flex cursor-pointer items-center gap-2 rounded-full bg-wash px-3 py-2 text-xs font-semibold text-ink/70">
-                  <input className="accent-moss" type="checkbox" checked={groupByGoal} onChange={(e) => setGroupByGoal(e.target.checked)} />
-                  Group by goal
-                </label>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {(tab === "board" || tab === "requirements") && archivedGoalIds.size > 0 && (
+                  <label className="flex cursor-pointer items-center gap-2 rounded-full bg-wash px-3 py-2 text-xs font-semibold text-ink/70">
+                    <input className="accent-moss" type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+                    Show archived goals ({archivedGoalIds.size})
+                  </label>
+                )}
+                {tab === "board" && (
+                  <label className="flex cursor-pointer items-center gap-2 rounded-full bg-wash px-3 py-2 text-xs font-semibold text-ink/70">
+                    <input className="accent-moss" type="checkbox" checked={groupByGoal} onChange={(e) => setGroupByGoal(e.target.checked)} />
+                    Group by goal
+                  </label>
+                )}
+              </div>
             </div>
           {tab === "board" && (
             <>
               <div className="px-5 pt-4 text-xs text-ink/55 sm:px-6">Drag a card to change state. Invalid transitions stay protected by the workflow.</div>
               <Board
-                goals={goals}
+                goals={visibleGoals}
+                hiddenArchived={showArchived ? 0 : archivedGoalIds.size}
                 selectedTask={selectedTask}
                 onSelect={setSelectedTask}
                 onMove={move}
@@ -214,39 +282,26 @@ export default function App() {
             requirements.length === 0 ? (
               <EmptyState title="No requirements captured" copy="Start a product request with awo req new --title <title>. It will appear here before planning begins." />
             ) : (
-              <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-6">
-                {requirements.map((requirement) => {
-                  const next = requirement.goalId
-                    ? `Planned in ${requirement.goalId}`
-                    : requirement.status === "draft"
-                      ? `Refine: awo req refine ${requirement.id}`
-                      : requirement.status === "proposed"
-                        ? `Human gate: awo req approve ${requirement.id}`
-                        : requirement.status === "rejected"
-                          ? "Revise and propose again"
-                          : `Plan: awo goal new --from ${requirement.id}`;
-                  const statusTone = requirement.status === "approved"
-                    ? "bg-emerald-100 text-emerald-800"
-                    : requirement.status === "proposed"
-                      ? "bg-amber-100 text-amber-900"
-                      : requirement.status === "rejected"
-                        ? "bg-red-100 text-red-800"
-                        : "bg-stone-200 text-stone-700";
-                  return (
-                    <article key={requirement.id} className="rounded-2xl border border-ink/10 bg-paper p-4 shadow-[0_5px_16px_rgba(38,48,42,.04)]">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0"><div className="font-mono text-[11px] font-bold text-moss-deep">{requirement.id}</div><h4 className="mt-1 truncate font-display text-xl">{requirement.title}</h4></div>
-                        <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-wide ${statusTone}`}>{requirement.status}</span>
-                      </div>
-                      <div className="mt-4 grid grid-cols-2 gap-2 border-y border-ink/8 py-3 text-[11px] text-ink/60">
-                        <div><span className="block text-[9px] font-bold uppercase tracking-[.12em] text-ink/40">Criteria</span>{requirement.criteria.covered}/{requirement.criteria.total} covered{requirement.criteria.exceptions > 0 ? `, ${requirement.criteria.exceptions} exception${requirement.criteria.exceptions === 1 ? "" : "s"}` : ""}</div>
-                        <div><span className="block text-[9px] font-bold uppercase tracking-[.12em] text-ink/40">Location</span>{requirement.goalId ?? "Intake"}</div>
-                      </div>
-                      <p className="mt-3 text-[11px] leading-5 text-ink/55">{next}</p>
-                    </article>
-                  );
-                })}
-              </div>
+              <>
+                {activeRequirements.length > 0 && (
+                  <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-6">
+                    {activeRequirements.map((requirement) => (
+                      <RequirementCard key={requirement.id} requirement={requirement} next={requirementNext(requirement, archivedGoalIds)} />
+                    ))}
+                  </div>
+                )}
+                {shelvedRequirements.length > 0 && (
+                  <div className="border-t border-ink/10 p-4 sm:p-6">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-ink/45">Shelved · {shelvedRequirements.length}</p>
+                    <p className="mt-1 text-[11px] leading-5 text-ink/55">Suspended or cancelled. Kept so the decision and its reason stay on the record; not counted as intake.</p>
+                    <div className="mt-3 grid gap-3 opacity-80 sm:grid-cols-2">
+                      {shelvedRequirements.map((requirement) => (
+                        <RequirementCard key={requirement.id} requirement={requirement} next={requirementNext(requirement, archivedGoalIds)} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
             )
           )}
 
@@ -385,7 +440,7 @@ export default function App() {
             <p className="mt-3 text-xs leading-5 text-white/65">{tab === "requirements" ? "Requirements that need a person or planning decision." : "Work that could change the project state now."}</p>
             <div className="mt-5 space-y-2">
               {tab === "requirements" ? (
-                intakeRequirements.length === 0 ? <div className="rounded-2xl border border-white/15 bg-white/7 p-4 text-sm text-white/70">No intake items waiting. Requirements are either planned or not yet captured.</div> : intakeRequirements.slice(0, 5).map((requirement) => (
+                intakeRequirements.length === 0 ? <div className="rounded-2xl border border-white/15 bg-white/7 p-4 text-sm text-white/70">No intake items waiting. Requirements are planned, shelved, or not yet captured.</div> : intakeRequirements.slice(0, 5).map((requirement) => (
                   <div key={requirement.id} className="rounded-2xl border border-white/12 bg-white/7 p-3"><div className="flex items-center justify-between gap-2"><span className="font-mono text-[11px] font-bold">{requirement.id}</span><span className="rounded-full bg-white/12 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide">{requirement.status}</span></div><div className="mt-1.5 text-xs leading-4 text-white/82">{requirement.title}</div></div>
                 ))
               ) : attention.length === 0 ? (
@@ -399,7 +454,13 @@ export default function App() {
               ))}
             </div>
             <div className="mt-6 border-t border-white/12 pt-4 text-[11px] text-white/55">
-              <div className="flex justify-between"><span>{tab === "requirements" ? "All requirements" : "Goals"}</span><strong className="font-mono text-white">{tab === "requirements" ? requirements.length : goals.length}</strong></div>
+              <div className="flex justify-between"><span>{tab === "requirements" ? "All requirements" : "Live goals"}</span><strong className="font-mono text-white">{tab === "requirements" ? requirements.length : liveGoals.length}</strong></div>
+              {tab === "requirements" && shelvedRequirements.length > 0 && (
+                <div className="mt-2 flex justify-between"><span>Shelved</span><strong className="font-mono text-white">{shelvedRequirements.length}</strong></div>
+              )}
+              {tab !== "requirements" && archivedGoalIds.size > 0 && (
+                <div className="mt-2 flex justify-between"><span>Archived goals</span><strong className="font-mono text-white">{archivedGoalIds.size}</strong></div>
+              )}
               <div className="mt-2 flex justify-between"><span>{tab === "requirements" ? "Awaiting approval" : "Recorded runs"}</span><strong className="font-mono text-white">{tab === "requirements" ? proposedRequirements.length : stats.totalRuns}</strong></div>
               <div className="mt-2 flex justify-between"><span>{tab === "requirements" ? "Planned" : "Average run"}</span><strong className="font-mono text-white">{tab === "requirements" ? plannedRequirements.length : duration(stats.avgDurationSec)}</strong></div>
             </div>
@@ -437,6 +498,22 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+function RequirementCard({ requirement, next }: { requirement: RequirementView; next: string }) {
+  return (
+    <article className="rounded-2xl border border-ink/10 bg-paper p-4 shadow-[0_5px_16px_rgba(38,48,42,.04)]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0"><div className="font-mono text-[11px] font-bold text-moss-deep">{requirement.id}</div><h4 className="mt-1 truncate font-display text-xl">{requirement.title}</h4></div>
+        <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-wide ${REQUIREMENT_TONE[requirement.status] ?? "bg-stone-200 text-stone-700"}`}>{requirement.status}</span>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2 border-y border-ink/8 py-3 text-[11px] text-ink/60">
+        <div><span className="block text-[9px] font-bold uppercase tracking-[.12em] text-ink/40">Criteria</span>{requirement.criteria.covered}/{requirement.criteria.total} covered{requirement.criteria.exceptions > 0 ? `, ${requirement.criteria.exceptions} exception${requirement.criteria.exceptions === 1 ? "" : "s"}` : ""}</div>
+        <div><span className="block text-[9px] font-bold uppercase tracking-[.12em] text-ink/40">Location</span>{requirement.goalId ?? (requirement.archived ? "Archive" : "Intake")}</div>
+      </div>
+      <p className="mt-3 text-[11px] leading-5 text-ink/55">{next}</p>
+    </article>
   );
 }
 

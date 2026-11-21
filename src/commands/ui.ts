@@ -167,9 +167,13 @@ export async function runUi(options: UiOptions = {}): Promise<UiHandle> {
     });
   });
 
+  // `requirements/` included: the Requirements tab is part of the snapshot, and
+  // without it a `req propose` or `req suspend` stayed invisible until something
+  // under goals/ happened to change.
   const watcher = chokidar.watch(
     [
       path.join(workspaceRoot, "goals"),
+      path.join(workspaceRoot, "requirements"),
       path.join(workspaceRoot, "logs"),
       path.join(workspaceRoot, ".workspace", "manifest.json"),
     ],
