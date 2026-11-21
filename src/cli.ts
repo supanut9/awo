@@ -35,7 +35,6 @@ import {
   runTaskStatus,
   runTaskVerify,
 } from "./commands/task.js";
-import { aliasOption } from "./cli-alias.js";
 import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 import { parseCriteriaRefs, runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
