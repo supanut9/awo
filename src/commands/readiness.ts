@@ -11,6 +11,7 @@ import {
 } from "../state.js";
 import { runGoalTrace } from "./traceability.js";
 import { runLogAdd } from "./log.js";
+import { retireQa } from "../qa-history.js";
 
 export type ReadinessBlockerCode =
   | "no-tasks"
@@ -18,6 +19,7 @@ export type ReadinessBlockerCode =
   | "unfinished-task"
   | "acceptance-criteria-unavailable"
   | "missing-criterion-evidence"
+  | "criterion-edited-since-evidence"
   | "unapproved-exception"
   | "qa-brief-missing"
   | "qa-verdict-missing"
@@ -39,7 +41,11 @@ export interface GoalReadiness {
   canPassVerdict: boolean;
   policy: { qaRequired: boolean; acceptanceEvidenceRequired: boolean };
   tasks: { total: number; byStatus: Record<string, number> };
-  criteria: { total: number; covered: number; exceptions: number; missing: number } | null;
+  /**
+   * `missing` includes `stale` (criteria whose only evidence predates an edit), so
+   * covered + exceptions + missing is still the total.
+   */
+  criteria: { total: number; covered: number; exceptions: number; missing: number; stale?: number } | null;
   qa: {
     briefRunId: string | null;
     verdict: "pass" | "gap" | null;
@@ -110,30 +116,41 @@ export async function evaluateGoalReadiness(
       let covered = 0;
       let exceptions = 0;
       let missing = 0;
+      let stale = 0;
       for (const row of trace) {
-        const passing = row.evidence.some((item) => item.kind === "test" || item.kind === "manual");
-        const acceptedException = row.evidence.some(
-          (item) => item.kind === "exception" && Boolean(item.acceptedBy?.trim())
-        );
-        const unapprovedException = row.evidence.some(
-          (item) => item.kind === "exception" && !item.acceptedBy?.trim()
-        );
-        if (passing) {
+        const name = `criterion ${row.index}${row.label ? ` (${row.label})` : ""}`;
+        if (row.status === "covered") {
           covered += 1;
-        } else if (acceptedException) {
+        } else if (row.status === "exception") {
           exceptions += 1;
+        } else if (row.status === "stale") {
+          // Evidence recorded against an earlier wording proves the earlier wording.
+          // Only entries that carry a hash can be judged; legacy ones still count.
+          missing += 1;
+          stale += 1;
+          const example = row.staleEvidence[0];
+          blockers.push({
+            code: "criterion-edited-since-evidence",
+            criterion: row.index,
+            ...(example ? { taskId: example.taskId } : {}),
+            message:
+              `${name} was edited after its evidence was attached — re-attach: ` +
+              `awo task evidence ${example?.taskId ?? "<taskId>"} --criterion ${row.label ?? row.index} ` +
+              `--kind ${example?.kind ?? "test"}${example && example.kind !== "test" ? ` --ref "${example.ref}"` : ""}`,
+          });
         } else {
           missing += 1;
+          const unapprovedException = row.status === "unapproved-exception";
           blockers.push({
             code: unapprovedException ? "unapproved-exception" : "missing-criterion-evidence",
             criterion: row.index,
             message: unapprovedException
-              ? `criterion ${row.index} has an exception with no accepting human`
-              : `criterion ${row.index} has no passing evidence or accepted exception`,
+              ? `${name} has an exception with no accepting human`
+              : `${name} has no passing evidence or accepted exception`,
           });
         }
       }
-      criteria = { total: trace.length, covered, exceptions, missing };
+      criteria = { total: trace.length, covered, exceptions, missing, stale };
     } catch (err) {
       blockers.push({
         code: "acceptance-criteria-unavailable",
@@ -220,7 +237,7 @@ export async function runGoalReconcile(
   const difference = reconcileGoalState(before, authored);
   const state = await mutateState(goal.dir, goal.id, (draft) => {
     if (difference.missingTaskIds.length > 0 || difference.orphanedTaskIds.length > 0) {
-      delete draft.qa;
+      retireQa(draft, `reconciled ${goal.id}: authored tasks and runtime state disagreed`);
     }
   });
   const log = await runLogAdd({

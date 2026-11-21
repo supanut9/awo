@@ -1,9 +1,18 @@
+import { createHash } from "node:crypto";
 import fs from "fs-extra";
 import matter from "gray-matter";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
+import { readManifest } from "../manifest.js";
 import { invocationHint, planModeApprovesInSession, resolveModel } from "../models.js";
 import { allocateRunId, writeDetail } from "../runs.js";
+import {
+  describeActor,
+  resolveDecider,
+  resolveHumanGate,
+  type DecisionActor,
+  type DecisionOptions,
+} from "../human-gate.js";
 
 /**
  * §16 — the one human gate that cannot be delegated.
@@ -219,14 +228,204 @@ async function setStatus(
  * that reached `proposed` carrying `- _…_` is how a spec gap gets past everybody.
  */
 export function findCriteria(body: string): string[] {
-  const section = /##\s*(?:draft\s+)?acceptance criteria\s*\n([\s\S]*?)(?=\n##\s|\s*$)/i.exec(body);
-  if (!section) return [];
-  return section[1]
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => /^[-*]\s+/.test(l) || /^\d+\.\s+/.test(l) || /^given\b/i.test(l))
-    .map((l) => l.replace(/^([-*]|\d+\.)\s+/, "").trim())
-    .filter((l) => l !== "" && !/^_.*_$/.test(l) && l !== "…" && !/^todo$/i.test(l));
+  return findCriteriaDetailed(body).map((criterion) => criterion.text);
+}
+
+export interface ParsedCriterion {
+  /** 1-based position — what `state.criteria` has always been keyed by. */
+  index: number;
+  /** An explicit `AC-17` label, normalised; the stable identity when present. */
+  label: string | null;
+  text: string;
+  /** Short hash of the whitespace-normalised text, to detect later edits. */
+  hash: string;
+}
+
+/** `ac17`, `AC-17`, `ac-17` → `AC-17`, so a label is looked up however it is typed. */
+export function normalizeCriterionLabel(raw: string): string | null {
+  const match = /^ac-?(\d+[a-z]?)$/i.exec(raw.trim());
+  return match ? `AC-${match[1].toUpperCase()}` : null;
+}
+
+export function criterionHash(text: string): string {
+  return createHash("sha256").update(text.replace(/\s+/g, " ").trim()).digest("hex").slice(0, 16);
+}
+
+/** The digest an approval is pinned to: every criterion's text, in order. */
+export function criteriaDigest(criteria: Array<{ text: string }>): string {
+  return createHash("sha256")
+    .update(criteria.map((criterion) => criterion.text.replace(/\s+/g, " ").trim()).join("\n"))
+    .digest("hex");
+}
+
+/**
+ * A leading label in the three shapes the real requirements use — `AC-17: …`,
+ * `**AC-17** — …`, `AC-17 — …` — plus the bare `AC-17 A Row …` form SHOP-G109 is
+ * written in. `AC-1/AC-2` is a reference, not a label, so a separator is required;
+ * and so is the hyphen — SHOP-G24's "**AC1 and AC2 conflict**" is prose about two
+ * criteria, while SHOP-G52's "**AC-4 — MET 2026-09-18.**" is AC-4.
+ */
+const LABEL = /^(?:\*\*|__)?\[?(ac-\d+[a-z]?)\]?:?(?:\*\*|__)?(?=[\s:—–.)]|$)/i;
+
+/** A heading that says its criteria are history, not terms. */
+const RETIRED_HEADING = /\b(superseded|obsolete|withdrawn|retired|deprecated)\b/i;
+
+/** `~~…~~ — RETIRED`, optionally after a bold or `XX-001 —` lead-in. */
+const STRUCK_ITEM = /^(?:\*\*|__)?(?:[a-z]{1,6}-?\d+[a-z]?(?:\*\*|__)?\s*(?:[:—–-]\s*)?)?(?:\*\*|__)?~~/i;
+
+/**
+ * Criteria are read the way a person reads the document, not by the first regex
+ * match. Measured on the real workspaces, the old single-section parser:
+ *  - returned 0 for `## Acceptance criteria (final design F2, …)` — trailing text
+ *    after the heading made the whole section invisible;
+ *  - stopped at the first section, so SHOP-G109's amendments (AC-17..AC-41) never
+ *    reached trace, readiness or the approval record;
+ *  - counted indented sub-bullets as criteria, shifting every later index;
+ *  - kept `~~struck~~` criteria that the requirement itself marks RETIRED.
+ *
+ * So: every section whose heading contains "acceptance criteria" is read in order
+ * (amendments included, retired headings skipped); only top-level items count
+ * (column 0–3); an item that opens with a strike is retired; and an explicitly
+ * labelled `AC-n` item after the first criteria section counts wherever it sits —
+ * a label is a declaration, and an amendment headed "Added 2026-11-11: …" is still
+ * an amendment. A label already seen is not counted twice.
+ */
+export function findCriteriaDetailed(body: string): Array<ParsedCriterion> {
+  // A PM ticket pasted under "Raw requirement" often carries its own criteria
+  // section; the refined section replaces it (SHOP-G1 read 37 + 10 with both).
+  // The verbatim copy is only the answer when nothing else declares criteria.
+  const refined = parseCriteria(body, false);
+  return refined.length > 0 ? refined : parseCriteria(body, true);
+}
+
+/** The verbatim ask is input to the criteria, not a second set of them. */
+const RAW_HEADING = /\b(raw requirement|verbatim)\b/i;
+
+function parseCriteria(body: string, includeRaw: boolean): Array<ParsedCriterion> {
+  type Item = { label: string | null; lines: string[]; subStarted: boolean; bare: boolean };
+  const items: Item[] = [];
+  const seenLabels = new Set<string>();
+  const state = {
+    inAc: false,
+    acLevel: 0,
+    skipLevel: 0, // > 0 while inside a retired criteria heading
+    rawLevel: 0, // > 0 while inside the verbatim "Raw requirement"
+    seenAc: false,
+    fence: null as string | null,
+    current: null as Item | null,
+    blankSinceItem: false,
+    // Content column of the last top-level item, kept even when that item was not
+    // counted (struck, unlabelled): its own sub-bullets must not become criteria.
+    parentOffset: null as number | null,
+  };
+
+  const close = (): void => {
+    state.current = null;
+    state.blankSinceItem = false;
+  };
+  const open = (text: string, labelledOnly: boolean, bare: boolean): void => {
+    close();
+    const match = LABEL.exec(text);
+    const label = match ? normalizeCriterionLabel(match[1]) : null;
+    if (labelledOnly && !label) return;
+    if (label && seenLabels.has(label)) return;
+    if (label) seenLabels.add(label);
+    state.current = { label, lines: [text], subStarted: false, bare };
+    items.push(state.current);
+  };
+
+  for (const raw of body.split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+
+    const fenceMatch = /^\s{0,3}(```|~~~)/.exec(line);
+    if (state.fence) {
+      if (fenceMatch && fenceMatch[1] === state.fence) state.fence = null;
+      continue;
+    }
+    if (fenceMatch) {
+      state.fence = fenceMatch[1];
+      close();
+      state.parentOffset = null;
+      continue;
+    }
+
+    const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    if (heading) {
+      close();
+      state.parentOffset = null;
+      const level = heading[1].length;
+      const text = heading[2];
+      if (state.skipLevel > 0 && level <= state.skipLevel) state.skipLevel = 0;
+      if (state.rawLevel > 0 && level <= state.rawLevel) state.rawLevel = 0;
+      if (state.inAc && level <= state.acLevel) state.inAc = false;
+      if (!includeRaw && state.rawLevel === 0 && RAW_HEADING.test(text)) state.rawLevel = level;
+      if (state.rawLevel > 0) continue;
+      if (/acceptance criteria/i.test(text)) {
+        if (RETIRED_HEADING.test(text)) {
+          if (state.skipLevel === 0) state.skipLevel = level;
+        } else if (!state.inAc) {
+          state.inAc = true;
+          state.acLevel = level;
+          state.seenAc = true;
+        }
+      }
+      continue;
+    }
+    if (state.skipLevel > 0 || state.rawLevel > 0) continue;
+    // Outside a criteria section only labelled items count, and only once the
+    // document has started declaring criteria at all.
+    const labelledOnly = !state.inAc;
+    if (!state.inAc && !state.seenAc) continue;
+
+    if (line.trim() === "") {
+      if (state.current) state.blankSinceItem = true;
+      continue;
+    }
+
+    const indent = line.startsWith("\t") ? 4 : /^ */.exec(line)![0].length;
+    const bullet = /^(\s*)([-*+]|\d+[.)])(\s+)(.*)$/.exec(line);
+    const current = state.current;
+    if (bullet) {
+      // Markdown nests an item indented to its parent's content column ("  - x"
+      // under "- y"), so column 0–3 alone would count sub-bullets as criteria.
+      const nested = state.parentOffset !== null && indent >= state.parentOffset;
+      if (indent <= 3 && !nested) {
+        state.parentOffset = indent + bullet[2].length + Math.min(bullet[3].length, 4);
+        const text = bullet[4].trim();
+        // An item that opens with a strike is retired in place (`~~…~~ — VOID`).
+        if (STRUCK_ITEM.test(text)) close();
+        else open(text, labelledOnly, false);
+      } else if (current) {
+        current.subStarted = true;
+      }
+      continue;
+    }
+
+    // A bare "Given …" paragraph at the margin is a criterion in a GWT-prose
+    // section; consecutive Given paragraphs are separate criteria.
+    if (!labelledOnly && indent === 0 && /^given\b/i.test(line)
+      && (!current || current.bare || state.blankSinceItem)) {
+      open(line.trim(), false, true);
+      state.parentOffset = null;
+      continue;
+    }
+
+    // Continuation of the open item: a lazy line straight after it, or an indented
+    // paragraph — but not the text under one of its sub-bullets.
+    if (current && !current.subStarted && (!state.blankSinceItem || indent >= 2)) {
+      current.lines.push(line.trim());
+      continue;
+    }
+    if (indent === 0) {
+      close();
+      state.parentOffset = null;
+    }
+  }
+
+  return items
+    .map((item) => ({ label: item.label, text: item.lines.join(" ").replace(/\s+/g, " ").trim() }))
+    .filter(({ text }) => text !== "" && !/^_.*_$/.test(text) && text !== "…" && !/^todo$/i.test(text))
+    .map((item, i) => ({ index: i + 1, label: item.label, text: item.text, hash: criterionHash(item.text) }));
 }
 
 export interface ProposeResult {
@@ -279,15 +478,57 @@ export interface ApproveResult {
   /** Where the file is now — a rejection moves it into the archive. */
   file: string;
   moved: boolean;
+  /** Who is answerable, how it reached awo, and the delegation if there was one. */
+  actor: DecisionActor;
+  /** sha256 of the criteria the approval accepted; null for a rejection. */
+  criteriaDigest: string | null;
+}
+
+/** Why a requirement in this status cannot be approved, and the command that fixes it. */
+function approvalRefusal(req: Requirement): string | null {
+  switch (req.status) {
+    case "proposed":
+      return null;
+    case "approved":
+      return `${req.id} is already approved${req.data.decidedBy ? ` (by ${String(req.data.decidedBy)})` : ""}.`;
+    case "draft":
+      return (
+        `${req.id} is still a draft — nothing has proposed acceptance criteria for you to judge.\n` +
+        `  Propose it first:  awo req propose ${req.id}\n` +
+        `  (or have the PM role write the criteria:  awo req refine ${req.id})`
+      );
+    case "rejected":
+      return (
+        `${req.id} was rejected${req.data.decisionNote ? ` (${String(req.data.decisionNote)})` : ""}.\n` +
+        `  Revise it in ${req.file}, then propose it again:  awo req propose ${req.id}\n` +
+        `  An approval is of the revised criteria, so it starts from a fresh proposal.`
+      );
+    case "suspended":
+    case "cancelled":
+      return (
+        `${req.id} is ${req.status}, so approving it would skip the decision to bring it back.\n` +
+        `  Reopen it first:  awo req resume ${req.id}`
+      );
+  }
 }
 
 /**
  * The human decision, recorded as a run so the audit trail shows who let the work
  * start and on what terms.
+ *
+ * Approval is only ever of a `proposed` requirement with at least one criterion,
+ * and it pins the digest of the criteria it accepted: measured on atlas-sales-crm,
+ * 35 approvals landed less than 60 s after the requirement was written — some
+ * straight from draft — so "approved" did not reliably mean "someone read terms".
  */
 export async function runReqDecide(
   id: string,
-  options: { cwd?: string; approve?: boolean; reject?: boolean; why?: string; who?: string } = {}
+  options: {
+    cwd?: string;
+    approve?: boolean;
+    reject?: boolean;
+    why?: string;
+  } & DecisionOptions = {}
 ): Promise<ApproveResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const req = await readRequirement(root, id);
@@ -298,40 +539,90 @@ export async function runReqDecide(
   if (options.reject && !options.why) {
     throw new Error("--reject needs --why: a rejection with no reason cannot be acted on.");
   }
-  if (req.status === "draft") {
+  if (options.reject && req.status === "draft") {
     throw new Error(
       `${id} is still a draft — nothing has proposed acceptance criteria for you to judge.\n` +
         `  Have the PM role refine it first:  awo req refine ${id}`
     );
   }
 
-  const criteria = findCriteria(req.body);
+  const parsed = findCriteriaDetailed(req.body);
+  const criteria = parsed.map((criterion) => criterion.text);
+  let actor: DecisionActor;
+  if (options.approve) {
+    const refusal = approvalRefusal(req);
+    if (refusal) throw new Error(refusal);
+    if (parsed.length === 0) {
+      throw new Error(
+        `${id} has no acceptance criteria, so there is nothing to approve.\n` +
+          `  Write them under "## Draft acceptance criteria" in ${req.file}, then\n` +
+          `  propose it again:  awo req propose ${id}`
+      );
+    }
+    actor = resolveHumanGate({
+      command: `awo req approve ${id}`,
+      manifest: await readManifest(root),
+      root,
+      options,
+    });
+  } else {
+    actor = resolveDecider(root, options);
+  }
+
   const status: ReqStatus = options.approve ? "approved" : "rejected";
+  const digest = options.approve ? criteriaDigest(parsed) : null;
   const placed = await setStatus(root, req, status, {
     decidedAt: new Date().toISOString(),
-    decidedBy: options.who ?? "human",
-    ...(options.why ? { decisionNote: options.why } : {}),
+    decidedBy: actor.by,
+    via: actor.via,
+    // `undefined` drops a stale value left by an earlier decision.
+    delegation: actor.delegation ?? undefined,
+    criteriaDigest: digest ?? undefined,
+    decisionNote: options.why ?? undefined,
   });
 
   const runId = await allocateRunId(root, id);
   await writeDetail(
     root,
     runId,
-    { kind: "intake-decision", requirement: id, decision: status, by: options.who ?? "human" },
     {
-      interpreted: `Human ${status} ${id}: ${req.title}`,
+      kind: "intake-decision",
+      requirement: id,
+      decision: status,
+      by: actor.by,
+      via: actor.via,
+      delegatedBy: actor.delegation?.by,
+      criteriaDigest: digest ?? undefined,
+    },
+    {
+      prompt: actor.delegation?.instruction ?? undefined,
+      interpreted: `${describeActor(actor)} ${status} ${id}: ${req.title}`,
       summary: [
         options.why ? `**Reason:** ${options.why}` : "",
-        "",
+        actor.delegation
+          ? `**Delegated by:** ${actor.delegation.by}, recorded by ${actor.delegation.via}` +
+            (actor.delegation.instruction ? ` — instruction: "${actor.delegation.instruction}"` : " — no instruction quoted")
+          : "",
         `**Acceptance criteria at the time of the decision (${criteria.length}):**`,
         ...criteria.map((c) => `- ${c}`),
+        digest ? `**Criteria digest:** ${digest}` : "",
       ]
         .filter(Boolean)
         .join("\n"),
     }
   );
 
-  return { id, title: req.title, status, criteria, runId, file: placed.file, moved: placed.moved };
+  return {
+    id,
+    title: req.title,
+    status,
+    criteria,
+    runId,
+    file: placed.file,
+    moved: placed.moved,
+    actor,
+    criteriaDigest: digest,
+  };
 }
 
 /**
@@ -358,6 +649,128 @@ export async function plannedGoalFor(root: string, id: string): Promise<string |
   return null;
 }
 
+/** The status-change timestamps a requirement's frontmatter can carry. */
+const STATUS_TIMESTAMPS = ["createdAt", "proposedAt", "decidedAt", "suspendedAt", "cancelledAt", "resumedAt"];
+
+/**
+ * When the requirement entered its current status: the latest transition stamp,
+ * else the file's mtime for a hand-authored one that carries none.
+ */
+export async function requirementSince(root: string, req: Requirement): Promise<Date | null> {
+  let latest: Date | null = null;
+  for (const key of STATUS_TIMESTAMPS) {
+    const value = req.data[key];
+    if (value === undefined || value === null || value === "") continue;
+    const at = new Date(value as string | Date);
+    if (!Number.isNaN(at.getTime()) && (!latest || at > latest)) latest = at;
+  }
+  if (latest) return latest;
+  const stat = await fs.stat(path.join(root, req.file)).catch(() => null);
+  return stat ? stat.mtime : null;
+}
+
+export function ageInDays(since: Date | null, now: Date = new Date()): number | null {
+  return since ? Math.max(0, Math.floor((now.getTime() - since.getTime()) / 86_400_000)) : null;
+}
+
+export interface RequirementDetail {
+  id: string;
+  title: string;
+  status: ReqStatus;
+  source: string;
+  file: string;
+  archived: boolean;
+  /** The goal it was planned into; its document then lives in that goal's folder. */
+  goalId: string | null;
+  frontmatter: Record<string, unknown>;
+  criteria: ParsedCriterion[];
+  criteriaDigest: string;
+  decision: {
+    decidedAt: string | null;
+    decidedBy: string | null;
+    via: string | null;
+    delegation: unknown;
+    note: string | null;
+    approvedDigest: string | null;
+    /** True when the criteria were edited after the approval; null when nothing was pinned. */
+    criteriaChangedSinceApproval: boolean | null;
+  } | null;
+  since: string | null;
+  ageDays: number | null;
+}
+
+/** A requirement by id, including one `goal new` already moved into its goal. */
+async function readRequirementAnywhere(root: string, id: string): Promise<Requirement> {
+  try {
+    return await readRequirement(root, id);
+  } catch (err) {
+    const { findGoals } = await import("../tasks.js");
+    for (const goal of await findGoals(root).catch(() => [])) {
+      const moved = path.join(goal.dir, "requirement.md");
+      if (!(await fs.pathExists(moved))) continue;
+      const parsed = matter(await fs.readFile(moved, "utf8"));
+      const data = parsed.data as Record<string, unknown>;
+      if (data.id !== id) continue;
+      return {
+        id,
+        file: path.relative(root, moved),
+        title: String(data.title ?? id),
+        status: (REQ_STATUSES as readonly string[]).includes(String(data.status))
+          ? (data.status as ReqStatus)
+          : "draft",
+        source: String(data.source ?? "unspecified"),
+        goalId: (data.goalId as string | null) ?? goal.id,
+        body: parsed.content,
+        data,
+        archived: false,
+      };
+    }
+    throw err;
+  }
+}
+
+/** Everything about one requirement an agent otherwise opens the file to find. */
+export async function runReqShow(id: string, options: { cwd?: string } = {}): Promise<RequirementDetail> {
+  const root = findWorkspaceRoot(options.cwd ?? process.cwd());
+  const req = await readRequirementAnywhere(root, id);
+  const criteria = findCriteriaDetailed(req.body);
+  const digest = criteriaDigest(criteria);
+  const since = await requirementSince(root, req);
+  const text = (key: string) => {
+    const value = req.data[key];
+    if (value === undefined || value === null || value === "") return null;
+    return value instanceof Date ? value.toISOString() : String(value);
+  };
+  const approvedDigest = text("criteriaDigest");
+  const decided = text("decidedAt") !== null || text("decidedBy") !== null;
+  return {
+    id: req.id,
+    title: req.title,
+    status: req.status,
+    source: req.source,
+    file: req.file,
+    archived: req.archived,
+    goalId: req.goalId,
+    frontmatter: req.data,
+    criteria,
+    criteriaDigest: digest,
+    decision: decided
+      ? {
+          decidedAt: text("decidedAt"),
+          decidedBy: text("decidedBy"),
+          via: text("via"),
+          delegation: req.data.delegation ?? null,
+          note: text("decisionNote"),
+          approvedDigest,
+          criteriaChangedSinceApproval:
+            req.status === "approved" && approvedDigest ? approvedDigest !== digest : null,
+        }
+      : null,
+    since: since ? since.toISOString() : null,
+    ageDays: ageInDays(since),
+  };
+}
+
 export interface ShelveResult {
   id: string;
   title: string;
@@ -381,7 +794,7 @@ export interface ShelveResult {
 export async function runReqShelve(
   id: string,
   status: Extract<ReqStatus, "suspended" | "cancelled">,
-  options: { cwd?: string; why?: string; who?: string } = {}
+  options: { cwd?: string; why?: string } & DecisionOptions = {}
 ): Promise<ShelveResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
 
@@ -412,9 +825,10 @@ export async function runReqShelve(
     throw new Error(`${id} is already ${status} (${req.file}).`);
   }
   const previousStatus = req.status;
+  const actor = resolveDecider(root, options);
   const placed = await setStatus(root, req, status, {
     [status === "suspended" ? "suspendedAt" : "cancelledAt"]: new Date().toISOString(),
-    [status === "suspended" ? "suspendedBy" : "cancelledBy"]: options.who ?? "human",
+    [status === "suspended" ? "suspendedBy" : "cancelledBy"]: actor.by,
     decisionNote: options.why,
     // Remembered so `resume` puts it back where it was rather than guessing.
     resumesTo: previousStatus,
@@ -424,9 +838,9 @@ export async function runReqShelve(
   await writeDetail(
     root,
     runId,
-    { kind: "intake-decision", requirement: id, decision: status, by: options.who ?? "human" },
+    { kind: "intake-decision", requirement: id, decision: status, by: actor.by, via: actor.via },
     {
-      interpreted: `${status === "suspended" ? "Suspended" : "Cancelled"} ${id}: ${req.title}`,
+      interpreted: `${describeActor(actor)} ${status} ${id}: ${req.title}`,
       summary: [
         `**Reason:** ${options.why}`,
         `**Was:** ${previousStatus}`,
@@ -452,7 +866,7 @@ export async function runReqShelve(
 /** Bring a shelved requirement back into intake, at the status it left from. */
 export async function runReqResume(
   id: string,
-  options: { cwd?: string; who?: string } = {}
+  options: { cwd?: string; why?: string } & DecisionOptions = {}
 ): Promise<ShelveResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const req = await readRequirement(root, id);
@@ -471,20 +885,23 @@ export async function runReqResume(
     : "draft";
 
   const was = req.status;
+  const actor = resolveDecider(root, options);
   const placed = await setStatus(root, req, back, {
     resumedAt: new Date().toISOString(),
-    resumedBy: options.who ?? "human",
+    resumedBy: actor.by,
     resumesTo: undefined,
+    resumeNote: options.why ?? undefined,
   });
 
   const runId = await allocateRunId(root, id);
   await writeDetail(
     root,
     runId,
-    { kind: "intake-decision", requirement: id, decision: `resumed (${back})`, by: options.who ?? "human" },
+    { kind: "intake-decision", requirement: id, decision: `resumed (${back})`, by: actor.by, via: actor.via },
     {
-      interpreted: `Resumed ${id} from ${was}: ${req.title}`,
+      interpreted: `${describeActor(actor)} resumed ${id} from ${was}: ${req.title}`,
       summary: [
+        ...(options.why ? [`**Reason:** ${options.why}`] : []),
         `**Was:** ${was}${req.data.decisionNote ? ` — ${String(req.data.decisionNote)}` : ""}`,
         `**Now:** ${back}, back in intake at ${placed.file}`,
       ].join("\n"),

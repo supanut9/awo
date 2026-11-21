@@ -48,6 +48,7 @@ import {
 } from "../models.js";
 import { ensureTaskWorktrees, prepareDependencyDirs, type Worktree } from "../worktrees.js";
 import { briefContext } from "../brief-context.js";
+import { retireQa } from "../qa-history.js";
 import {
   appendEvent,
   appendIndex,
@@ -279,7 +280,11 @@ export async function runTaskStatus(
   let openRun: string | null = null;
   await mutateState(goal.dir, goal.id, (state) => {
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
-    if (ts.status !== target) delete state.qa;
+    if (ts.status !== target) {
+      // The verdict's own transitions rewrite QA right after; anything else retires it.
+      if (options.goalVerdict) delete state.qa;
+      else retireQa(state, `${task.id} moved ${ts.status} -> ${target}`);
+    }
     if (ts.status === "running" && target === "cancelled") openRun = ts.lastRunId;
     applyTransition(state, task.id, target, actor, {
       authoredStatus: task.authoredStatus,
@@ -656,7 +661,7 @@ export async function runTaskRun(
 
   await mutateState(goal.dir, goal.id, (s) => {
     // Any new execution makes an earlier goal-level QA brief/verdict stale.
-    delete s.qa;
+    retireQa(s, `${task.id} started run ${runId}`);
     const prior = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
     if (prior.status === "running") throw new Error(`${task.id} is already running (run ${prior.lastRunId}).`);
     if (prior.status === "in-review" && !options.reopen) {

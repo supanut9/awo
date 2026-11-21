@@ -7,15 +7,20 @@ import { aliasOption, aliasOptions } from "./cli-alias.js";
 import { findWorkspaceRoot } from "./workspace.js";
 import { describeModel } from "./models.js";
 import {
+  ageInDays,
   findCriteria,
   isArchivedStatus,
   listRequirements,
+  requirementSince,
   runReqDecide,
   runReqPropose,
   runReqRefine,
   runReqResume,
   runReqShelve,
+  runReqShow,
 } from "./commands/intake.js";
+import { detectAgentEnvironment } from "./agent-env.js";
+import { describeActor } from "./human-gate.js";
 import { runAuto } from "./commands/autorun.js";
 import { listConflicts, runResolve } from "./commands/resolve.js";
 import { runCatalogRemove, runRuleNew, type CatalogRemoveResult } from "./commands/catalog.js";
@@ -672,7 +677,8 @@ req
   .description("Requirements in intake. Shelved ones are in requirements/archive/ — pass --all.")
   .option("--all", "include suspended, cancelled and rejected requirements")
   .option("--archived", "show only the shelved ones")
-  .action(async (opts: { all?: boolean; archived?: boolean }) => {
+  .option("--stale <days>", "only those unchanged for at least <days> days, oldest first, with their age")
+  .action(async (opts: { all?: boolean; archived?: boolean; stale?: string }) => {
     try {
       const root = findWorkspaceRoot(process.cwd());
       const every = await listRequirements(root, { includeArchived: true });
@@ -681,6 +687,26 @@ req
         : opts.all
           ? every
           : every.filter((r) => !r.archived);
+
+      if (opts.stale !== undefined) {
+        const days = Number(opts.stale);
+        if (!Number.isFinite(days) || days < 0) {
+          throw new Error(`--stale needs a number of days (e.g. --stale 14); got "${opts.stale}".`);
+        }
+        // Age is time in the current status: a proposal nobody has decided on, an
+        // approval nobody has planned, a draft nobody refined.
+        const aged = [];
+        for (const r of rows) aged.push({ r, age: ageInDays(await requirementSince(root, r)) ?? 0 });
+        const stale = aged.filter((row) => row.age >= days).sort((a, b) => b.age - a.age || a.r.id.localeCompare(b.r.id));
+        if (stale.length === 0) {
+          console.log(`Nothing unchanged for ${days}+ days${opts.all || opts.archived ? "" : " in intake"}.`);
+          return;
+        }
+        for (const { r, age } of stale) {
+          console.log(`${r.id}\t${r.status}\t${age}d\t${findCriteria(r.body).length} criteria\t${r.title}`);
+        }
+        return;
+      }
 
       if (rows.length === 0) {
         console.log(
@@ -703,6 +729,49 @@ req
       if (!opts.all && !opts.archived && hidden > 0) {
         console.log(`\n${hidden} shelved in requirements/archive/ — \`awo req list --archived\`.`);
       }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+req
+  .command("show <reqId>")
+  .description("One requirement: status and age, criteria with their labels, and the decision record.")
+  .option("--json", "machine-readable result")
+  .action(async (reqId: string, opts: { json?: boolean }) => {
+    try {
+      const r = await runReqShow(reqId);
+      if (opts.json) {
+        console.log(JSON.stringify(r, null, 2));
+        return;
+      }
+      console.log(`${r.id} — ${r.title}`);
+      console.log(`status:   ${r.status}${r.ageDays !== null ? ` for ${r.ageDays}d` : ""}${r.archived ? " (archived)" : ""}`);
+      console.log(`file:     ${r.file}`);
+      console.log(`source:   ${r.source}`);
+      console.log(`goal:     ${r.goalId ?? "unplanned"}`);
+      if (r.decision) {
+        const d = r.decision;
+        const delegation = d.delegation as { by?: string; instruction?: string | null; via?: string } | null;
+        console.log(
+          `decision: ${d.decidedBy ?? "unknown"}${d.via ? ` via ${d.via}` : ""}${d.decidedAt ? ` at ${d.decidedAt}` : ""}`
+        );
+        if (delegation?.by) {
+          console.log(
+            `          delegated by ${delegation.by}, recorded by ${delegation.via ?? "an agent"}` +
+              (delegation.instruction ? ` — "${delegation.instruction}"` : " — no instruction quoted")
+          );
+        }
+        if (d.note) console.log(`note:     ${d.note}`);
+        if (d.criteriaChangedSinceApproval) {
+          console.log(`digest:   CRITERIA CHANGED SINCE APPROVAL — the approval was of different terms`);
+        } else if (d.approvedDigest) {
+          console.log(`digest:   ${d.approvedDigest.slice(0, 16)} (matches the current criteria)`);
+        }
+      }
+      console.log(`criteria (${r.criteria.length}):`);
+      for (const c of r.criteria) console.log(`  ${c.index}\t${c.label ?? "—"}\t${c.text}`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -764,11 +833,18 @@ req
     }
   });
 
+/** `--reason` for `--why`, `--by` for `--who`: the spellings agents reach for first. */
+function intakeAliases(command: Command): Command {
+  aliasOption(command, "--reason <text>", "why");
+  aliasOption(command, "--by <name>", "who");
+  return command;
+}
+
 for (const [name, flag] of [
   ["approve", "approve"],
   ["reject", "reject"],
 ] as const) {
-  req
+  const decide = req
     .command(`${name} <reqId>`)
     .description(
       flag === "approve"
@@ -776,11 +852,15 @@ for (const [name, flag] of [
         : "Send it back, with the reason recorded."
     )
     .option("--why <text>", "reason (required to reject)")
-    .option("--who <name>", "who decided (default: human)")
-    .action(async (reqId: string, opts: { why?: string; who?: string }) => {
+    .option("--who <name>", "who decided (default: your git user.name)")
+    .option("--delegated-by <human>", "an agent recording a person's decision: who made it (required under an agent runtime)")
+    .option("--instruction <quote>", "with --delegated-by: the person's instruction, verbatim");
+  intakeAliases(decide).action(
+    async (reqId: string, opts: { why?: string; who?: string; delegatedBy?: string; instruction?: string }) => {
       try {
         const r = await runReqDecide(reqId, { ...opts, [flag]: true });
         console.log(`${r.id} ${r.status} — ${r.title}`);
+        console.log(`decided by ${describeActor(r.actor)}`);
         if (r.status === "approved") {
           console.log(`${r.criteria.length} criteria accepted. Next: awo goal new --from ${r.id}`);
         }
@@ -793,54 +873,59 @@ for (const [name, flag] of [
         console.error((err as Error).message);
         process.exitCode = 1;
       }
-    });
+    }
+  );
 }
 
 for (const name of ["suspend", "cancel"] as const) {
-  req
+  // `--why` is validated by runReqShelve rather than `requiredOption`, so the
+  // hidden `--reason` alias can satisfy it (commander checks required options
+  // before alias hooks run).
+  const shelve = req
     .command(`${name} <reqId>`)
     .description(
       name === "suspend"
         ? "Park a requirement: still wanted, not now. Moves it to requirements/archive/."
         : "Drop a requirement for good. Moves it to requirements/archive/."
     )
-    .requiredOption("--why <text>", "why it is being set aside — required")
-    .option("--who <name>", "who decided (default: human)")
-    .action(async (reqId: string, opts: { why: string; who?: string }) => {
-      try {
-        const r = await runReqShelve(reqId, name === "suspend" ? "suspended" : "cancelled", opts);
-        console.log(`${r.id} ${r.status} — ${r.title}`);
-        console.log(`moved out of intake to ${r.file}`);
-        if (r.movedAssets) console.log(`  brought ${r.movedAssets}/ along with it`);
-        console.log(`recorded as ${r.runId}`);
-        console.log(
-          name === "suspend"
-            ? `Bring it back with: awo req resume ${r.id}`
-            : `Its id stays reserved, so nothing will reuse ${r.id}. Reopen: awo req resume ${r.id}`
-        );
-      } catch (err) {
-        console.error((err as Error).message);
-        process.exitCode = 1;
-      }
-    });
-}
-
-req
-  .command("resume <reqId>")
-  .description("Bring a shelved requirement back into intake, at the status it left from.")
-  .option("--who <name>", "who decided (default: human)")
-  .action(async (reqId: string, opts: { who?: string }) => {
+    .option("--why <text>", "why it is being set aside — required")
+    .option("--who <name>", "who decided (default: your git user.name, or the agent)");
+  intakeAliases(shelve).action(async (reqId: string, opts: { why?: string; who?: string }) => {
     try {
-      const r = await runReqResume(reqId, opts);
+      const r = await runReqShelve(reqId, name === "suspend" ? "suspended" : "cancelled", opts);
       console.log(`${r.id} ${r.status} — ${r.title}`);
-      console.log(`back in intake at ${r.file}`);
+      console.log(`moved out of intake to ${r.file}`);
       if (r.movedAssets) console.log(`  brought ${r.movedAssets}/ along with it`);
       console.log(`recorded as ${r.runId}`);
+      console.log(
+        name === "suspend"
+          ? `Bring it back with: awo req resume ${r.id}`
+          : `Its id stays reserved, so nothing will reuse ${r.id}. Reopen: awo req resume ${r.id}`
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
     }
   });
+}
+
+const resume = req
+  .command("resume <reqId>")
+  .description("Bring a shelved requirement back into intake, at the status it left from.")
+  .option("--why <text>", "why it is coming back")
+  .option("--who <name>", "who decided (default: your git user.name, or the agent)");
+intakeAliases(resume).action(async (reqId: string, opts: { why?: string; who?: string }) => {
+  try {
+    const r = await runReqResume(reqId, opts);
+    console.log(`${r.id} ${r.status} — ${r.title}`);
+    console.log(`back in intake at ${r.file}`);
+    if (r.movedAssets) console.log(`  brought ${r.movedAssets}/ along with it`);
+    console.log(`recorded as ${r.runId}`);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exitCode = 1;
+  }
+});
 
 program
   .command("test-command <repo> [command]")
@@ -1139,7 +1224,8 @@ goal
         console.log(`tasks: ${Object.entries(r.tasks.byStatus).map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`);
         if (r.criteria) {
           console.log(
-            `criteria: ${r.criteria.covered} covered, ${r.criteria.exceptions} accepted exception, ${r.criteria.missing} missing`
+            `criteria: ${r.criteria.covered} covered, ${r.criteria.exceptions} accepted exception, ${r.criteria.missing} missing` +
+              (r.criteria.stale ? ` (${r.criteria.stale} edited since their evidence)` : "")
           );
         }
         console.log(
@@ -1179,7 +1265,7 @@ goal
   .action(async (goalId: string) => {
     try {
       const r = await runGoalVerify(goalId);
-      console.log(`brief:   ${r.briefPath} (${r.briefRunId})`);
+      console.log(`brief:   ${r.briefPath} (${r.briefRunId}, linked from ${r.recordPath})`);
       console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}  (high tier — the gate is judgment work)`);
       for (const t of r.tasks) {
         console.log(
@@ -1190,7 +1276,12 @@ goal
         console.log(`\nNOT READY: ${r.unfinished.join(", ")} — the gate judges finished work.`);
       }
       console.log(`\nreview with: ${r.invocation}`);
-      console.log(`then record: awo goal verdict ${goalId} --pass|--gap --summary "…" --who "<human>"`);
+      console.log(
+        detectAgentEnvironment().isAgent
+          ? `then the human decides; on their instruction record it with:\n` +
+              `  awo goal verdict ${goalId} --pass|--gap --summary "…" --delegated-by "<who>" --instruction "<their words>"`
+          : `then record: awo goal verdict ${goalId} --pass|--gap --summary "…" --who "<your name>"`
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1200,15 +1291,36 @@ goal
 goal
   .command("trace <goalId>")
   .description("Show each acceptance criterion and the test/manual/exception evidence recorded against it.")
-  .action(async (goalId: string) => {
+  .option("--json", "machine-readable result")
+  .action(async (goalId: string, opts: { json?: boolean }) => {
     try {
       const rows = await runGoalTrace(goalId);
+      if (opts.json) {
+        console.log(JSON.stringify(rows, null, 2));
+        return;
+      }
       for (const row of rows) {
         console.log(`${row.index}\t${row.status}\t${row.criterion}`);
         for (const evidence of row.evidence) {
+          // A test reference that never bound to a measurement is a claim, and says so.
+          const how =
+            evidence.kind === "test"
+              ? evidence.measurement
+                ? `measured: ${evidence.measurement.command} -> exit ${evidence.measurement.exitCode ?? "?"} (run ${evidence.measurement.runId})`
+                : "claimed (not bound to a measured test)"
+              : evidence.kind === "exception"
+                ? evidence.acceptedBy ? `accepted by ${evidence.acceptedBy}` : "NOT accepted by anyone"
+                : evidence.by ? `by ${evidence.by}` : "";
+          const stale = row.staleEvidence.includes(evidence)
+            ? "\tSTALE: criterion edited since evidence — re-attach"
+            : "";
+          console.log(`  ${evidence.kind}\t${evidence.taskId}\t${evidence.ref}${how ? `\t${how}` : ""}${stale}`);
+        }
+        for (const evidence of row.staleEvidence.slice(0, 1)) {
           console.log(
-            `  ${evidence.kind}\t${evidence.taskId}\t${evidence.ref}` +
-              `${evidence.acceptedBy ? `\taccepted by ${evidence.acceptedBy}` : ""}`
+            `  re-attach: awo task evidence ${evidence.taskId} --criterion ${row.label ?? row.index} --kind ${evidence.kind}` +
+              (evidence.kind === "test" ? "" : ` --ref "${evidence.ref}"`) +
+              (evidence.kind === "exception" && evidence.acceptedBy ? ` --who "${evidence.acceptedBy}"` : "")
           );
         }
       }
@@ -1218,7 +1330,7 @@ goal
     }
   });
 
-goal
+const verdict = goal
   .command("verdict <goalId>")
   .description("Record the QA gate's outcome: --pass enforces readiness; --gap creates an in-goal repair task unless --new-scope is explicit.")
   .option("--pass", "the goal meets its definition of done")
@@ -1229,8 +1341,12 @@ goal
   .option("--kind <kind>", "repair-task evidence contract")
   .requiredOption("--summary <text>", "the verdict, in one or two sentences")
   .option("--who <human>", "human responsible for the verdict; required by governed goals")
+  .option("--delegated-by <human>", "an agent recording a person's verdict: who made it (required under an agent runtime)")
+  .option("--instruction <quote>", "with --delegated-by: the person's instruction, verbatim")
   .option("--note <text...>", "the prioritised changes, risks, follow-ups")
-  .option("--model <model>", "which model produced the verdict")
+  .option("--model <model>", "which model produced the verdict");
+aliasOption(verdict, "--by <human>", "who");
+verdict
   .action(async (goalId: string, opts: {
     pass?: boolean;
     gap?: boolean;
@@ -1240,6 +1356,8 @@ goal
     kind?: "implementation" | "investigation" | "verification" | "decision" | "deployment-data";
     summary: string;
     who?: string;
+    delegatedBy?: string;
+    instruction?: string;
     note?: string[];
     model?: string;
   }) => {
@@ -1249,6 +1367,7 @@ goal
       }
       const r = await runGoalVerdict(goalId, { ...opts, pass: Boolean(opts.pass) });
       console.log(`${goalId}: ${r.pass ? "PASS" : "GAP"} recorded.`);
+      console.log(`decided by ${describeActor(r.actor)}`);
       if (r.verifiedTasks.length > 0) console.log(`verified: ${r.verifiedTasks.join(", ")}`);
       if (r.createdTask) {
         console.log(`repair:   ${r.createdTask} — stays on ${goalId}; run goal-level QA again after it closes`);
@@ -1410,15 +1529,26 @@ task
 
 task
   .command("evidence <taskId>")
-  .description("Link a task's test, manual check, or accepted exception to one acceptance criterion.")
-  .requiredOption("--criterion <n>", "1-based acceptance-criterion number", (v) => parseInt(v, 10))
+  .description("Link a task's measured test, manual check, or accepted exception to acceptance criteria.")
+  .requiredOption("--criterion <which>", "criterion number (1), list (1,3,5) or label (AC-17)")
   .requiredOption("--kind <kind>", "test | manual | exception")
-  .requiredOption("--ref <text>", "test command/run ID, manual evidence URL, or exception reference")
+  .option(
+    "--ref <text>",
+    "test: the measured command or its runId (default: the latest passing one); manual: where the proof is; exception: the decision"
+  )
   .option("--who <human>", "human accepting an exception; required for --kind exception")
-  .action(async (taskId: string, opts: { criterion: number; kind: "test" | "manual" | "exception"; ref: string; who?: string }) => {
+  .action(async (taskId: string, opts: { criterion: string; kind: "test" | "manual" | "exception"; ref?: string; who?: string }) => {
     try {
-      const evidence = await runTaskEvidence({ taskId, ...opts });
-      console.log(`criterion ${opts.criterion} <- ${evidence.kind} evidence from ${taskId}`);
+      const r = await runTaskEvidence({ taskId, ...opts });
+      for (const item of r.attached) {
+        const which = `criterion ${item.index}${item.label ? ` (${item.label})` : ""}`;
+        const measured = item.evidence.measurement
+          ? ` — measured \`${item.evidence.measurement.command}\` exit ${item.evidence.measurement.exitCode ?? "?"} in ${item.evidence.measurement.runId}`
+          : "";
+        console.log(
+          `${which} <- ${item.evidence.kind} evidence from ${r.taskId}${measured}${item.added ? "" : " (already recorded)"}`
+        );
+      }
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

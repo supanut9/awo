@@ -21,6 +21,7 @@ import {
 import { allocateRunId, writeDetail } from "../runs.js";
 import { mutateState, newTaskState } from "../state.js";
 import { atomicWriteFile, withFileLock } from "../file-lock.js";
+import { retireQa } from "../qa-history.js";
 
 
 /**
@@ -829,7 +830,7 @@ export async function runTaskNew(options: {
       await fs.writeFile(goalFile, matter.stringify(parsed.content, fm));
       await mutateState(goal.dir, goal.id, (state) => {
         state.tasks[id] = newTaskState("todo");
-        delete state.qa;
+        retireQa(state, `new task ${id} added to ${goal.id}`);
       });
     } catch (err) {
       await fs.remove(file).catch(() => {});

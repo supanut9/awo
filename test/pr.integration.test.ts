@@ -136,12 +136,14 @@ test("PR control layer links live GitHub state, traces criteria, repairs reviews
     assert.equal(status.code, 0, status.stderr);
     assert.match(status.stdout, /checks=passing\treviews=approved\tmerge=CLEAN/);
 
-    const evidence = awo(workspace, ["task", "evidence", "TEST-T1", "--criterion", "1", "--kind", "test", "--ref", "npm test"], github.env);
+    // The task never ran, so there is no measured test to bind `--kind test` to;
+    // a hand check is what this fixture can honestly claim.
+    const evidence = awo(workspace, ["task", "evidence", "TEST-T1", "--criterion", "1", "--kind", "manual", "--ref", "npm test"], github.env);
     assert.equal(evidence.code, 0, evidence.stderr);
     const trace = awo(workspace, ["goal", "trace", "TEST-G1"], github.env);
     assert.equal(trace.code, 0, trace.stderr);
     assert.match(trace.stdout, /1\tcovered\tGiven a valid request/);
-    assert.match(trace.stdout, /test\tTEST-T1\tnpm test/);
+    assert.match(trace.stdout, /manual\tTEST-T1\tnpm test/);
 
     const reconciled = awo(workspace, ["pr", "reconcile", "TEST-T1"], github.env);
     assert.equal(reconciled.code, 0, reconciled.stderr);

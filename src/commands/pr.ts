@@ -24,6 +24,7 @@ import {
   type TaskStatus,
 } from "../state.js";
 import { redactSecrets } from "../redact.js";
+import { retireQa } from "../qa-history.js";
 import { runTaskNew } from "./plan.js";
 
 const execFileAsync = promisify(execFile);
@@ -388,7 +389,7 @@ function settleMergedTask(
 function moveToDoneOnMerge(state: GoalState, task: TaskDefinition, ts: TaskState, reason: string): void {
   state.tasks[task.id] = ts;
   applyTransition(state, task.id, "done", "qa", { reason, authoredStatus: task.authoredStatus });
-  delete state.qa;
+  retireQa(state, `${task.id} done: ${reason}`);
 }
 
 /** A task and the linked PRs one command acts on. */

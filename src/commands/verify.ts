@@ -7,11 +7,13 @@ import { readManifest } from "../manifest.js";
 import { findGoals, findTasksInGoal, type TaskKind } from "../tasks.js";
 import { mutateState, newTaskState, readState } from "../state.js";
 import { invocationHint, resolveModel, type ResolvedModel } from "../models.js";
-import { readEvents, readIndex, allocateRunId, writeDetail } from "../runs.js";
+import { readEvents, allocateRunId, dayDir, dayRecordFile, writeDetail } from "../runs.js";
 import { runTaskVerify } from "./task.js";
 import { runReqNew, runTaskNew } from "./plan.js";
 import { runLogAdd } from "./log.js";
 import { runGoalReadiness } from "./readiness.js";
+import { retireQa } from "../qa-history.js";
+import { describeActor, resolveHumanGate, type DecisionActor } from "../human-gate.js";
 
 /**
  * §7.1 QA gate, made operable.
@@ -41,7 +43,10 @@ export interface VerifyTaskEntry {
 
 export interface GoalVerifyResult {
   goalId: string;
+  /** `logs/<date>/qa/<runId>.md` — the brief itself, workspace-relative. */
   briefPath: string;
+  /** The day's `runs.md`, whose section for this run links to the brief. */
+  recordPath: string;
   briefRunId: string;
   model: ResolvedModel;
   invocation: string;
@@ -68,7 +73,6 @@ export async function runGoalVerify(
 
   const tasks = await findTasksInGoal(goal.dir);
   const state = await readState(goal.dir, goal.id);
-  const index = await readIndex(root);
 
   const entries: VerifyTaskEntry[] = [];
   for (const task of tasks) {
@@ -144,20 +148,37 @@ export async function runGoalVerify(
   // The gate is judgment work: always the high tier, whatever the tasks used.
   const model = await resolveModel(root, "qa-engineer", "high");
 
-  const brief = buildBrief(goal.id, goalBody, reqBody, entries, index.length);
+  const brief = buildBrief(goal.id, goalBody, reqBody, entries);
 
-  // The brief is recorded like any other work: a section in the day's runs.md,
-  // addressable by runId. Written straight to logs/verify-<goal>.md it was
-  // invisible to `awo log list` and silently overwritten by the next gate on the
-  // same goal, so a goal's earlier gates were simply gone.
+  // The brief is recorded like any other work — a run, addressable by runId and
+  // listed by `awo log list` — but the brief itself is its own file. Written to
+  // logs/verify-<goal>.md it was overwritten by the next gate on the same goal;
+  // embedded in the day's runs.md it put a goal + requirement + every task's diff
+  // stat (tens of KB on shop) into the file every reader of the day has to parse.
   const briefRunId = await allocateRunId(root, goal.id);
-  const briefPath = await writeDetail(
+  const briefFile = path.join(dayDir(root, briefRunId), "qa", `${briefRunId}.md`);
+  const briefPath = path.relative(root, briefFile);
+  await fs.outputFile(briefFile, `${brief}\n`);
+  const recordPath = await writeDetail(
     root,
     briefRunId,
-    { kind: "qa-gate", goal: goal.id, model: `${model.runtime}:${model.model}`, tasks: entries.length },
-    { interpreted: `QA gate for ${goal.id}`, summary: brief }
+    {
+      kind: "qa-gate",
+      goal: goal.id,
+      model: `${model.runtime}:${model.model}`,
+      tasks: entries.length,
+      brief: briefPath,
+    },
+    {
+      interpreted: `QA gate for ${goal.id}`,
+      summary:
+        `QA brief: [${briefPath}](${path.relative(path.dirname(dayRecordFile(root, briefRunId)), briefFile)})\n\n` +
+        `Tasks under review: ${entries.map((t) => `${t.id} (${t.status}${t.untested ? ", untested" : ""})`).join(", ") || "none"}`,
+    }
   );
   await mutateState(goal.dir, goal.id, (draft) => {
+    // A new brief supersedes the old record; a verdict on it is kept, not lost.
+    retireQa(draft, `superseded by QA brief ${briefRunId}`);
     draft.qa = {
       briefRunId,
       briefRecordedAt: new Date().toISOString(),
@@ -172,16 +193,16 @@ export async function runGoalVerify(
 
   return {
     goalId: goal.id,
-    briefPath: path.relative(root, briefPath),
+    briefPath,
+    recordPath: path.relative(root, recordPath),
     briefRunId,
     model,
-    // Read-only, and carrying the brief rather than a task prompt.
+    // Read-only, and carrying the brief rather than a task prompt. The brief has
+    // its own file, so the prompt is that file — reproducible byte for byte.
     invocation: invocationHint(model, goal.id, {
       cwd: ".",
       readOnly: true,
-      // `log show` extracts this run's section, so the prompt stays reproducible
-      // now that the brief shares a file with the rest of the day.
-      prompt: `$(awo log show ${briefRunId})`,
+      prompt: `$(cat ${briefPath})`,
     }),
     tasks: entries,
     unfinished,
@@ -192,8 +213,7 @@ function buildBrief(
   goalId: string,
   goalBody: string,
   reqBody: string,
-  tasks: VerifyTaskEntry[],
-  runCount: number
+  tasks: VerifyTaskEntry[]
 ): string {
   const lines = [
     `You are qa-engineer running the goal-level QA gate for ${goalId}.`,
@@ -235,7 +255,8 @@ function buildBrief(
     "by a prioritised list of what must change. Be blunt — a false pass is worse than a",
     "harsh review. Say explicitly whether the branches compose.",
     "",
-    `(${runCount} runs are recorded in logs/index.jsonl if history helps.)`
+    `(If history helps: each task's runs are listed by \`awo log list --task <taskId>\` and`,
+    `recorded under logs/<date>/ — runs.md holds the written records, runs.jsonl the events.)`
   );
 
   return lines.join("\n");
@@ -247,6 +268,8 @@ export interface GoalVerdictResult {
   verifiedTasks: string[];
   filedRequirement: string | null;
   createdTask: string | null;
+  /** Who is answerable for the verdict, and the delegation if an agent recorded it. */
+  actor: DecisionActor;
 }
 
 /**
@@ -263,6 +286,8 @@ export async function runGoalVerdict(
     note?: string[];
     model?: string;
     who?: string;
+    delegatedBy?: string;
+    instruction?: string;
     newScope?: boolean;
     targets?: string[];
     agent?: string;
@@ -275,9 +300,18 @@ export async function runGoalVerdict(
   if (options.pass && options.newScope) {
     throw new Error("--new-scope only applies to --gap.");
   }
-  if (goal.completionPolicy.qaRequired && !options.who?.trim()) {
-    throw new Error("A governed goal verdict requires --who <human> so the decision is attributable.");
-  }
+  // Both PASS and GAP are judgments a person answers for: a PASS closes the goal,
+  // a GAP reopens it with new work. Measured: 26 of 26 real verdicts were typed by
+  // an agent and recorded as if a human had.
+  const actor = resolveHumanGate({
+    command: `awo goal verdict ${goal.id} ${options.pass ? "--pass" : "--gap"} --summary "…"`,
+    manifest: await readManifest(root),
+    root,
+    options,
+    requireWho: goal.completionPolicy.qaRequired
+      ? "A governed goal verdict requires --who <human> so the decision is attributable."
+      : undefined,
+  });
 
   const tasks = await findTasksInGoal(goal.dir);
   const state = await readState(goal.dir, goal.id);
@@ -309,7 +343,10 @@ export async function runGoalVerdict(
     outcome: options.pass ? "success" : "failed",
     summary: `${options.pass ? "PASS" : "GAP"} — ${options.summary}`,
     note: [
-      ...(options.who?.trim() ? [`Decision recorded by human: ${options.who.trim()}`] : []),
+      actor.delegation
+        ? `Decision delegated by ${actor.by}; recorded by ${actor.via}` +
+          (actor.delegation.instruction ? ` on the instruction: "${actor.delegation.instruction}"` : " (no instruction quoted)")
+        : `Decision recorded by ${describeActor(actor)}`,
       ...(options.note ?? []),
     ],
   });
@@ -356,6 +393,10 @@ export async function runGoalVerdict(
   }
 
   await mutateState(goal.dir, goal.id, (draft) => {
+    // A second verdict on the same brief (PASS, then a GAP found later) replaces
+    // a decision, so the earlier one is retired, not overwritten. A brief-only
+    // record is being completed here, and its brief carries over below.
+    if (draft.qa?.verdict) retireQa(draft, `superseded by the ${options.pass ? "PASS" : "GAP"} verdict ${verdictLog.runId}`);
     draft.qa = {
       briefRunId: state.qa?.briefRunId ?? null,
       briefRecordedAt: state.qa?.briefRecordedAt ?? null,
@@ -363,8 +404,9 @@ export async function runGoalVerdict(
       summary: options.summary,
       verdictRunId: verdictLog.runId,
       verdictRecordedAt: new Date().toISOString(),
-      verdictBy: options.who?.trim() ?? null,
+      verdictBy: actor.by,
       model: options.model ?? state.qa?.model ?? null,
+      delegation: actor.delegation,
     };
   });
 
@@ -374,5 +416,6 @@ export async function runGoalVerdict(
     verifiedTasks: verified,
     filedRequirement: filed,
     createdTask,
+    actor,
   };
 }
