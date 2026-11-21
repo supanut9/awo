@@ -27,10 +27,24 @@ export interface Worktree {
   writablePaths: string[];
   /** The dependency branch this one was cut from, when there was one. */
   basedOn?: string | null;
+  /**
+   * The branch point actually used — the ref the branch was cut from and its sha
+   * at that moment. Recorded on the task so the diff base, the baseline and QA all
+   * agree on what "the task's change" means, even after a rebase.
+   */
+  base?: { ref: string; sha: string | null } | null;
   /** True when git already had a worktree on this branch and we reused it. */
   reused: boolean;
   /** Set when isolation could NOT be established — never advertise a path then. */
   error: string | null;
+}
+
+/** Goal-level inputs to choosing a task worktree's base (see GoalDefinition). */
+export interface WorktreeBaseOptions {
+  /** Goal-branch delivery: tasks integrate into this branch when it exists. */
+  deliveryBranch?: string | null;
+  /** Per-repo base branch for this goal, overriding the manifest's `baseBranch`. */
+  baseBranches?: Record<string, string>;
 }
 
 /**
@@ -54,7 +68,8 @@ export async function ensureTaskWorktrees(
    * each one an isolated branch that lacked its predecessor's commits, so the
    * chain silently broke (§9 item 44).
    */
-  dependsOn: string[] = []
+  dependsOn: string[] = [],
+  _baseOptions: WorktreeBaseOptions = {}
 ): Promise<Worktree[]> {
   const out: Worktree[] = [];
 
