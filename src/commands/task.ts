@@ -13,7 +13,16 @@ import {
   type Measurement,
 } from "../evidence.js";
 import { readManifest, type Manifest } from "../manifest.js";
-import { findAllTasks, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
+import { findGoals, findTasksInGoal, locateTask, type CompletionPolicy, type TaskDefinition } from "../tasks.js";
+import { RunLedger } from "../ui/reader.js";
+import {
+  effectiveGoalStatus,
+  findGoalOrThrow,
+  taskPullRequests,
+  taskWorktrees,
+  type PullRequestSummary,
+  type TaskWorktreeView,
+} from "./show.js";
 import {
   assertTransition,
   mutateState,
@@ -24,8 +33,12 @@ import {
   TASK_STATUSES,
   type Actor,
   type GoalState,
+  type GoalStatus,
   type RunOutcome,
+  type RunOwner,
+  type TaskState,
   type TaskStatus,
+  type TransitionRecord,
 } from "../state.js";
 import { fallbackHint, invocationHint, resolveModel, type ResolvedModel } from "../models.js";
 import { ensureTaskWorktrees, type Worktree } from "../worktrees.js";
@@ -48,6 +61,8 @@ export interface TaskRow {
   lastRunOutcome: RunOutcome | null;
   targets: string[];
   agent: string | null;
+  /** The task's goal is filed under goals/archive/ (listed only with --all or by goal). */
+  goalArchived: boolean;
 }
 
 /** Frontmatter is the authored starting point; state.json wins once it exists (§7.2). */
@@ -148,7 +163,14 @@ async function captureRepositoryEvidence(workspaceRoot: string, runId: string): 
   }
 }
 
-export async function runTaskList(options: { cwd?: string; status?: string } = {}): Promise<TaskRow[]> {
+/**
+ * Tasks of LIVE goals by default. Listing every task ever authored (1,335 rows on
+ * atlas-shop, 1,248 of them in archived goals) buried the handful in flight; a
+ * goal argument, or `--all`, still reaches the archive.
+ */
+export async function runTaskList(
+  options: { cwd?: string; status?: string; goal?: string; all?: boolean } = {}
+): Promise<TaskRow[]> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
 
   if (options.status && !TASK_STATUSES.includes(options.status as TaskStatus)) {
@@ -157,22 +179,95 @@ export async function runTaskList(options: { cwd?: string; status?: string } = {
     );
   }
 
+  const goals = options.goal
+    ? [await findGoalOrThrow(workspaceRoot, options.goal)]
+    : await findGoals(workspaceRoot, { includeArchived: Boolean(options.all) });
+
   const rows: TaskRow[] = [];
-  for (const { task, goal } of await findAllTasks(workspaceRoot)) {
+  for (const goal of goals) {
     const state = await readState(goal.dir, goal.id);
-    const ts = effectiveState(state, task);
-    if (options.status && ts.status !== options.status) continue;
-    rows.push({
-      id: task.id,
-      goalId: task.goalId,
-      name: task.name,
-      status: ts.status,
-      lastRunOutcome: ts.lastRunOutcome,
-      targets: task.targets,
-      agent: task.agent,
-    });
+    for (const task of await findTasksInGoal(goal.dir)) {
+      const ts = effectiveState(state, task);
+      if (options.status && ts.status !== options.status) continue;
+      rows.push({
+        id: task.id,
+        goalId: task.goalId,
+        name: task.name,
+        status: ts.status,
+        lastRunOutcome: ts.lastRunOutcome,
+        targets: task.targets,
+        agent: task.agent,
+        goalArchived: goal.archived,
+      });
+    }
   }
   return rows;
+}
+
+/** The newest measured (`--run`) test of a task in one repo. */
+export interface TaskMeasurement {
+  repo: string | null;
+  runId: string;
+  at: string;
+  command: string | null;
+  exitCode: number | null;
+  diagnosis: string | null;
+  needsHuman: boolean;
+  passed?: number;
+  failed?: number;
+}
+
+/**
+ * Latest measured test per target, newest run first. The answer to "is this task
+ * green?" lived only in the event stream, so agents tailed logs and parsed them —
+ * and got the wrong run.
+ */
+async function latestMeasurements(
+  workspaceRoot: string,
+  task: TaskDefinition,
+  lastRunId: string | null,
+  attempts: number
+): Promise<TaskMeasurement[]> {
+  const ledger = new RunLedger(workspaceRoot);
+  const found = new Map<string, TaskMeasurement>();
+  const complete = () =>
+    task.targets.length > 0 ? task.targets.every((repo) => found.has(repo)) : found.size > 0;
+
+  const visit = async (runId: string) => {
+    const inRun = new Map<string, TaskMeasurement>();
+    for (const e of await ledger.events(runId)) {
+      if (e.kind !== "test" || e.verified !== true) continue;
+      const repo = typeof e.repo === "string" ? e.repo : null;
+      inRun.set(repo ?? "", {
+        repo,
+        runId,
+        at: e.t,
+        command: typeof e.command === "string" ? e.command : null,
+        exitCode: typeof e.exitCode === "number" ? e.exitCode : null,
+        diagnosis: typeof e.diagnosis === "string" ? e.diagnosis : null,
+        needsHuman: e.needsHuman === true,
+        ...(typeof e.passed === "number" ? { passed: e.passed } : {}),
+        ...(typeof e.failed === "number" ? { failed: e.failed } : {}),
+      });
+    }
+    for (const [key, m] of inRun) if (!found.has(key)) found.set(key, m);
+  };
+
+  if (!lastRunId) return [];
+  await visit(lastRunId);
+  // Earlier attempts only when the latest left a target unmeasured, and only as
+  // many as the task has had — never a walk through the whole history.
+  if (!complete() && attempts > 1) {
+    const earlier = (await ledger.index())
+      .filter((r) => r.taskId === task.id && r.runId !== lastRunId)
+      .sort((a, b) => b.runId.localeCompare(a.runId))
+      .slice(0, attempts - 1);
+    for (const run of earlier) {
+      await visit(run.runId);
+      if (complete()) break;
+    }
+  }
+  return [...found.values()].sort((a, b) => String(a.repo).localeCompare(String(b.repo)));
 }
 
 export interface TaskShowResult {
@@ -183,6 +278,27 @@ export interface TaskShowResult {
   attempts: number;
   blockedReason: string | null;
   goalStatus: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  goal: {
+    id: string;
+    title: string;
+    status: GoalStatus;
+    archived: boolean;
+    policy: CompletionPolicy;
+    deliveryBranch: string | null;
+    pullRequestStrategy: "task" | "goal-branch";
+  };
+  /** Where state says the worker was put (`state.worktree`). */
+  worktree: string | null;
+  /** Each target's conventional worktree, whether it is on disk, and its branch. */
+  worktrees: TaskWorktreeView[];
+  /** The branch point each target's worktree was cut from, as recorded at run start. */
+  base: TaskState["base"] | null;
+  pullRequests: PullRequestSummary[];
+  owner: RunOwner | null;
+  lastTransition: TransitionRecord | null;
+  measurements: TaskMeasurement[];
 }
 
 export async function runTaskShow(
@@ -192,7 +308,8 @@ export async function runTaskShow(
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { task, goal } = await locateTask(workspaceRoot, taskId);
   const tasks = await findTasksInGoal(goal.dir);
-  const state = reconcileGoalState(await readState(goal.dir, goal.id), tasks).state;
+  const raw = await readState(goal.dir, goal.id);
+  const state = reconcileGoalState(raw, tasks).state;
   const ts = effectiveState(state, task);
   return {
     task,
@@ -202,6 +319,24 @@ export async function runTaskShow(
     attempts: ts.attempts,
     blockedReason: ts.blockedReason,
     goalStatus: state.goalStatus,
+    startedAt: ts.startedAt,
+    finishedAt: ts.finishedAt,
+    goal: {
+      id: goal.id,
+      title: goal.title,
+      status: await effectiveGoalStatus(workspaceRoot, goal, raw, tasks),
+      archived: goal.archived,
+      policy: goal.completionPolicy,
+      deliveryBranch: goal.deliveryBranch,
+      pullRequestStrategy: goal.pullRequestStrategy,
+    },
+    worktree: ts.worktree,
+    worktrees: await taskWorktrees(workspaceRoot, task, { readBranch: true }),
+    base: ts.base ?? null,
+    pullRequests: taskPullRequests(ts),
+    owner: ts.owner ?? null,
+    lastTransition: ts.transitions?.at(-1) ?? null,
+    measurements: await latestMeasurements(workspaceRoot, task, ts.lastRunId, ts.attempts),
   };
 }
 

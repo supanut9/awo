@@ -52,7 +52,7 @@ test("missing QA is consistent across readiness, list, context, UI and archival"
   assert.equal((await runGoalReadiness("TST-G1", { cwd: root })).status, "qa-review");
   assert.equal((await runGoalList({ cwd: root }))[0].status, "qa-review");
   assert.equal((await new FileReader(root).goals())[0].status, "qa-review");
-  assert.equal((await runContext({ cwd: root })).snapshot.goals[0].status, "qa-review");
+  assert.equal((await runContext({ cwd: root })).goals[0].status, "qa-review");
   assert.deepEqual(await findArchivableGoals(root), []);
   await assert.rejects(runGoalArchive("TST-G1", { cwd: root }), /QA|qa-review|readiness/);
   assert.ok(await fs.stat(goal));

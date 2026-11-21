@@ -142,6 +142,8 @@ export interface GoalListRow {
    */
   cancelled: number;
   blocked: number;
+  /** Shown on its own: a goal "0/6 done" that is really 6/6 awaiting review reads as idle. */
+  inReview?: number;
   total: number;
   archived: boolean;
 }
@@ -152,6 +154,7 @@ export function formatGoalProgress(row: GoalListRow): string {
   return (
     `${row.done}/${row.total} done` +
     (row.cancelled ? `, ${row.cancelled} cancelled, ${closed}/${row.total} closed` : "") +
+    (row.inReview ? `, ${row.inReview} in review` : "") +
     (row.blocked ? `, ${row.blocked} blocked` : "")
   );
 }
@@ -178,6 +181,7 @@ export async function runGoalList(
       done: statuses.filter((s) => s === "done").length,
       cancelled: statuses.filter((s) => s === "cancelled").length,
       blocked: statuses.filter((s) => s === "blocked").length,
+      inReview: statuses.filter((s) => s === "in-review").length,
       total: goal.taskIds.length,
       archived: goal.archived,
     });

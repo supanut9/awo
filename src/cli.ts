@@ -32,7 +32,9 @@ import {
   runTaskStatus,
   runTaskVerify,
 } from "./commands/task.js";
-import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
+import { formatEvents, runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
+import { findGoalsNeedingVerdict, formatGoalShow, formatPr, runGoalShow } from "./commands/show.js";
+import { aliasOption, aliasOptions } from "./cli-alias.js";
 import { runUi } from "./commands/ui.js";
 import { runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
 import {
@@ -97,7 +99,13 @@ const program = new Command();
 program
   .name("awo")
   .description("Scaffolds and orchestrates AI-agent development workspaces.")
-  .version(version, "-v, --version", "print the installed awo version");
+  .version(version, "-v, --version", "print the installed awo version")
+  // Set before any .command(): commander copies these into each subcommand when it
+  // is created. Extra positionals used to be dropped silently — `awo log tail T12`
+  // printed some other run, and `awo task complete T3 success` ignored "success" —
+  // so a guessed argument now fails loudly with the usage instead.
+  .allowExcessArguments(false)
+  .showSuggestionAfterError(true);
 
 program
   .command("version")
@@ -277,11 +285,12 @@ program
   .description(
     "Print a compact orientation digest — where the project stands and what to do next. Run this first in a new session instead of scanning the tree (§13)."
   )
-  .option("--json", "machine-readable output")
-  .action(async (opts: { json?: boolean }) => {
+  .option("--json", "machine-readable output: the same digest (live goals, capped recent runs)")
+  .option("--full", "include the whole dashboard snapshot (every goal, requirement and run) — slow on big workspaces")
+  .action(async (opts: { json?: boolean; full?: boolean }) => {
     try {
-      const c = await runContext();
-      console.log(opts.json ? JSON.stringify(c, null, 2) : formatContext(c));
+      const c = await runContext({ full: opts.full });
+      console.log(opts.json || opts.full ? JSON.stringify(c, null, 2) : formatContext(c));
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1119,16 +1128,28 @@ goal
   .description("List goals with rolled-up task status — live by default, so the list is what is in flight.")
   .option("--archived", "list archived goals instead")
   .option("--all", "list both")
-  .action(async (opts: { archived?: boolean; all?: boolean }) => {
+  .option("--needs-verdict", "only governed goals whose tasks are all in review or done, with no passing verdict")
+  .option("--json", "machine-readable output")
+  .action(async (opts: { archived?: boolean; all?: boolean; needsVerdict?: boolean; json?: boolean }) => {
     try {
       // Reads goals directly rather than grouping task rows: a goal that has no
       // tasks yet is still a goal, and grouping by task made it invisible.
-      const rows = await runGoalList({ archived: opts.archived, all: opts.all });
+      let rows = await runGoalList({ archived: opts.archived, all: opts.all });
+      if (opts.needsVerdict) {
+        const waiting = await findGoalsNeedingVerdict(findWorkspaceRoot(process.cwd()));
+        rows = rows.filter((r) => waiting.has(r.id));
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(rows, null, 2));
+        return;
+      }
       if (rows.length === 0) {
         console.log(
-          opts.archived
-            ? "No archived goals."
-            : "No live goals. Start with `awo req new --title \"…\"`."
+          opts.needsVerdict
+            ? "No goals are waiting on a verdict."
+            : opts.archived
+              ? "No archived goals."
+              : "No live goals. Start with `awo req new --title \"…\"`."
         );
         return;
       }
@@ -1136,6 +1157,20 @@ goal
         const where = r.archived ? "\t[archived]" : "";
         console.log(`${r.id}\t${r.status}\t${formatGoalProgress(r)}${where}\t${r.title}`);
       }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("show <goalId>")
+  .description("One goal: status, policy, criteria coverage, tasks with PRs, worktrees — what a verdict needs.")
+  .option("--json", "machine-readable output")
+  .action(async (goalId: string, opts: { json?: boolean }) => {
+    try {
+      const g = await runGoalShow(goalId);
+      console.log(opts.json ? JSON.stringify(g, null, 2) : formatGoalShow(g));
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1175,23 +1210,35 @@ task
   });
 
 task
-  .command("list")
-  .description("List tasks with their lifecycle status.")
+  .command("list [goalId]")
+  .description("List tasks with their lifecycle status — live goals only unless a goal or --all is given.")
+  .option("--goal <goalId>", "only this goal's tasks (archived goals included)")
   .option("--status <status>", "only tasks in this lifecycle state (e.g. blocked)")
-  .action(async (opts: { status?: string }) => {
+  .option("--all", "include tasks of archived goals")
+  .option("--json", "machine-readable output")
+  .action(async (goalArg: string | undefined, opts: { goal?: string; status?: string; all?: boolean; json?: boolean }) => {
     try {
-      const rows = await runTaskList({ status: opts.status });
+      const rows = await runTaskList({ goal: goalArg ?? opts.goal, status: opts.status, all: opts.all });
+      if (opts.json) {
+        console.log(JSON.stringify(rows, null, 2));
+        return;
+      }
       if (rows.length === 0) {
         console.log(
           opts.status
             ? `No tasks with status "${opts.status}".`
-            : "No tasks yet. Author one under goals/<goal>/tasks/."
+            : goalArg ?? opts.goal
+              ? `${goalArg ?? opts.goal} has no tasks yet — \`awo goal plan ${goalArg ?? opts.goal}\` or \`awo task new --goal ${goalArg ?? opts.goal}\`.`
+              : opts.all
+                ? "No tasks yet. Author one under goals/<goal>/tasks/."
+                : "No tasks in live goals. `awo task list --all` includes archived goals."
         );
         return;
       }
       for (const r of rows) {
         const outcome = r.lastRunOutcome ? ` (last run: ${r.lastRunOutcome})` : "";
-        console.log(`${r.id}\t${r.status}${outcome}\t${r.name}`);
+        const goalCol = `${r.goalId}${r.goalArchived ? " [archived]" : ""}`;
+        console.log(`${r.id}\t${r.status}${outcome}\t${goalCol}\t${r.name}`);
       }
     } catch (err) {
       console.error((err as Error).message);
@@ -1201,17 +1248,54 @@ task
 
 task
   .command("show <taskId>")
-  .description("Print a task definition plus its current state and last run.")
-  .action(async (taskId: string) => {
+  .description("Print a task definition plus its state: goal policy, worktrees, base, PRs, owner, last measured tests.")
+  .option("--json", "machine-readable output")
+  .action(async (taskId: string, opts: { json?: boolean }) => {
     try {
       const r = await runTaskShow(taskId);
+      if (opts.json) {
+        console.log(JSON.stringify(r, null, 2));
+        return;
+      }
+      const policy = [
+        r.goal.policy.qaRequired ? "QA verdict" : null,
+        r.goal.policy.acceptanceEvidenceRequired ? "acceptance evidence" : null,
+      ].filter(Boolean);
       console.log(`${r.task.id} — ${r.task.name}`);
       console.log(`status:   ${r.status}${r.blockedReason ? ` (${r.blockedReason})` : ""}`);
-      console.log(`goal:     ${r.task.goalId} (${r.goalStatus})`);
+      console.log(
+        `goal:     ${r.task.goalId} (${r.goal.status})${r.goal.archived ? " [archived]" : ""} · policy: ${policy.length ? `${policy.join(" + ")} required` : "task verification only"}`
+      );
+      console.log(`kind:     ${r.task.kind}${r.task.dependsOn.length ? ` · depends on ${r.task.dependsOn.join(", ")}` : ""}`);
       console.log(`targets:  ${r.task.targets.join(", ") || "none"}`);
       console.log(`agent:    ${r.task.agent ?? "unassigned"}`);
       console.log(`attempts: ${r.attempts}`);
       console.log(`last run: ${r.lastRunId ?? "none"}${r.lastRunOutcome ? ` — ${r.lastRunOutcome}` : ""}`);
+      const onDisk = r.worktrees.filter((w) => w.exists);
+      if (onDisk.length > 0) {
+        for (const w of onDisk) console.log(`worktree: ${w.path}${w.branch ? ` on ${w.branch}` : ""}`);
+      } else if (r.worktree) {
+        console.log(`worktree: ${r.worktree} (recorded; not on disk)`);
+      }
+      for (const [repo, base] of Object.entries(r.base ?? {})) {
+        console.log(`base:     ${repo} ${base.ref}${base.sha ? `@${base.sha.slice(0, 10)}` : ""}`);
+      }
+      if (r.pullRequests.length > 0) console.log(`PRs:      ${r.pullRequests.map(formatPr).join(", ")}`);
+      if (r.owner) {
+        console.log(
+          `owner:    ${r.owner.actor} (pid ${r.owner.pid ?? "?"} on ${r.owner.host}) since ${r.owner.startedAt} · last seen ${r.owner.heartbeatAt}`
+        );
+      }
+      if (r.lastTransition) {
+        const t = r.lastTransition;
+        console.log(`moved:    ${t.from} → ${t.to} by ${t.by} at ${t.at}${t.reason ? ` — ${t.reason}` : ""}`);
+      }
+      for (const m of r.measurements) {
+        const counts = m.passed !== undefined || m.failed !== undefined ? ` ${m.passed ?? 0} passed/${m.failed ?? 0} failed` : "";
+        console.log(
+          `tested:   ${m.repo ?? "(no repo)"} exit ${m.exitCode ?? "?"}${counts} · ${m.diagnosis ?? "no diagnosis"}${m.needsHuman ? " (needs a human)" : ""} · ${m.runId}`
+        );
+      }
       if (r.task.body) console.log(`\n${r.task.body}`);
     } catch (err) {
       console.error((err as Error).message);
@@ -1586,15 +1670,23 @@ const log = program.command("log").description("Run history and audit trail (§7
 log
   .command("list")
   .description("List runs from the index, most recent first.")
-  .option("--task <taskId>", "only runs for this task")
+  .option("--task <taskId>", "only runs for this task (and log entries linked to it)")
+  .option("--goal <goalId>", "only runs for this goal's tasks (and log entries linked to it)")
   .option("--agent <agent>", "only runs by this agent")
   .option("--repo <repo>", "only runs that touched this repo")
   .option("--status <status>", "only runs with this outcome")
   .option("--tier <tier>", "only runs resolved to this tier (high|standard|low)")
   .option("--effort <effort>", "only runs at this reasoning effort")
-  .action(async (opts: { task?: string; agent?: string; repo?: string; status?: string; tier?: string; effort?: string }) => {
+  .option("--limit <n>", "only the newest n runs", (v) => Number(v))
+  .option("--json", "machine-readable output")
+  .action(async (opts: { task?: string; goal?: string; agent?: string; repo?: string; status?: string; tier?: string; effort?: string; limit?: number; json?: boolean }) => {
     try {
-      const runs = await runLogList(opts);
+      const { json, ...filter } = opts;
+      const runs = await runLogList(filter);
+      if (json) {
+        console.log(JSON.stringify(runs, null, 2));
+        return;
+      }
       if (runs.length === 0) {
         console.log("No runs match.");
         return;
@@ -1614,44 +1706,58 @@ log
     }
   });
 
-log
-  .command("add")
+const logAdd = log
+  .command("add [summary]")
   .description(
     "Record work that isn't a task run — intake, planning, an audit pass (§7.3 allows taskId: null)."
   )
-  .requiredOption("--agent <agent>", "who did the work (agent name or model)")
-  .requiredOption("--summary <text>", "what was done")
+  .option("-m, --summary <text>", "what was done (or pass it as the first argument)")
+  .option("--agent <agent>", "who did the work — a role from agents/ (default: $AWO_AGENT, else the detected runtime)")
   .option("--label <label>", "short slug for the runId (default: adhoc)")
   .option("--prompt <text>", "the request, verbatim")
   .option("--interpreted <text>", "how it was understood")
-  .option("--note <text...>", "follow-ups, risks, open questions")
+  .option("--note <text...>", "follow-ups, risks, open questions (the first doubles as the summary if none is given)")
   .option("--repo <name...>", "repos touched, if any")
   .option("--model <model...>", "model(s) used")
   .option("--outcome <outcome>", "success | failed | skipped (default: success)")
+  .option("--task <taskId>", "the task this work was about (linked; it does not become a task run)")
+  .option("--goal <goalId>", "the goal this work was about")
   .option("--started <iso>", "when it began, if not now")
   .option("--duration <sec>", "seconds it took", (v) => parseInt(v, 10))
-  .action(async (opts: Record<string, unknown>) => {
+  .action(async (summaryArg: string | undefined, opts: Record<string, unknown>) => {
     try {
       const r = await runLogAdd({
-        ...(opts as { agent: string; summary: string }),
+        ...(opts as { agent?: string; summary?: string }),
+        summary: (opts.summary as string | undefined) ?? summaryArg,
         startedAt: opts.started as string | undefined,
         durationSec: opts.duration as number | undefined,
       });
-      console.log(`recorded ${r.runId}`);
+      for (const w of r.warnings) console.error(`warning: ${w}`);
+      console.log(`recorded ${r.runId} (agent: ${r.agent})`);
       console.log(`log: ${r.detail}`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
     }
   });
+// The spellings agents reached for in the mined invocations; required options
+// would reject these before the alias hook runs, hence the action-side checks.
+aliasOptions(logAdd, "label", "--title <text>", "--slug <text>");
+aliasOption(logAdd, "--status <outcome>", "outcome");
+aliasOption(logAdd, "--message <text>", "summary");
 
 log
-  .command("show <runId>")
-  .description("Print the detailed record for one run.")
-  .action(async (runId: string) => {
+  .command("show <runOrTaskId>")
+  .description("Print the record of one run — or of a task's latest run; an open run shows its events so far.")
+  .action(async (ref: string) => {
     try {
-      const { detail } = await runLogShow(runId);
-      console.log(detail);
+      const r = await runLogShow(ref);
+      if (!r.open) {
+        console.log(r.detail);
+        return;
+      }
+      console.log(`# ${r.runId} (open — no record until \`awo task complete\`; events so far)`);
+      for (const line of formatEvents(r.events, { runId: r.runId, fullBrief: true })) console.log(line);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1659,20 +1765,15 @@ log
   });
 
 log
-  .command("tail")
-  .description("Print the event stream of the most recent run.")
+  .command("tail [runOrTaskId]")
+  .description("Print the event stream of the newest run (open runs included), a task's latest run, or a named run.")
   .option("--run <runId>", "a specific run instead of the latest")
-  .action(async (opts: { run?: string }) => {
+  .option("--task <taskId>", "the latest run of this task")
+  .action(async (ref: string | undefined, opts: { run?: string; task?: string }) => {
     try {
-      const { runId, events } = await runLogTail({ runId: opts.run });
-      console.log(`# ${runId}`);
-      for (const e of events) {
-        const rest = Object.entries(e)
-          .filter(([k]) => k !== "t" && k !== "kind")
-          .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`)
-          .join(" ");
-        console.log(`${e.t}  ${e.kind}${rest ? `  ${rest}` : ""}`);
-      }
+      const { runId, events, open } = await runLogTail({ runId: opts.run ?? ref, task: opts.task });
+      console.log(`# ${runId}${open ? " (open)" : ""}`);
+      for (const line of formatEvents(events, { runId })) console.log(line);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1804,5 +1905,12 @@ for (const kind of ["agent", "skill"] as CatalogKind[]) {
       });
   }
 }
+
+// Command aliases for the verbs agents reach for first ("start" a task, "approve"
+// one, spell out "requirement"). Attached here rather than in each command's block
+// so the canonical definitions stay the single place a command is described.
+task.commands.find((c) => c.name() === "run")?.alias("start");
+task.commands.find((c) => c.name() === "verify")?.alias("approve");
+req.alias("requirement");
 
 program.parseAsync(process.argv);
