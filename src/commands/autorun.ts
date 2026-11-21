@@ -1,7 +1,16 @@
+import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
 import { findGoals, findAllTasks, type TaskDefinition } from "../tasks.js";
-import { newTaskState, readState, type GoalState, type TaskStatus } from "../state.js";
+import { newTaskState, readState, type GoalState, type TaskState } from "../state.js";
 import { readEvents } from "../runs.js";
+import {
+  assertGoalWritable,
+  blockedByDependency,
+  describeUnmet,
+  unmetDependencies,
+  unmetDependencyHints,
+  unwrittenTemplateLines,
+} from "../lifecycle.js";
 import { runDispatch } from "./dispatch.js";
 
 /**
@@ -45,7 +54,14 @@ export interface AutoRunResult {
   dryRun: boolean;
 }
 
-const RUNNABLE: TaskStatus[] = ["todo", "blocked"];
+/**
+ * What this command may start: fresh work, and work that was only ever waiting on
+ * its dependencies. A task blocked by a failure or parked by a human needs a
+ * decision first — re-dispatching it would repeat the failure or override the human.
+ */
+function runnable(ts: TaskState): boolean {
+  return ts.status === "todo" || ts.status === "queued" || blockedByDependency(ts);
+}
 
 /** Frontmatter is the authored starting point; state.json wins once it exists (§7.2). */
 function effectiveState(state: GoalState, task: TaskDefinition) {
@@ -73,6 +89,7 @@ export async function runAuto(options: {
         : `Unknown goal "${options.goal}". No goals exist yet.`
     );
   }
+  assertGoalWritable(goal);
 
   const all = await findAllTasks(root);
   const order = topological(all.filter((l) => l.goal.id === goal.id).map((l) => l.task));
@@ -118,18 +135,31 @@ export async function runAuto(options: {
     if (state.status === "done" || state.status === "in-review" || state.status === "cancelled") {
       continue;
     }
-    if (!RUNNABLE.includes(state.status)) {
+    if (!runnable(state)) {
       result.stoppedBecause = "nothing-ready";
-      result.message = `${task.id} is ${state.status}, which this command will not touch. Deal with it, then re-run.`;
+      result.message = notRunnableMessage(task, state);
       return result;
     }
 
-    const unmet = await unmetDependencies(root, task, goal.dir, goal.id);
+    // The same policy `task run` applies, so this never dispatches a task that
+    // `task run` would refuse — and never stops on one it would start.
+    const unmet = await unmetDependencies(root, task, all);
     if (unmet.length > 0) {
       result.stoppedBecause = "blocked-dependency";
       result.message =
-        `${task.id} depends on ${unmet.join(", ")}, which ${unmet.length === 1 ? "is" : "are"} not done.\n` +
-        `  In-review dependencies need your verdict first — that is the gate doing its job.`;
+        `${task.id} has unmet dependencies: ${describeUnmet(unmet)}. A dependency counts once it is in-review or done.\n` +
+        unmetDependencyHints(unmet).map((hint) => `  ${hint}`).join("\n");
+      return result;
+    }
+
+    // `task run` refuses an unwritten body without an instruction, and a dispatched
+    // worker gets none — stop here rather than fail inside the dispatch.
+    const unwritten = unwrittenTemplateLines(task.body);
+    if (unwritten.length > 0) {
+      result.stoppedBecause = "nothing-ready";
+      result.message =
+        `${task.id}'s body is ${unwritten[0] === "" ? "empty" : "still the `awo task new` template"}, so a worker would be briefed with its title alone.\n` +
+        `  Write it (edit ${path.relative(root, task.file)}), then re-run.`;
       return result;
     }
 
@@ -205,21 +235,21 @@ function topological(tasks: TaskDefinition[]): TaskDefinition[] {
   return out;
 }
 
-async function unmetDependencies(
-  root: string,
-  task: TaskDefinition,
-  goalDir: string,
-  goalId: string
-): Promise<string[]> {
-  const state = await readState(goalDir, goalId);
-  const all = await findAllTasks(root);
-  const unmet: string[] = [];
-  for (const dep of task.dependsOn ?? []) {
-    const def = all.find((l) => l.task.id === dep)?.task;
-    if (!def) continue;
-    if (effectiveState(state, def).status !== "done") unmet.push(dep);
+function notRunnableMessage(task: TaskDefinition, state: TaskState): string {
+  switch (state.status) {
+    case "running":
+      return (
+        `${task.id} already has an open run (${state.lastRunId}), which this command will not touch.\n` +
+        `  Continue it with \`awo task resume ${task.id}\`, or close it, then re-run.`
+      );
+    case "blocked":
+      return (
+        `${task.id} is blocked${state.blockedReason ? ` (${state.blockedReason})` : ""}, which needs a decision first.\n` +
+        `  Retry it yourself with \`awo task run ${task.id}\`, or cancel it, then re-run.`
+      );
+    default:
+      return `${task.id} is ${state.status}, which this command will not touch. Deal with it, then re-run.`;
   }
-  return unmet;
 }
 
 function describePlan(
@@ -234,7 +264,7 @@ function describePlan(
     options.until ? `  - ${options.until} completes (--until)` : "  - every task is done or in review",
     options.yolo ? "  - never on failure (--yolo)" : "  - a task fails",
     "  - evidence needs a human — always, --yolo included",
-    "  - a dependency is in review and needs your verdict",
+    "  - a dependency is not yet in review or done (failed, parked, or in another goal)",
     "",
     "Never: the QA verdict. `awo goal verify` stays yours.",
   ];
