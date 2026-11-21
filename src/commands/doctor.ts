@@ -26,6 +26,7 @@ import {
 import { readEvents, type RunEvent } from "../runs.js";
 import { listWorktrees, unsafeReason } from "../worktrees.js";
 import { redactSecrets } from "../redact.js";
+import { unwrittenTemplateLines } from "../lifecycle.js";
 import { runAgentOrg } from "./agent-org.js";
 import { readAgentSkills, findInstalled } from "../agent-skills.js";
 
@@ -91,12 +92,6 @@ export function groupFindings(findings: Finding[]): FindingGroup[] {
   return groups;
 }
 
-/**
- * The placeholders `awo task new` writes into a fresh task body (plan.ts). A task
- * still carrying them was never written: 22% of SHOP's first briefs were this
- * template, dispatched to a worker as if it were an instruction.
- */
-export const TASK_TEMPLATE_PLACEHOLDERS = ['_What "done" means for this unit._', "1. _…_", "- _…_"];
 
 /** Pre-0.0.2 status names that `readTaskFile` still translates on read. */
 const LEGACY_TASK_STATUSES = ["pending", "success", "failed", "skipped"];
@@ -612,7 +607,9 @@ export async function runDoctor(
     if (
       !goal.archived &&
       (ts.status === "todo" || ts.status === "queued" || ts.status === "blocked" || ts.status === "running") &&
-      TASK_TEMPLATE_PLACEHOLDERS.some((placeholder) => task.body.includes(placeholder))
+      // One definition of "unwritten" for the gate (`task run`) and the report.
+      // 22% of SHOP's first briefs were the bare template handed to a worker.
+      unwrittenTemplateLines(task.body).length > 0
     ) {
       add({
         severity: "warn",

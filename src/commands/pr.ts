@@ -11,7 +11,7 @@ import {
   type TaskDefinition,
 } from "../tasks.js";
 import {
-  assertTransition,
+  applyTransition,
   mutateState,
   newTaskState,
   readState,
@@ -23,7 +23,6 @@ import {
   type TaskState,
   type TaskStatus,
 } from "../state.js";
-import { actorLabel } from "../agent-env.js";
 import { redactSecrets } from "../redact.js";
 import { runTaskNew } from "./plan.js";
 
@@ -382,17 +381,13 @@ function settleMergedTask(
 }
 
 /**
- * The one lifecycle write this module makes. Integration seam: Lane B1's
- * `applyTransition` replaces this body (same actor, same reason).
+ * The one lifecycle write this module makes: a merged PR is an external fact, so
+ * it moves the task as `qa` — through the same audited transition every other
+ * lifecycle move uses, so the board's history says why it became done.
  */
 function moveToDoneOnMerge(state: GoalState, task: TaskDefinition, ts: TaskState, reason: string): void {
-  assertTransition(task.id, ts.status, "done", "qa");
-  ts.transitions = [
-    ...(ts.transitions ?? []),
-    { from: ts.status, to: "done", actor: "qa", by: actorLabel(), reason, runId: null, at: new Date().toISOString() },
-  ];
-  ts.status = "done";
-  ts.blockedReason = null;
+  state.tasks[task.id] = ts;
+  applyTransition(state, task.id, "done", "qa", { reason, authoredStatus: task.authoredStatus });
   delete state.qa;
 }
 
@@ -912,6 +907,7 @@ async function createRepairTask(
     name: `Resolve PR #${pr.number} review feedback`,
     targets: [pr.repo],
     agent: "software-engineer",
+    origin: "pr-feedback",
     body:
       `\n## Objective\nResolve ${threads.length} unresolved GitHub review thread(s) on PR #${pr.number} ` +
       `(${pr.repo}, branch \`${pr.branch}\`).\n\n## Review threads\n${checklist}\n\n` +
