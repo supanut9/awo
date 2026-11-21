@@ -462,7 +462,8 @@ test("state.json rev increments on every write and never leaves a .tmp behind", 
 test("log list, show and tail read back what a run wrote", () => {
   const ws = makeWorkspace();
   awo(ws, ["task", "run", "TEST-T1"]);
-  awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":10,"fail":0}']);
+  // A test event is always measured now; the extra fields still ride along.
+  awo(ws, ["task", "event", "TEST-T1", "test", "--run", "true", "--data", '{"repo":"api","pass":10,"fail":0}']);
   // reposChanged is derived from repo.diff only — a test event doesn't mean the
   // repo was modified — so emit one to exercise the --repo filter.
   awo(ws, ["task", "event", "TEST-T1", "repo.diff", "--data", '{"repo":"api","files":1}']);
@@ -670,7 +671,7 @@ test("reposChanged is derived from any repo-bearing event, and falls back to tar
   awo(ws, ["task", "run", "TEST-T1", "--no-worktree"]);
   // A worker that reports a test and a commit but never a repo.diff — exactly
   // what the dogfood produced, which used to yield reposChanged: [].
-  awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":10}']);
+  awo(ws, ["task", "event", "TEST-T1", "test", "--run", "true", "--data", '{"repo":"api","pass":10}']);
   awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success", "--untested", "fixture", "--summary", "done"]);
   let index = dayRows(ws).at(-1) as Record<string, unknown>;
   assert.deepEqual(index.reposChanged, ["api"], "a test event naming a repo counts");
@@ -912,11 +913,13 @@ test("a task cannot close as success without test evidence", () => {
   assert.match(awo(ws, ["task", "show", "TEST-T1"]).stdout, /status: {3}running/, "still open");
 
   // Typing a test event is no longer enough: it is a claim, and a claim cannot be
-  // checked. Nothing about the workspace changes until something is measured.
-  awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":12,"fail":0}']);
+  // checked. awo refuses to record one, and nothing changes until something is measured.
+  const claim = awo(ws, ["task", "event", "TEST-T1", "test", "--data", '{"repo":"api","pass":12,"fail":0}']);
+  assert.equal(claim.code, 1);
+  assert.match(claim.stderr, /a measurement awo runs, not a claim/);
   const claimed = awo(ws, ["task", "complete", "TEST-T1", "--outcome", "success"]);
   assert.equal(claimed.code, 1);
-  assert.match(claimed.stderr, /awo did not run/);
+  assert.match(claimed.stderr, /no test evidence/);
 
   // Having awo run it does satisfy the gate.
   awo(ws, ["task", "event", "TEST-T1", "test", "--run", "true"]);
@@ -1047,11 +1050,8 @@ test("a failure is attributed against the branch point, not guessed", () => {
   fs.writeFileSync(path.join(worktree, "src", "pricing.ts"), "export const rate = 0.1; // BREAK\n");
   execSync("git commit -aqm break", { cwd: worktree, stdio: "ignore" });
 
-  execFileSync(
-    process.execPath,
-    [CLI, "task", "event", "EV-T1", "test", "--run", "./t.sh", "--baseline"],
-    { cwd: ws }
-  );
+  // A measured failure exits 3 (0.8.0), so a script sees it without parsing text.
+  assert.equal(awo(ws, ["task", "event", "EV-T1", "test", "--run", "./t.sh", "--baseline"]).code, 3);
   const e = lastTestEvent(ws);
   assert.equal(e.exitCode, 1);
   assert.equal(e.baselineExitCode, 0, "the baseline actually ran");
@@ -1066,11 +1066,7 @@ test("a suite already failing at the branch point is not blamed on the task", ()
   fs.writeFileSync(path.join(worktree, "src", "pricing.ts"), "export const rate = 0.2; // BREAK\n");
   execSync("git commit -aqm unrelated-change", { cwd: worktree, stdio: "ignore" });
 
-  execFileSync(
-    process.execPath,
-    [CLI, "task", "event", "EV-T1", "test", "--run", "./t.sh", "--baseline"],
-    { cwd: ws }
-  );
+  assert.equal(awo(ws, ["task", "event", "EV-T1", "test", "--run", "./t.sh", "--baseline"]).code, 3);
   assert.equal(lastTestEvent(ws).diagnosis, "pre-existing");
   fs.rmSync(path.dirname(ws), { recursive: true, force: true });
 });
@@ -1085,22 +1081,34 @@ test("a test edited alongside the code it covers is inconclusive, even passing",
   const e = lastTestEvent(ws);
   assert.equal(e.exitCode, 0, "it passes");
   assert.equal(e.diagnosis, "test-and-code-changed");
-  assert.equal(e.needsHuman, true, "a test edited into agreement proves nothing");
+  // `goal new` goals require QA, which checks assertions against the criteria, so
+  // 0.8.0 records the hint without escalating it. The non-QA escalation is covered
+  // in a-evidence.integration.test.ts.
+  assert.equal(e.needsHuman, false, "the goal's QA review owns this check");
+  assert.match(String(e.explanation), /goal's QA review/);
 
-  // ...and passing is not enough to reach done directly.
+  // ...and passing is still not enough to reach done directly: it lands in review.
   const straight = awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--summary", "x"]);
-  assert.equal(straight.code, 1);
-  assert.match(straight.stderr, /needs a human, so it cannot go straight to done/);
-
-  const gated = awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--gate", "--summary", "x"]);
-  assert.equal(gated.code, 0, gated.stderr);
-  assert.match(gated.stdout, /in-review/);
+  assert.equal(straight.code, 0, straight.stderr);
+  assert.match(straight.stdout, /in-review/);
   fs.rmSync(path.dirname(ws), { recursive: true, force: true });
 });
 
 test("the gate refuses a test event awo did not run", () => {
   const { ws } = makeEvidenceWorkspace();
-  execFileSync(process.execPath, [CLI, "task", "event", "EV-T1", "test", "--label", "suite green"], { cwd: ws });
+  // awo no longer records a claim at all...
+  const claim = awo(ws, ["task", "event", "EV-T1", "test", "--label", "suite green"]);
+  assert.equal(claim.code, 1);
+  assert.match(claim.stderr, /awo test-command api "<cmd>"/);
+  // ...but one written by an earlier awo is still refused by the gate.
+  const day = fs.readdirSync(path.join(ws, "logs")).filter((d) => /^\d{4}-/.test(d))[0];
+  const runId = JSON.parse(
+    fs.readFileSync(path.join(ws, "goals", fs.readdirSync(path.join(ws, "goals")).find((d) => d.startsWith("EV-G1"))!, "state.json"), "utf8")
+  ).tasks["EV-T1"].lastRunId as string;
+  fs.appendFileSync(
+    path.join(ws, "logs", day, "runs.jsonl"),
+    JSON.stringify({ type: "event", runId, t: new Date().toISOString(), kind: "test", label: "suite green" }) + "\n"
+  );
 
   const out = awo(ws, ["task", "complete", "EV-T1", "--outcome", "success", "--gate", "--summary", "x"]);
   assert.equal(out.code, 1);

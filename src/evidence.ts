@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { spawn } from "child_process";
+import { execFile, spawn } from "child_process";
+import os from "os";
 import fs from "fs-extra";
 import path from "path";
 import { simpleGit } from "simple-git";
+import { detachable, superviseGroup } from "./process-group.js";
 
 /**
  * §16 — evidence is a measurement, never a claim.
@@ -28,12 +30,50 @@ export interface Measurement {
   timedOut: boolean;
   /** Trailing output, capped — enough to see the failure, not the whole suite. */
   tail: string;
-  /** Parsed counts, when the runner's output is recognisable. */
+  /** Parsed passing cases, when the runner's output is recognisable. */
   passed?: number;
+  /** Parsed failing cases, when the runner's output is recognisable. */
   failed?: number;
+  /** What the runner reported, cases and suites kept apart. */
+  counts: TestCounts;
+}
+
+/**
+ * Test counts, with suites never mistaken for cases.
+ *
+ * The generic `(\d+) passed` pattern read vitest's `Test Files  61 passed` line
+ * before its `Tests  527 passed` line, and "61 tests" reached a PR description and
+ * a Jira card. Each runner is now recognised by its own summary format, and an
+ * output nobody recognises says `unknown` rather than guessing.
+ */
+export interface TestCounts {
+  /** Test cases the runner reported, failed and skipped included. */
+  cases?: number;
+  passed?: number;
+  /** Test files, packages or suites — whatever the runner groups cases into. */
+  suites?: number;
+  failed?: number;
+  skipped?: number;
+  parser: "vitest" | "jest" | "node-test" | "mocha" | "go" | "pytest" | "unknown";
 }
 
 const TAIL_BYTES = 8 * 1024;
+/** What an event may carry; the measurement artifact keeps the longer tail. */
+export const EVENT_TAIL_BYTES = 2 * 1024;
+
+export function capTail(text: string, bytes: number): string {
+  return text.length > bytes ? `…\n${text.slice(-bytes)}` : text;
+}
+
+/**
+ * A command that cannot fail measures nothing: `npm test || true` exits 0 whatever
+ * the suite did, and a pass recorded from it would be a claim with extra steps.
+ */
+const CANNOT_FAIL = /(?:\|\||;)\s*(?:true|:|exit\s+0)\s*;?\s*$/;
+
+export function cannotFail(command: string): boolean {
+  return CANNOT_FAIL.test(command.trim());
+}
 
 export async function measure(
   command: string,
@@ -42,71 +82,172 @@ export async function measure(
 ): Promise<Measurement> {
   const startedAt = Date.now();
   const { code, out, timedOut } = await run(command, cwd, timeoutMinutes * 60_000);
+  const counts = parseCounts(out);
   return {
     command,
     cwd,
     exitCode: code,
     durationSec: Math.round((Date.now() - startedAt) / 1000),
     timedOut,
-    tail: out.length > TAIL_BYTES ? `…\n${out.slice(-TAIL_BYTES)}` : out,
-    ...parseCounts(out),
+    tail: capTail(out, TAIL_BYTES),
+    ...(counts.passed !== undefined ? { passed: counts.passed } : {}),
+    ...(counts.failed !== undefined ? { failed: counts.failed } : {}),
+    counts,
   };
 }
+
+const BASH = "/bin/bash";
 
 function run(
   command: string,
   cwd: string,
   timeoutMs: number
 ): Promise<{ code: number | null; out: string; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    // Through a shell on purpose: the value of this is that an agent can hand over
-    // whatever the repo's real test command is, pipes and all.
-    const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    const take = (chunk: Buffer): void => {
-      out += chunk.toString();
-      // Keep memory bounded on a runner that prints per-test lines for 20 minutes.
-      if (out.length > 512 * 1024) out = out.slice(-256 * 1024);
-    };
-    child.stdout?.on("data", take);
-    child.stderr?.on("data", take);
-
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
-    }, timeoutMs);
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ code: 127, out: `${out}\nawo: could not run: ${err.message}`, timedOut: false });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, out, timedOut });
-    });
-  });
+  // Through a shell on purpose: the value of this is that an agent can hand over
+  // whatever the repo's real test command is, pipes and all. Under pipefail, so
+  // `npm test | tee out.log` reports the suite's exit and not tee's.
+  const child = detachable && fs.existsSync(BASH)
+    ? spawn(BASH, ["-o", "pipefail", "-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] })
+    : spawn(command, { cwd, shell: true, detached: detachable, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  const take = (chunk: string): void => {
+    out += chunk;
+    // Keep memory bounded on a runner that prints per-test lines for 20 minutes.
+    if (out.length > 512 * 1024) out = out.slice(-256 * 1024);
+  };
+  child.stdout?.setEncoding("utf8").on("data", take);
+  child.stderr?.setEncoding("utf8").on("data", take);
+  return superviseGroup(child, timeoutMs).then(({ code, timedOut, error }) =>
+    error
+      ? { code: 127, out: `${out}\nawo: could not run: ${error.message}`, timedOut: false }
+      : { code, out, timedOut }
+  );
 }
 
-/** Recognises the common runners. Absent counts are simply not reported. */
-function parseCounts(out: string): { passed?: number; failed?: number } {
-  const patterns: [RegExp, "passed" | "failed"][] = [
-    [/Tests:\s+(?:.*?)(\d+) passed/i, "passed"],
-    [/Tests:\s+(\d+) failed/i, "failed"],
-    [/(\d+) passing/i, "passed"],
-    [/(\d+) failing/i, "failed"],
-    [/(\d+) passed/i, "passed"],
-    [/(\d+) failed/i, "failed"],
-    [/ok (\d+)\b/i, "passed"],
-  ];
-  const found: { passed?: number; failed?: number } = {};
-  for (const [re, key] of patterns) {
-    if (found[key] !== undefined) continue;
-    const m = re.exec(out);
-    if (m) found[key] = Number(m[1]);
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+
+/** Sums `<n> <word>` across every line `re` (global, one capture) matches. */
+function sumMatches(text: string, re: RegExp, word: string): number | undefined {
+  let total: number | undefined;
+  // A fresh copy: matchAll inherits lastIndex, so a reused global regex skips matches.
+  for (const m of text.matchAll(new RegExp(re.source, re.flags))) {
+    const item = new RegExp(`(\\d+)\\s+${word}\\b`, "i").exec(m[1]);
+    if (item) total = (total ?? 0) + Number(item[1]);
   }
-  return found;
+  return total;
+}
+
+function add(...values: (number | undefined)[]): number | undefined {
+  return values.some((v) => v !== undefined) ? values.reduce<number>((a, v) => a + (v ?? 0), 0) : undefined;
+}
+
+/**
+ * Recognises the common runners by their own summary lines. Every occurrence is
+ * summed, so a monorepo script that runs the suite once per package reports the
+ * whole run rather than its last package.
+ */
+export function parseCounts(raw: string): TestCounts {
+  const out = raw.replace(ANSI, "").replace(/\r/g, "");
+
+  // vitest: ` Test Files  1 failed | 60 passed (61)` / `      Tests  2 failed | 525 passed (527)`
+  const vitestCases = /^[ \t]*Tests[ \t]{2,}(\d.*)$/gm;
+  if (new RegExp(vitestCases.source, "m").test(out)) {
+    const files = /^[ \t]*Test Files[ \t]{2,}(\d.*)$/gm;
+    const failed = sumMatches(out, vitestCases, "failed");
+    const passed = sumMatches(out, vitestCases, "passed");
+    const skipped = add(sumMatches(out, vitestCases, "skipped"), sumMatches(out, vitestCases, "todo"));
+    return {
+      parser: "vitest",
+      cases: add(failed, passed, skipped),
+      passed,
+      failed: failed ?? 0,
+      skipped,
+      suites: add(sumMatches(out, files, "failed"), sumMatches(out, files, "passed"), sumMatches(out, files, "skipped")),
+    };
+  }
+
+  // jest: `Test Suites: 1 failed, 60 passed, 61 total` / `Tests:       2 failed, 525 passed, 527 total`
+  const jestCases = /^Tests:[ \t]+(.*)$/gm;
+  if (new RegExp(jestCases.source, "m").test(out)) {
+    const failed = sumMatches(out, jestCases, "failed");
+    const passed = sumMatches(out, jestCases, "passed");
+    const skipped = add(sumMatches(out, jestCases, "skipped"), sumMatches(out, jestCases, "todo"));
+    return {
+      parser: "jest",
+      cases: sumMatches(out, jestCases, "total") ?? add(failed, passed, skipped),
+      passed,
+      failed: failed ?? 0,
+      skipped,
+      suites: sumMatches(out, /^Test Suites:[ \t]+(.*)$/gm, "total"),
+    };
+  }
+
+  // node --test (spec `ℹ tests 527`, TAP `# tests 527`)
+  const nodeLine = (word: string): number | undefined => {
+    let total: number | undefined;
+    for (const m of out.matchAll(new RegExp(`^(?:ℹ|#)[ \\t]+${word}[ \\t]+(\\d+)[ \\t]*$`, "gm"))) {
+      total = (total ?? 0) + Number(m[1]);
+    }
+    return total;
+  };
+  if (nodeLine("tests") !== undefined && nodeLine("pass") !== undefined) {
+    return {
+      parser: "node-test",
+      cases: nodeLine("tests"),
+      passed: nodeLine("pass"),
+      failed: add(nodeLine("fail"), nodeLine("cancelled")) ?? 0,
+      skipped: add(nodeLine("skipped"), nodeLine("todo")),
+      suites: nodeLine("suites"),
+    };
+  }
+
+  // mocha: `  527 passing (2s)` / `  2 pending` / `  1 failing`
+  const mocha = (word: string): number | undefined => {
+    let total: number | undefined;
+    for (const m of out.matchAll(new RegExp(`^[ \\t]*(\\d+) ${word}\\b`, "gm"))) total = (total ?? 0) + Number(m[1]);
+    return total;
+  };
+  if (mocha("passing") !== undefined || mocha("failing") !== undefined) {
+    const passed = mocha("passing") ?? 0;
+    const failed = mocha("failing") ?? 0;
+    const skipped = mocha("pending");
+    return { parser: "mocha", cases: passed + failed + (skipped ?? 0), passed, failed, skipped };
+  }
+
+  // go test: `ok  \tpkg\t0.01s`, `FAIL\tpkg\t0.01s`, `--- FAIL: TestX (0.00s)` (cases need -v)
+  const count = (re: RegExp): number => [...out.matchAll(re)].length;
+  const goPackages = count(/^(?:ok|FAIL)[ \t]+\S+[ \t]+(?:[\d.]+s|\(cached\)|\[[^\]]+\])/gm);
+  const goPass = count(/^[ \t]*--- PASS: /gm);
+  const goFail = count(/^[ \t]*--- FAIL: /gm);
+  const goSkip = count(/^[ \t]*--- SKIP: /gm);
+  if (goPackages > 0 || goPass + goFail + goSkip > 0) {
+    return {
+      parser: "go",
+      // Without -v go prints only the failures, so a case total would be a guess.
+      cases: goPass + goSkip > 0 ? goPass + goFail + goSkip : undefined,
+      passed: goPass + goSkip > 0 ? goPass : undefined,
+      failed: goFail,
+      skipped: goSkip > 0 ? goSkip : undefined,
+      suites: goPackages > 0 ? goPackages : undefined,
+    };
+  }
+
+  // pytest: `==== 1 failed, 525 passed, 2 skipped in 5.20s ====` (also `-q`'s bare form)
+  const pytestItem = "\\d+ (?:passed|failed|skipped|xfailed|xpassed|errors?|deselected|warnings?)";
+  const pytestLine = new RegExp(`^[= ]*(${pytestItem}(?:, ${pytestItem})*)(?: in [\\d.]+s(?: \\([^)]*\\))?)?[= ]*$`, "gm");
+  const summary = [...out.matchAll(pytestLine)].at(-1)?.[1];
+  if (summary) {
+    const item = (word: string): number | undefined => {
+      const m = new RegExp(`(\\d+) ${word}\\b`).exec(summary);
+      return m ? Number(m[1]) : undefined;
+    };
+    const passed = add(item("passed"), item("xpassed"));
+    const failed = add(item("failed"), item("errors?")) ?? 0;
+    const skipped = add(item("skipped"), item("xfailed"));
+    return { parser: "pytest", cases: add(passed, failed, skipped), passed, failed, skipped };
+  }
+
+  return { parser: "unknown" };
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +260,7 @@ export type Diagnosis =
   | "regression"
   | "new-contract"
   | "test-and-code-changed"
+  | "not-runnable"
   | "unknown";
 
 export interface Verdict {
@@ -128,32 +270,80 @@ export interface Verdict {
   needsHuman: boolean;
 }
 
+/** Shell "misuse" and "command not found": the command never reached a test. */
+const NOT_RUNNABLE_EXITS = new Set([2, 127]);
+
 /**
  * A failing test means either the code is wrong or the test is wrong, and which
  * one is decidable in most cases — but only against a baseline. Without one,
  * "11 pre-existing baseline failures" is a sentence an agent writes and nobody
  * can check.
  *
- * The one case that stays ambiguous is a diff that touches a test and the code it
- * covers together, because editing the test until it passes is indistinguishable
- * from fixing a wrong test by looking at either file. The tiebreak cannot be the
- * test or the code; it has to be something that predates both, which is the
+ * The one case that stays ambiguous is a diff that rewrites what an existing test
+ * asserts, because editing the test until it passes is indistinguishable from
+ * fixing a wrong test by looking at either file. The tiebreak cannot be the test
+ * or the code; it has to be something that predates both, which is the
  * acceptance criteria — and if those do not settle it, it is a spec gap and the
  * task belongs in `blocked` with the question, not closed on a guess.
  */
-export function diagnose(head: Measurement, base: Measurement | null, changed: ChangedFiles): Verdict {
+export function diagnose(
+  head: Measurement,
+  base: Measurement | null,
+  changed: ChangedFiles,
+  options: { qaRequired?: boolean } = {}
+): Verdict {
+  // The same "cannot run" exit on both sides says the command, not the code, is
+  // broken — a missing binary, a typo'd script. Recording that as a pre-existing
+  // failure made it look like evidence about the suite.
+  if (
+    base &&
+    head.exitCode !== null && NOT_RUNNABLE_EXITS.has(head.exitCode) &&
+    base.exitCode !== null && NOT_RUNNABLE_EXITS.has(base.exitCode)
+  ) {
+    return {
+      diagnosis: "not-runnable",
+      explanation:
+        `The command could not run at HEAD (exit ${head.exitCode}) or at the branch point ` +
+        `(exit ${base.exitCode}) — a missing binary or a malformed command, not a test result. ` +
+        `It is not evidence either way; fix the command and rerun.`,
+      needsHuman: false,
+    };
+  }
+
   if (head.exitCode === 0) {
-    return changed.testsAndCodeTogether.length > 0
-      ? {
-          diagnosis: "test-and-code-changed",
-          explanation:
-            `Passing, but this change edits tests and the code they cover together ` +
-            `(${changed.testsAndCodeTogether.slice(0, 3).join(", ")}). A test edited into ` +
-            `agreement with the code proves nothing — check the assertions against the ` +
-            `goal's acceptance criteria.`,
-          needsHuman: true,
-        }
-      : { diagnosis: "pass", explanation: "Command exited 0.", needsHuman: false };
+    // Measured on the real workspaces: 42–58% of all test events were flagged
+    // "test-and-code-changed", almost all of them ordinary TDD — a new test file
+    // beside new code. Adding tests or assertions is the behaviour this rule wants;
+    // only an existing test that LOST assertion lines can have been edited into
+    // agreement with the code, so only that is escalated.
+    if (changed.weakenedTests.length > 0) {
+      const files = changed.weakenedTests.slice(0, 3).join(", ");
+      return options.qaRequired
+        ? {
+            diagnosis: "test-and-code-changed",
+            explanation:
+              `Passing, but this change removes or rewrites assertions in existing tests (${files}). ` +
+              `Recorded for the goal's QA review rather than escalated here: this goal requires QA, ` +
+              `which checks the assertions against the acceptance criteria.`,
+            needsHuman: false,
+          }
+        : {
+            diagnosis: "test-and-code-changed",
+            explanation:
+              `Passing, but this change removes or rewrites assertions in existing tests (${files}). ` +
+              `A test edited into agreement with the code proves nothing — check the assertions ` +
+              `against the goal's acceptance criteria.`,
+            needsHuman: true,
+          };
+    }
+    const added = changed.newTests.slice(0, 3);
+    const extended = changed.modifiedTests.slice(0, 3);
+    const note = added.length > 0
+      ? ` Adds tests (${added.join(", ")}); check they assert the acceptance criteria.`
+      : extended.length > 0
+        ? ` Extends existing tests (${extended.join(", ")}) without removing an assertion.`
+        : "";
+    return { diagnosis: "pass", explanation: `Command exited 0.${note}`, needsHuman: false };
   }
 
   if (!base) {
@@ -205,10 +395,27 @@ export interface ChangedFiles {
   newTests: string[];
   /** Test files changed alongside a non-test file with the same stem. */
   testsAndCodeTogether: string[];
+  /** Test files that existed at the branch point and were changed. */
+  modifiedTests: string[];
+  /** Existing test files whose diff removes (or rewrites) an assertion line. */
+  weakenedTests: string[];
 }
+
+export const NO_CHANGES: ChangedFiles = {
+  all: [], tests: [], newTests: [], testsAndCodeTogether: [], modifiedTests: [], weakenedTests: [],
+};
 
 const TEST_PATH = /(^|\/)(__tests__|__spec__|tests?|spec)\//i;
 const TEST_NAME = /\.(test|spec)\.[jt]sx?$|_test\.(go|py)$|Test\.java$|_spec\.rb$/i;
+
+/**
+ * A line that checks something, across the runners awo meets: expect/assert
+ * families, chai/should, Go's t.Error/t.Fatal and testify's require/assert,
+ * pytest.raises, XCTest. A removed `import assert` counts too — over-matching
+ * costs a glance, under-matching lets a weakened test through.
+ */
+const ASSERTION =
+  /\bexpect\s*[(.]|\bassert\w*|\.should\b|\bshould\.|\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\s*\(|\brequire\.\w+\s*\(|\bXCTAssert\w*|\bpytest\.raises\b|\bt\.(?:is|deepEqual|equal|ok|notOk|throws|same|match)\s*\(/;
 
 /** What this branch changed relative to where it started. */
 export async function changedFiles(repoDir: string, baseRef: string): Promise<ChangedFiles> {
@@ -243,7 +450,47 @@ export async function changedFiles(repoDir: string, baseRef: string): Promise<Ch
   const codeStems = new Set(all.filter((f) => !isTest(f)).map(stem));
   const testsAndCodeTogether = tests.filter((f) => codeStems.has(stem(f)));
 
-  return { all, tests, newTests, testsAndCodeTogether };
+  const { modified, weakened } = tests.length > newTests.length
+    ? assertionChanges(
+        await git.raw(["-c", "core.quotePath=off", "diff", "-U0", "-M", "--no-color", "--no-ext-diff", "--diff-filter=DMR", point, "--"]),
+        isTest
+      )
+    : { modified: [], weakened: [] };
+
+  return { all, tests, newTests, testsAndCodeTogether, modifiedTests: modified, weakenedTests: weakened };
+}
+
+/**
+ * Which existing test files changed, and which of them lost an assertion line.
+ * Renames are followed (`-M`), so moving a test file is not mistaken for deleting
+ * every assertion in it; a deleted test file did lose them all.
+ */
+function assertionChanges(diff: string, isTest: (f: string) => boolean): { modified: string[]; weakened: string[] } {
+  const modified = new Set<string>();
+  const weakened = new Set<string>();
+  let oldPath: string | null = null;
+  let file: string | null = null;
+  let inHunk = false;
+  const strip = (p: string): string | null =>
+    p === "/dev/null" ? null : p.replace(/^"|"$/g, "").replace(/^[ab]\//, "");
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      oldPath = null;
+      file = null;
+      inHunk = false;
+      continue;
+    }
+    if (!inHunk) {
+      if (line.startsWith("--- ")) oldPath = strip(line.slice(4));
+      else if (line.startsWith("+++ ")) file = strip(line.slice(4)) ?? oldPath;
+      else if (line.startsWith("@@")) inHunk = true;
+      continue;
+    }
+    if (!file || oldPath === null || !(isTest(file) || isTest(oldPath))) continue;
+    if (line.startsWith("-") || line.startsWith("+")) modified.add(file);
+    if (line.startsWith("-") && ASSERTION.test(line.slice(1))) weakened.add(file);
+  }
+  return { modified: [...modified], weakened: [...weakened] };
 }
 
 /** Identity of all non-ignored content that the command can test. */
@@ -262,6 +509,50 @@ export async function treeFingerprint(repoDir: string): Promise<string> {
     hash.update("\0");
   }
   return hash.digest("hex");
+}
+
+function gitIn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", args, { cwd, env, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) reject(new Error(`git ${args.join(" ")}: ${String(stderr).trim() || error.message}`));
+      else resolve(String(stdout));
+    });
+  });
+}
+
+/**
+ * The git tree id of exactly what the command could see: every tracked and
+ * untracked, non-ignored file in the checkout, independent of HEAD.
+ *
+ * `treeFingerprint` folded HEAD in, so the natural sequence "test, then commit
+ * exactly what was tested" staled the receipt and forced a pointless rerun. A tree
+ * id is the content itself — the same bytes give the same id whether they sit in
+ * the working tree or in a commit. Built in a throwaway index (seeded from the
+ * real one so unchanged files are not re-hashed); the checkout's own index and
+ * staging are never touched.
+ */
+export async function contentTreeId(repoDir: string): Promise<string> {
+  const realIndex = path.resolve(repoDir, (await gitIn(repoDir, ["rev-parse", "--git-path", "index"])).trim());
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "awo-tree-"));
+  const index = path.join(scratch, "index");
+  try {
+    const real = await fs.stat(realIndex).catch(() => null);
+    if (real) {
+      await fs.copy(realIndex, index);
+      // Git trusts a cached stat only for entries older than the index FILE's
+      // mtime ("racy git"). A fresh copy is newer than the original, so an edit
+      // made in the same second as the cached stat, at the same size, looked
+      // clean and the old blob was hashed — the receipt then went stale at
+      // completion for no reason. Backdating the copy makes those entries racy
+      // again, so git compares their content.
+      await fs.utimes(index, real.atime, new Date(real.mtimeMs - 2000));
+    }
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    await gitIn(repoDir, ["add", "-A"], env);
+    return (await gitIn(repoDir, ["write-tree"], env)).trim();
+  } finally {
+    await fs.remove(scratch).catch(() => {});
+  }
 }
 
 /** The commit a task's branch started from, for baseline comparison. */

@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import path from "path";
 import { atomicWriteFile, withFileLock } from "./file-lock.js";
+import { redactDeep } from "./redact.js";
 import { type RunOutcome } from "./state.js";
 
 /**
@@ -122,6 +123,15 @@ export type EventKind =
   | "note"
   | "run.end";
 
+/**
+ * The kinds a caller records with `awo task event`. Any other string used to be
+ * recorded silently as an event nothing ever reads, so the kind is now checked
+ * against this list.
+ */
+export const CALLER_EVENT_KINDS = ["step.start", "step.end", "repo.diff", "test", "commit", "note"] as const;
+/** Written by awo itself; a caller writing `run.end` would forge the lifecycle. */
+export const AWO_EVENT_KINDS = ["brief", "run.start", "repo.baseline", "run.end"] as const;
+
 export interface RunEvent {
   t: string;
   kind: EventKind;
@@ -172,19 +182,64 @@ interface DayLine {
   [key: string]: unknown;
 }
 
+const warnedMalformed = new Set<string>();
+
+/**
+ * Parse an append-only JSONL file without letting one bad line take every reader
+ * down. A final line with no newline is a writer caught mid-append (or killed
+ * there) and is skipped silently; a malformed line anywhere else is real damage,
+ * reported once per file on stderr, and skipped. Throwing made `log`, `context`
+ * and `task complete` all fail on a workspace whose only fault was one torn write.
+ */
+export function parseJsonLines<T>(text: string, file: string): T[] {
+  const lines = text.split("\n");
+  const complete = text.endsWith("\n");
+  const out: T[] = [];
+  let malformed = 0;
+  lines.forEach((line, index) => {
+    if (line.trim() === "") return;
+    try {
+      out.push(JSON.parse(line) as T);
+    } catch {
+      const partialTail = index === lines.length - 1 && !complete;
+      if (!partialTail) malformed += 1;
+    }
+  });
+  if (malformed > 0 && !warnedMalformed.has(file)) {
+    warnedMalformed.add(file);
+    process.stderr.write(`awo: skipped ${malformed} malformed line(s) in ${file}\n`);
+  }
+  return out;
+}
+
 async function readDayLines(workspaceRoot: string, date: string): Promise<DayLine[]> {
   const file = path.join(logsRoot(workspaceRoot), date, "runs.jsonl");
   if (!(await fs.pathExists(file))) return [];
-  return (await fs.readFile(file, "utf8"))
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as DayLine);
+  return parseJsonLines<DayLine>(await fs.readFile(file, "utf8"), file);
+}
+
+/** True when the file is non-empty and its last byte is not a newline. */
+async function endsTorn(file: string): Promise<boolean> {
+  const handle = await fs.promises.open(file, "r").catch(() => null);
+  if (!handle) return false;
+  try {
+    const { size } = await handle.stat();
+    if (size === 0) return false;
+    const last = Buffer.alloc(1);
+    await handle.read(last, 0, 1, size - 1);
+    return last[0] !== 0x0a;
+  } finally {
+    await handle.close();
+  }
 }
 
 async function appendDayLine(workspaceRoot: string, runId: string, line: DayLine): Promise<void> {
   const file = dayDataFile(workspaceRoot, runId);
   await fs.ensureDir(path.dirname(file));
-  await fs.appendFile(file, `${JSON.stringify(line)}\n`);
+  // A writer killed mid-append leaves a torn last line; appending straight onto it
+  // would fuse this line to the fragment and lose both.
+  const lead = (await endsTorn(file)) ? "\n" : "";
+  await fs.appendFile(file, `${lead}${JSON.stringify(line)}\n`);
 }
 
 /**
@@ -198,8 +253,12 @@ export async function appendEvent(
   kind: EventKind,
   fields: Record<string, unknown> = {}
 ): Promise<RunEvent> {
-  const event: RunEvent = { t: new Date().toISOString(), kind, ...fields };
-  await appendDayLine(workspaceRoot, runId, { type: "event", runId, ...event });
+  // The envelope goes on LAST: spread first, a caller's `kind`, `t`, `runId` or
+  // `type` silently replaced awo's own — `{"type":"run"}` made an event an index row.
+  // Redacted at write time because the log is append-only and may be published:
+  // real day files carried `*_PASSWORD=` and `mysql -p…` from measured commands.
+  const event = { ...redactDeep(fields), t: new Date().toISOString(), kind } as RunEvent;
+  await appendDayLine(workspaceRoot, runId, { ...event, type: "event", runId });
   return event;
 }
 
@@ -223,6 +282,8 @@ export interface RunIndexEntry {
    */
   tier?: string;
   model?: string;
+  /** The model that actually did the work, when the closer said it differed. */
+  actualModel?: string;
   effort?: string;
   attempts?: number;
   status: "running" | RunOutcome;
@@ -235,7 +296,7 @@ export interface RunIndexEntry {
 
 /** §7.3 — one row per completed run, in its day's file. */
 export async function appendIndex(workspaceRoot: string, entry: RunIndexEntry): Promise<void> {
-  await appendDayLine(workspaceRoot, entry.runId, { type: "run", ...entry });
+  await appendDayLine(workspaceRoot, entry.runId, { ...redactDeep(entry), type: "run", runId: entry.runId });
 }
 
 /**
@@ -273,6 +334,8 @@ export async function writeDetail(
   frontmatter: Record<string, unknown>,
   sections: { prompt?: string; interpreted?: string; summary?: string; notes?: string[] }
 ): Promise<string> {
+  frontmatter = redactDeep(frontmatter);
+  sections = redactDeep(sections);
   const meta = Object.entries(frontmatter)
     .filter(([, v]) => v !== undefined)
     .map(([k, v]) => `- **${k}:** ${Array.isArray(v) ? v.join(", ") || "none" : v === null ? "—" : v}`)
@@ -385,10 +448,7 @@ function legacyCandidates(
 async function readLegacyEvents(workspaceRoot: string, runId: string): Promise<RunEvent[]> {
   for (const layout of legacyCandidates(workspaceRoot, runId)) {
     if (!(await fs.pathExists(layout.events))) continue;
-    return (await fs.readFile(layout.events, "utf8"))
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-      .map((line) => JSON.parse(line) as RunEvent);
+    return parseJsonLines<RunEvent>(await fs.readFile(layout.events, "utf8"), layout.events);
   }
   return [];
 }
@@ -404,10 +464,7 @@ async function readLegacyIndex(workspaceRoot: string): Promise<RunIndexEntry[]> 
   for (const name of ["index.jsonl", "runs.jsonl"]) {
     const file = path.join(logsRoot(workspaceRoot), name);
     if (!(await fs.pathExists(file))) continue;
-    return (await fs.readFile(file, "utf8"))
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-      .map((line) => JSON.parse(line) as RunIndexEntry);
+    return parseJsonLines<RunIndexEntry>(await fs.readFile(file, "utf8"), file);
   }
   return [];
 }

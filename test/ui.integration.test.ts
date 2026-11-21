@@ -66,7 +66,7 @@ test("full publish honors redact.filePaths, and says what it withheld", (t) => {
   // A run carrying captured command output — the field that holds file paths and
   // stack traces whether or not anyone chose to include them.
   awo(ws, ["task", "run", "UI-T1", "--no-worktree"]);
-  awo(ws, ["task", "event", "UI-T1", "test", "--repo", "api", "--run", "node -e \"process.exit(1)\""]);
+  awo(ws, ["task", "event", "UI-T1", "test", "--repo", "api", "--run", "node -e \"process.exit(1)\"", "--no-fail"]);
   awo(ws, ["task", "complete", "UI-T1", "--outcome", "failed"]);
 
   setPublish({ prompts: true, filePaths: true });

@@ -2,7 +2,8 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { Command } from "commander";
+import { Command, Option } from "commander";
+import { aliasOptions } from "./cli-alias.js";
 import { findWorkspaceRoot } from "./workspace.js";
 import {
   findCriteria,
@@ -1316,31 +1317,34 @@ task
       console.log(`worker:  ${r.timedOut ? "TIMED OUT" : `exited ${r.exitCode}`} -> ${r.outcome}`);
       console.log(`output:  ${r.outputPath}`);
       if (r.completed) console.log(`run closed as ${r.outcome}.`);
+      else if (r.completionError) console.log(`run left open — closing it was refused:\n${r.completionError}`);
       else console.log(`run left open — close it with \`awo task complete ${r.taskId} --outcome <o>\``);
-      if (r.outcome !== "success") process.exitCode = 1;
+      if (r.outcome !== "success" || r.completionError) process.exitCode = 1;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
     }
   });
 
-task
+const taskEvent = task
   .command("event <taskId> <kind>")
   .description(
-    "Append a progress event to the task's open run. Kinds: step.start, step.end, repo.diff, test, commit, note."
+    "Append a progress event to the task's open run. Kinds: step.start, step.end, repo.diff, test, commit, note. " +
+      "A test event is always measured: --run <cmd>, or the repo's declared testCommand."
   )
   .option("--label <label>", "human label for the step")
   .option("--message <message>", "free-text message (note events)")
   .option("--data <json>", "extra JSON fields, e.g. '{\"repo\":\"api\",\"files\":3}'")
   .option(
     "--run <command>",
-    "run this command and record what happened — the only form `complete --gate` accepts"
+    "run this command and record what happened (test events default to the repo's testCommand)"
   )
   .option("--baseline", "also run it at the branch point, so a failure can be attributed")
   .option("--repo <name>", "which target repo to run in (default: the task's first target)")
   .option("--checkout <path>", "explicit checkout; otherwise use the recorded task checkout")
   .option("--base <ref>", "explicit comparison base; otherwise use the pinned run baseline")
   .option("--timeout <minutes>", "kill the command after this long (default 30)", (v) => parseInt(v, 10))
+  .option("--no-fail", "exit 0 even when the measured command fails (default: exit 3)")
   .action(
     async (
       taskId: string,
@@ -1349,29 +1353,54 @@ task
         label?: string;
         message?: string;
         data?: string;
+        sha?: string;
         run?: string;
         baseline?: boolean;
         repo?: string;
         timeout?: number;
         checkout?: string;
         base?: string;
+        fail?: boolean;
       }
     ) => {
     try {
-      const r = await runTaskEvent(taskId, kind, { ...opts, timeoutMinutes: opts.timeout });
+      const { fail, timeout, ...rest } = opts;
+      const r = await runTaskEvent(taskId, kind, { ...rest, timeoutMinutes: timeout });
       if (!r.measured) {
         console.log(`recorded ${kind} for ${taskId}.`);
-      } else {
-        console.log(`recorded ${kind} for ${taskId} — ${r.diagnosis}`);
-        if (r.needsHuman) {
-          console.log("  this one needs a human: `awo log tail` for the explanation");
-        }
+        return;
       }
+      const exit = r.timedOut ? "timed out" : `exit ${r.exitCode}`;
+      console.log(`recorded ${kind} for ${taskId} — ${r.diagnosis} (${r.repo}: ${r.command}, ${exit})`);
+      if (r.explanation) console.log(`  ${r.explanation}`);
+      const c = r.counts;
+      if (c && c.parser !== "unknown") {
+        const parts = [
+          c.cases !== undefined ? `${c.cases} cases` : null,
+          c.suites !== undefined ? `${c.suites} suites` : null,
+          c.failed !== undefined ? `${c.failed} failed` : null,
+          c.skipped ? `${c.skipped} skipped` : null,
+        ].filter(Boolean);
+        if (parts.length > 0) console.log(`  counts: ${parts.join(", ")} (${c.parser})`);
+      }
+      if (r.tailLines && r.tailLines.length > 0) {
+        console.log("  last output:");
+        for (const line of r.tailLines) console.log(`    | ${line}`);
+      }
+      if (r.needsHuman) {
+        console.log(`  this one needs a human: \`awo log tail --task ${r.taskId}\` for the full record`);
+      }
+      // A measured failure is a failure of this command too, so a script or an
+      // agent loop sees it without parsing the text. 3, not 1: awo itself worked.
+      if (r.exitCode !== 0 && fail !== false) process.exitCode = 3;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
     }
   });
+// Mined from real invocations: agents reach for these spellings far more often than `--help`.
+aliasOptions(taskEvent, "message", "--note <text>", "--msg <text>", "--text <text>", "-m <text>");
+taskEvent.addOption(new Option("--sha <sha>", "commit sha (commit events)").hideHelp());
 
 task
   .command("recheck <taskId>")
@@ -1394,9 +1423,13 @@ task
         );
         if (r.inconclusive) {
           console.log(
-            "  That command fails at the branch point too, so it proves nothing about this\n" +
-              "  task — and the task is now blocked rather than done, which is the honest\n" +
-              "  state: it cannot be verified until the base suite is green."
+            r.diagnosis === "not-runnable"
+              ? "  That command could not run at HEAD or at the branch point, so it proves nothing\n" +
+                  "  about this task — and the task is now blocked rather than done until a\n" +
+                  "  command that actually runs verifies it."
+              : "  That command fails at the branch point too, so it proves nothing about this\n" +
+                  "  task — and the task is now blocked rather than done, which is the honest\n" +
+                  "  state: it cannot be verified until the base suite is green."
           );
           process.exitCode = 1;
         } else if (!r.passed) {
@@ -1413,7 +1446,9 @@ task
 task
   .command("complete <taskId>")
   .description("Close the task's open run: writes the log, index line, and lifecycle transition.")
-  .requiredOption("--outcome <outcome>", "success | failed | skipped")
+  .option("--outcome <outcome>", "success | failed | skipped (default: success)")
+  .option("--failed", "shorthand for --outcome failed")
+  .option("--skipped", "shorthand for --outcome skipped")
   .option("--summary <text>", "what was done (goes in the run log)")
   .option("--prompt <text>", "verbatim user request")
   .option("--interpreted <text>", "the agent's own reading of the request")
@@ -1423,10 +1458,23 @@ task
   // Commander reserves every `--no-*` flag for boolean negation, so a reasoned
   // exception needs a positive flag name or the supplied string is discarded.
   .option("--unchanged <why>", "implementation intentionally produced no commit or diff")
+  .option("--model <model>", "the model that actually did the work, e.g. claude:opus (if not the resolved one)")
   .action(async (taskId: string, opts: Record<string, never>) => {
     try {
-      const input = opts as unknown as { outcome: string; unchanged?: string };
-      const r = await runTaskComplete(taskId, { ...input, noChange: input.unchanged });
+      const input = opts as unknown as {
+        outcome?: string;
+        failed?: boolean;
+        skipped?: boolean;
+        unchanged?: string;
+      };
+      const { failed, skipped, unchanged, ...rest } = input;
+      const asked = [
+        ...new Set([input.outcome, failed ? "failed" : undefined, skipped ? "skipped" : undefined].filter(Boolean)),
+      ];
+      if (asked.length > 1) {
+        throw new Error(`Conflicting outcomes: ${asked.join(" and ")}. Pass one of --outcome, --failed, --skipped.`);
+      }
+      const r = await runTaskComplete(taskId, { ...rest, outcome: asked[0], noChange: unchanged });
       console.log(`${r.taskId} run ${r.runId} -> ${r.outcome}; task is now ${r.status}.`);
       console.log(`log: ${r.detail}`);
     } catch (err) {

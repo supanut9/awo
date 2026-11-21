@@ -5,13 +5,20 @@ import { simpleGit } from "simple-git";
 import { findWorkspaceRoot } from "../workspace.js";
 import {
   branchPoint,
+  cannotFail,
+  capTail,
+  contentTreeId,
   treeFingerprint,
   changedFiles,
   diagnose,
+  EVENT_TAIL_BYTES,
   measure,
   measureBaseline,
+  NO_CHANGES,
   type Measurement,
+  type TestCounts,
 } from "../evidence.js";
+import { redactDeep, redactSecrets } from "../redact.js";
 import { readManifest, type Manifest } from "../manifest.js";
 import { findAllTasks, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
 import {
@@ -37,6 +44,8 @@ import {
   allocateRunId,
   readEvents,
   writeDetail,
+  AWO_EVENT_KINDS,
+  CALLER_EVENT_KINDS,
   type EventKind,
 } from "../runs.js";
 
@@ -479,6 +488,72 @@ export async function runTaskRun(
   };
 }
 
+/**
+ * Fields awo writes itself — on measured events, on the run envelope, and on the
+ * events it captures from Git. A caller's `--data` could set every one of them:
+ * `--data '{"verified":true,"exitCode":0}'` was indistinguishable from a
+ * measurement awo ran, and `{"type":"run"}` turned an event into an index row.
+ */
+const RESERVED_EVENT_FIELDS = new Set([
+  "t", "ts", "kind", "type", "runId",
+  "verified", "measured", "measurement", "exitCode", "timedOut", "durationSec",
+  "passed", "failed", "counts", "tail", "artifact",
+  "fingerprint", "treeFingerprint", "treeFingerprintAfter", "treeId", "treeIdAfter",
+  "checkout", "headSha", "baseSha", "baseline", "baselineExitCode", "baselineFailed", "baselineError",
+  "diagnosis", "needsHuman", "explanation", "auto",
+]);
+
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    let prev = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const next = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = row[j];
+      row[j] = next;
+    }
+  }
+  return row[b.length];
+}
+
+/** The spellings agents reached for that edit distance alone does not map. */
+const KIND_SYNONYMS: Record<string, string> = {
+  tests: "test", testing: "test", diff: "repo.diff", start: "step.start", step: "step.start",
+  end: "step.end", done: "step.end", msg: "note", message: "note", log: "note", info: "note",
+};
+
+function assertEventKind(kind: string): void {
+  if ((CALLER_EVENT_KINDS as readonly string[]).includes(kind)) return;
+  if ((AWO_EVENT_KINDS as readonly string[]).includes(kind)) {
+    throw new Error(`"${kind}" events are written by awo itself. Kinds you record: ${CALLER_EVENT_KINDS.join(", ")}.`);
+  }
+  const lower = kind.toLowerCase();
+  const guess = KIND_SYNONYMS[lower] ??
+    [...CALLER_EVENT_KINDS].sort((x, y) => editDistance(lower, x) - editDistance(lower, y))[0];
+  const close = KIND_SYNONYMS[lower] !== undefined || editDistance(lower, guess) <= 3;
+  throw new Error(
+    `Unknown event kind "${kind}".${close ? ` Did you mean "${guess}"?` : ""}\n` +
+      `  Kinds: ${CALLER_EVENT_KINDS.join(", ")}.`
+  );
+}
+
+export interface TaskEventResult {
+  taskId: string;
+  kind: string;
+  measured: boolean;
+  diagnosis?: string;
+  needsHuman?: boolean;
+  explanation?: string;
+  command?: string;
+  repo?: string;
+  exitCode?: number | null;
+  timedOut?: boolean;
+  counts?: TestCounts;
+  /** The last lines the command printed, when it did not pass. */
+  tailLines?: string[];
+}
+
 export async function runTaskEvent(
   taskId: string,
   kind: string,
@@ -487,6 +562,8 @@ export async function runTaskEvent(
     label?: string;
     message?: string;
     data?: string;
+    /** Commit sha, for `commit` events. */
+    sha?: string;
     /** Command for awo to RUN and measure, instead of a claim about one. */
     run?: string;
     /** Also run it at the branch point, so a failure can be attributed. */
@@ -496,7 +573,8 @@ export async function runTaskEvent(
     checkout?: string;
     base?: string;
   } = {}
-): Promise<{ measured: boolean; diagnosis?: string; needsHuman?: boolean }> {
+): Promise<TaskEventResult> {
+  assertEventKind(kind);
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { task, goal } = await locateTask(workspaceRoot, taskId);
   const ts = effectiveState(await readState(goal.dir, goal.id), task);
@@ -511,25 +589,69 @@ export async function runTaskEvent(
   if (options.label) fields.label = options.label;
   if (options.message) fields.msg = options.message;
   if (options.data) {
+    let parsed: unknown;
     try {
-      Object.assign(fields, JSON.parse(options.data));
+      parsed = JSON.parse(options.data);
     } catch {
       throw new Error(`--data must be valid JSON; got: ${options.data}`);
     }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`--data must be a JSON object, e.g. '{"repo":"api","files":3}'; got: ${options.data}`);
+    }
+    const reserved = Object.keys(parsed).filter((key) => RESERVED_EVENT_FIELDS.has(key));
+    if (reserved.length > 0) {
+      throw new Error(
+        `--data may not set ${reserved.map((key) => `"${key}"`).join(", ")}: awo writes ${reserved.length === 1 ? "it" : "them"} ` +
+          `itself, only for what it measured.\n` +
+          `  To record a measured test:  awo task event ${task.id} test --run "<the command>"`
+      );
+    }
+    Object.assign(fields, parsed);
   }
-  if (!options.run) {
+  if (options.sha) fields.sha = options.sha;
+
+  // A test event is a measurement or nothing. "test --label 'suite green'" was the
+  // claim that let half the per-criterion evidence be prose; with no --run, awo
+  // runs the command the repo declared instead of recording the sentence.
+  const manifest = await readManifest(workspaceRoot);
+  const requestedRepo = options.repo ?? (typeof fields.repo === "string" ? fields.repo : undefined);
+  let command = options.run;
+  if (!command && kind === "test") {
+    const target = requestedRepo ?? task.targets[0];
+    if (!target) {
+      throw new Error(
+        `${task.id} has no targets, so there is no declared test command to run.\n` +
+          `  Pass one:  awo task event ${task.id} test --repo <name> --run "<the command>"`
+      );
+    }
+    command = manifest.repos.find((r) => r.name === target)?.testCommand;
+    if (!command) {
+      throw new Error(
+        `No test command is declared for ${target}, and a test event is a measurement awo runs, not a claim.\n` +
+          `  Declare it once:  awo test-command ${target} "<cmd>"\n` +
+          `  Or pass one now:  awo task event ${task.id} test --run "<cmd>"`
+      );
+    }
+  }
+  if (!command) {
     await appendEvent(workspaceRoot, ts.lastRunId, kind as EventKind, fields);
-    return { measured: false };
+    return { taskId: task.id, kind, measured: false };
+  }
+  if (cannotFail(command)) {
+    throw new Error(
+      `Refusing to measure "${command}": it ends in a clause that turns any failure into exit 0, ` +
+        `so it would record a pass whatever the suite did.\n` +
+        `  Drop the trailing \`|| true\` / \`; true\` / \`|| :\` and rerun.`
+    );
   }
 
   // --run makes this event a measurement: awo executes the command in the task's
   // worktree and records what actually happened. A `test` event carrying `verified`
   // is the only thing `task complete --gate` will accept.
-  const manifest = await readManifest(workspaceRoot);
-  const repoName = options.repo ?? task.targets[0];
+  const repoName = requestedRepo ?? task.targets[0];
   if (!repoName) {
     throw new Error(
-      `${task.id} has no targets, so there is no repo to run "${options.run}" in. Pass --repo <name>.`
+      `${task.id} has no targets, so there is no repo to run "${command}" in. Pass --repo <name>.`
     );
   }
   if (!task.targets.includes(repoName)) throw new Error(`${task.id} does not target ${repoName}.`);
@@ -561,9 +683,11 @@ export async function runTaskEvent(
   const baseSha = isGit ? await branchPoint(repoDir, resolvedBase!) : null;
   if (isGit && !baseSha) throw new Error(`No merge-base between HEAD and ${baseRef}.`);
   const beforeTree = isGit ? await treeFingerprint(repoDir) : null;
-  const measured = await measure(options.run, repoDir, options.timeoutMinutes);
+  const beforeContent = isGit ? await contentTreeId(repoDir) : null;
+  const measured = await measure(command, repoDir, options.timeoutMinutes);
   const afterTree = isGit ? await treeFingerprint(repoDir) : null;
-  const changed = isGit ? await changedFiles(repoDir, baseSha!) : { all: [], tests: [], newTests: [], testsAndCodeTogether: [] };
+  const afterContent = isGit ? await contentTreeId(repoDir) : null;
+  const changed = isGit ? await changedFiles(repoDir, baseSha!) : NO_CHANGES;
 
   let base: Measurement | null = null;
   let baselineError: string | undefined;
@@ -576,7 +700,7 @@ export async function runTaskEvent(
       const attempt = await measureBaseline(
         repoDir,
         point,
-        options.run,
+        command,
         scratch,
         options.timeoutMinutes
       );
@@ -585,11 +709,15 @@ export async function runTaskEvent(
     }
   }
 
-  const verdict = beforeTree !== afterTree
+  const verdict = beforeContent !== afterContent
     ? { diagnosis: "unknown", needsHuman: true, explanation: "The tested tree changed while the command ran; rerun against a stable tree." }
-    : diagnose(measured, base, changed);
+    : diagnose(measured, base, changed, { qaRequired: goal.completionPolicy.qaRequired });
   const artifact = path.join("logs", ts.lastRunId.slice(0, 10), "measurements", `${randomUUID()}.json`);
-  await fs.outputJson(path.join(workspaceRoot, artifact), { candidate: measured, baseline: base, baselineError }, { spaces: 2 });
+  await fs.outputJson(
+    path.join(workspaceRoot, artifact),
+    redactDeep({ candidate: measured, baseline: base, baselineError }),
+    { spaces: 2 }
+  );
 
   await appendEvent(workspaceRoot, ts.lastRunId, kind as EventKind, {
     ...fields,
@@ -598,6 +726,10 @@ export async function runTaskEvent(
     checkout: repoDir,
     headSha,
     baseSha,
+    // The content tree is what a receipt is checked against; the HEAD-bound
+    // fingerprint stays for readers of earlier receipts.
+    treeId: beforeContent,
+    treeIdAfter: afterContent,
     treeFingerprint: beforeTree,
     treeFingerprintAfter: afterTree,
     artifact,
@@ -606,16 +738,69 @@ export async function runTaskEvent(
     durationSec: measured.durationSec,
     ...(measured.passed !== undefined ? { passed: measured.passed } : {}),
     ...(measured.failed !== undefined ? { failed: measured.failed } : {}),
+    counts: measured.counts,
     ...(measured.timedOut ? { timedOut: true } : {}),
     ...(base ? { baselineExitCode: base.exitCode, baselineFailed: base.failed } : {}),
     ...(baselineError ? { baselineError } : {}),
     diagnosis: verdict.diagnosis,
     needsHuman: verdict.needsHuman,
     explanation: verdict.explanation,
-    ...(measured.exitCode === 0 ? {} : { tail: measured.tail }),
+    // The full tail lives in the artifact; the day file is read whole by every
+    // `log` and `context` call, so the event carries only enough to see why.
+    ...(measured.exitCode === 0 ? {} : { tail: capTail(measured.tail, EVENT_TAIL_BYTES) }),
   });
 
-  return { measured: true, diagnosis: verdict.diagnosis, needsHuman: verdict.needsHuman };
+  return {
+    taskId: task.id,
+    kind,
+    measured: true,
+    diagnosis: verdict.diagnosis,
+    needsHuman: verdict.needsHuman,
+    explanation: verdict.explanation,
+    command: measured.command,
+    repo: repoName,
+    exitCode: measured.exitCode,
+    timedOut: measured.timedOut,
+    counts: measured.counts,
+    ...(measured.exitCode === 0 || measured.tail.trim() === ""
+      ? {}
+      : { tailLines: redactSecrets(measured.tail).replace(/\s+$/, "").split("\n").slice(-20) }),
+  };
+}
+
+/**
+ * A passing receipt counts only for the content it tested.
+ *
+ * Receipts written since 0.8.0 carry `treeId`, the git tree of the tested
+ * content, so committing exactly what was tested keeps the receipt valid. Older
+ * receipts carry only the HEAD-bound `treeFingerprint` and keep that comparison.
+ */
+async function assertFreshReceipt(
+  taskId: string,
+  event: Record<string, unknown>,
+  current: Map<string, string>
+): Promise<void> {
+  const byContent = typeof event.treeId === "string";
+  if (!byContent && typeof event.treeFingerprint !== "string") return; // Legacy/non-Git receipt.
+  const tested = byContent ? event.treeId : event.treeFingerprint;
+  const after = byContent ? event.treeIdAfter : event.treeFingerprintAfter;
+  if (after !== tested) {
+    throw new Error(`${taskId}: the tested tree changed during ${event.command}; rerun against a stable tree.`);
+  }
+  if (typeof event.checkout !== "string") {
+    throw new Error(`${taskId}: the test receipt has no checkout; rerun the measurement.`);
+  }
+  const key = `${byContent ? "tree" : "fingerprint"}:${event.checkout}`;
+  if (!current.has(key)) {
+    const checkout = event.checkout;
+    const now = await (byContent ? contentTreeId(checkout) : treeFingerprint(checkout)).catch((error: Error) => {
+      throw new Error(`${taskId}: cannot read the tested checkout ${checkout} (${error.message}). Restore it, or rerun the check.`);
+    });
+    current.set(key, now);
+  }
+  if (current.get(key) !== tested) {
+    throw new Error(`${taskId}: stale test receipt for ${event.command}; the checkout tree changed after testing. Rerun the check.`);
+  }
 }
 
 export interface TaskCompleteResult {
@@ -635,7 +820,8 @@ export async function runTaskComplete(
   taskId: string,
   options: {
     cwd?: string;
-    outcome: string;
+    /** Defaults to `success`. */
+    outcome?: string;
     summary?: string;
     prompt?: string;
     interpreted?: string;
@@ -645,15 +831,21 @@ export async function runTaskComplete(
     untested?: string;
     /** Implementation intentionally produced no repository change. */
     noChange?: string;
+    /** The model that actually did the work, when it was not the one resolved at run open. */
+    model?: string;
   }
 ): Promise<TaskCompleteResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
-  if (!RUN_OUTCOMES.includes(options.outcome as RunOutcome)) {
+  const requested = options.outcome ?? "success";
+  if (!RUN_OUTCOMES.includes(requested as RunOutcome)) {
+    // Anything that is not one of the three is almost always the summary typed
+    // into the wrong flag, so name the flag that was probably meant.
     throw new Error(
-      `Unknown outcome "${options.outcome}". Valid: ${RUN_OUTCOMES.join(", ")}.`
+      `Unknown outcome "${requested}". Valid: ${RUN_OUTCOMES.join(", ")} (default: success).\n` +
+        `  Did you mean --summary "${requested}"?`
     );
   }
-  const outcome = options.outcome as RunOutcome;
+  const outcome = requested as RunOutcome;
 
   const { task, goal } = await locateTask(workspaceRoot, taskId);
   const ts = effectiveState(await readState(goal.dir, goal.id), task);
@@ -663,14 +855,23 @@ export async function runTaskComplete(
   const runId = ts.lastRunId;
   await captureRepositoryEvidence(workspaceRoot, runId);
   const priorEvents = await readEvents(workspaceRoot, runId);
+  // Where a success lands. Inconclusive evidence may close into review, so the
+  // needs-human refusal must follow the destination, not only the --gate flag:
+  // a goal that requires QA routes every success to review regardless.
+  const toReview = options.gate === true || goal.completionPolicy.qaRequired;
+  let untestedRepos: string[] = [];
 
   // §7.1 `tests-must-pass` was unenforceable: a task could close as `success` with
   // no evidence of anything having run, and six such tasks composed into a broken
   // feature (§9 item 47). A successful run must therefore carry a `test` event, or
   // say out loud why it cannot.
+  //
+  // `--untested` excuses only the ABSENCE of a measurement. It used to skip this
+  // whole block, so a run with a red measured suite closed as success by adding
+  // one flag — and `dispatch` added that flag to every success it closed.
   const requiresMeasuredCheck =
     !task.kindExplicit || task.kind === "implementation" || task.kind === "verification";
-  if (outcome === "success" && requiresMeasuredCheck && !options.untested) {
+  if (outcome === "success" && requiresMeasuredCheck) {
     // A command's latest measurement supersedes its earlier attempts. A pass
     // from a different command must never hide a failed check in the same run.
     const latest = new Map<string, (typeof priorEvents)[number]>();
@@ -680,65 +881,89 @@ export async function runTaskComplete(
       }
     }
     const measurements = [...latest.values()];
-    const failing = measurements.filter((event) => event.exitCode !== 0 || event.timedOut === true);
+    // A command that could not run at all is not a result about the code, either way.
+    const notRunnable = measurements.filter((event) => event.diagnosis === "not-runnable");
+    const results = measurements.filter((event) => event.diagnosis !== "not-runnable");
+    const failing = results.filter((event) => event.exitCode !== 0 || event.timedOut === true);
     if (failing.length > 0) {
       throw new Error(
         `${task.id} cannot close as success with failing measured checks.\n` +
           failing.map((event) => `  ${event.repo ?? "repo"}: ${event.command ?? "test"} (exit ${event.exitCode})`).join("\n") +
-          `\n  Fix and rerun each failing command; routing to review does not make a failure pass.`
+          `\n  Fix and rerun each failing command; routing to review does not make a failure pass,` +
+          ` and --untested excuses a missing check, not a failing one.`
       );
     }
-    const measuredPasses = measurements.filter((event) => event.exitCode === 0);
-    const claims = priorEvents.filter((e) => e.kind === "test" && e.verified !== true);
+    const measuredPasses = results.filter((event) => event.exitCode === 0);
 
-    if (measuredPasses.length === 0 && claims.length > 0) {
-      throw new Error(
-        `${task.id} cannot close as success on a test event awo did not run.\n` +
-          `  ${claims.length} test event(s) recorded, none measured.\n` +
-          `  Re-record it as a measurement:\n` +
-          `    awo task event ${task.id} test --run "<the command>" --baseline\n` +
-          `  (rule: tests-must-pass — a claim is not evidence. Published analysis of\n` +
-          `   agent-authored tests found ~80% carry weak or no assertions, so "tests\n` +
-          `   passed" as a string is the weakest signal in the workflow.)`
-      );
-    }
-    // Receipts identify the tree actually tested, not whatever happens to be in
+    // Receipts identify the content actually tested, not whatever happens to be in
     // the checkout at completion. Review cannot repair missing test coverage.
     const currentTrees = new Map<string, string>();
-    for (const event of measuredPasses) {
-      if (typeof event.treeFingerprint !== "string") continue; // Legacy/non-Git receipt.
-      if (event.treeFingerprintAfter !== event.treeFingerprint) {
-        throw new Error(`${task.id}: the tested tree changed during ${event.command}; rerun against a stable tree.`);
-      }
-      if (typeof event.checkout !== "string") {
-        throw new Error(`${task.id}: the test receipt has no checkout; rerun the measurement.`);
-      }
-      if (!currentTrees.has(event.checkout)) {
-        currentTrees.set(event.checkout, await treeFingerprint(event.checkout));
-      }
-      if (currentTrees.get(event.checkout) !== event.treeFingerprint) {
-        throw new Error(`${task.id}: stale test receipt for ${event.command}; the checkout tree changed after testing. Rerun the check.`);
-      }
-    }
+    for (const event of measuredPasses) await assertFreshReceipt(task.id, event, currentTrees);
 
-    // A measurement can pass and still be inconclusive — a test edited alongside the
-    // code it covers, or new tests asserting a contract nobody has checked against
-    // the acceptance criteria. Those may close, but only into review.
+    // A measurement can pass and still be inconclusive — an existing test whose
+    // assertions were rewritten, or new tests asserting a contract nobody has
+    // checked against the acceptance criteria. Those may close, but only into review.
     const inconclusive = measuredPasses.filter((e) => e.needsHuman === true);
-    if (inconclusive.length > 0 && !options.gate) {
+    if (inconclusive.length > 0 && !toReview) {
       throw new Error(
         `${task.id} has evidence that needs a human, so it cannot go straight to done.\n` +
           inconclusive.map((e) => `  ${e.diagnosis}: ${e.explanation}`).join("\n") +
           `\n  Close it into review instead:\n` +
-          `    awo task complete ${task.id} --outcome success --gate --summary "…"`
+          `    awo task complete ${task.id} --gate --summary "…"`
       );
     }
 
-    if (!priorEvents.some((e) => e.kind === "test")) {
+    const manifest = await readManifest(workspaceRoot);
+    const testHint = (repo: string | undefined): string =>
+      repo && manifest.repos.find((r) => r.name === repo)?.testCommand
+        ? `awo task event ${task.id} test --repo ${repo}`
+        : `awo task event ${task.id} test${repo ? ` --repo ${repo}` : ""} --run "<the command>"`;
+
+    if (measuredPasses.length === 0 && !options.untested) {
+      const claims = priorEvents.filter((e) => e.kind === "test" && e.verified !== true);
+      if (claims.length > 0) {
+        throw new Error(
+          `${task.id} cannot close as success on a test event awo did not run.\n` +
+            `  ${claims.length} test event(s) recorded, none measured.\n` +
+            `  Re-record it as a measurement:\n` +
+            `    awo task event ${task.id} test --run "<the command>" --baseline\n` +
+            `  (rule: tests-must-pass — a claim is not evidence. Published analysis of\n` +
+            `   agent-authored tests found ~80% carry weak or no assertions, so "tests\n` +
+            `   passed" as a string is the weakest signal in the workflow.)`
+        );
+      }
+      if (notRunnable.length > 0) {
+        throw new Error(
+          `${task.id} cannot close as success: the only measured check could not run, which is not evidence.\n` +
+            notRunnable.map((event) => `  ${event.repo ?? "repo"}: ${event.command ?? "test"} (exit ${event.exitCode} at HEAD and at the branch point)`).join("\n") +
+            `\n  Fix the command and rerun it:  ${testHint(task.targets[0])}\n` +
+            `  If tests genuinely cannot run here, say so:  --untested "<why>"`
+        );
+      }
       throw new Error(
         `${task.id} cannot close as success with no test evidence (rule: tests-must-pass).\n` +
-          `Record what ran:  awo task event ${task.id} test --data '{"repo":"<name>","pass":<n>}'\n` +
+          `Measure what verifies it:  ${testHint(task.targets[0])}\n` +
           `If tests genuinely could not run, say so:  --untested "<why>"`
+      );
+    }
+
+    // One target's green suite says nothing about another target's change. Every
+    // repo the run committed to or changed needs its own passing measurement.
+    const changedRepos = [
+      ...new Set(
+        priorEvents
+          .filter((e) => (e.kind === "commit" || e.kind === "repo.diff") && typeof e.repo === "string")
+          .map((e) => e.repo as string)
+          .filter((repo) => task.targets.includes(repo))
+      ),
+    ];
+    const covered = new Set(measuredPasses.map((e) => e.repo));
+    untestedRepos = changedRepos.filter((repo) => !covered.has(repo));
+    if (untestedRepos.length > 0 && !options.untested) {
+      throw new Error(
+        `${task.id} changed ${untestedRepos.join(", ")} but has no passing measured test there.\n` +
+          untestedRepos.map((repo) => `  ${testHint(repo)}`).join("\n") +
+          `\n  If that repo genuinely cannot be tested, say so:  --untested "<why>"`
       );
     }
   }
@@ -775,7 +1000,15 @@ export async function runTaskComplete(
     });
   }
 
-  await appendEvent(workspaceRoot, runId, "run.end", { outcome });
+  // What actually ran, when it was not what run.start resolved: 142 of 145 CRM runs
+  // were recorded as `claude:haiku` while the work was done by Opus or Codex.
+  const actualModel = options.model?.trim() || undefined;
+  const untested = outcome === "success" ? options.untested?.trim() || undefined : undefined;
+  await appendEvent(workspaceRoot, runId, "run.end", {
+    outcome,
+    ...(actualModel ? { actualModel } : {}),
+    ...(untested ? { untested, ...(untestedRepos.length > 0 ? { untestedRepos } : {}) } : {}),
+  });
 
   const finishedAt = new Date().toISOString();
   const durationSec = ts.startedAt
@@ -799,8 +1032,8 @@ export async function runTaskComplete(
     reposChanged = [...task.targets];
   }
 
-  const nextStatus: TaskStatus =
-    outcome === "success" ? (options.gate || goal.completionPolicy.qaRequired ? "in-review" : "done") : "blocked";
+  const nextStatus: TaskStatus = outcome === "success" ? (toReview ? "in-review" : "done") : "blocked";
+  const start = events.find((e) => e.kind === "run.start");
 
   await writeDetail(
     workspaceRoot,
@@ -815,6 +1048,8 @@ export async function runTaskComplete(
       finishedAt,
       durationSec: durationSec ?? "null",
       reposChanged,
+      ...(typeof start?.model === "string" ? { model: start.model } : {}),
+      ...(actualModel ? { actualModel } : {}),
     },
     {
       // Falls back to the brief, so "what was this worker asked to do" is answerable
@@ -826,20 +1061,22 @@ export async function runTaskComplete(
       // is invisible to anyone reading the log later.
       notes: [
         ...(options.note ?? []),
-        ...(options.untested ? [`UNTESTED: ${options.untested}`] : []),
+        ...(options.untested
+          ? [`UNTESTED: ${options.untested}${untestedRepos.length > 0 ? ` (no passing measurement in: ${untestedRepos.join(", ")})` : ""}`]
+          : []),
       ],
     }
   );
 
   // Carry what was resolved at run.start into the index, so a query can group
   // outcomes by tier/model/effort without re-reading every event stream.
-  const start = events.find((e) => e.kind === "run.start");
   await appendIndex(workspaceRoot, {
     runId,
     taskId: task.id,
     agent: task.agent,
     ...(typeof start?.tier === "string" ? { tier: start.tier } : {}),
     ...(typeof start?.model === "string" ? { model: start.model } : {}),
+    ...(actualModel ? { actualModel } : {}),
     ...(typeof start?.effort === "string" ? { effort: start.effort } : {}),
     attempts: ts.attempts,
     status: outcome,
@@ -979,7 +1216,9 @@ export async function runTaskRecheck(
   // said was not its defect. A `pre-existing` failure means one thing only: this
   // command cannot verify this task. That is a `skipped` run, and the task keeps the
   // status it had, because nothing was learned about it either way.
-  const outcome: RunOutcome = passed ? "success" : diagnosis === "pre-existing" ? "skipped" : "failed";
+  // `not-runnable` is the same kind of non-answer: the command never reached a test.
+  const inconclusive = diagnosis === "pre-existing" || diagnosis === "not-runnable";
+  const outcome: RunOutcome = passed ? "success" : inconclusive ? "skipped" : "failed";
 
   await runTaskComplete(task.id, {
     cwd: workspaceRoot,
@@ -989,13 +1228,18 @@ export async function runTaskRecheck(
     // `skipped` closes the run without evidence, which is honest and needs saying.
     untested:
       outcome === "skipped"
-        ? `"${command}" was already failing at the branch point, so it cannot verify this task`
+        ? diagnosis === "not-runnable"
+          ? `"${command}" could not run at HEAD or at the branch point, so it cannot verify this task`
+          : `"${command}" was already failing at the branch point, so it cannot verify this task`
         : undefined,
     // Recheck is verification of already-existing implementation, so the lack of
     // a new diff is expected and must be recorded rather than treated as missing work.
     noChange: passed ? "retrospective verification only; implementation already existed" : undefined,
     summary: passed
       ? `Re-checked with \`${command}\`: ${diagnosis}. Original run closed with no evidence.`
+      : diagnosis === "not-runnable"
+        ? `Re-checked with \`${command}\`, which could not run at HEAD or at the branch point. ` +
+          `Nothing was learned about this task; fix the command and re-check.`
       : diagnosis === "pre-existing"
         ? `Re-checked with \`${command}\`, which fails at the branch point too. Not this task's ` +
           `defect — and not verification either. A command that is already red proves nothing ` +
