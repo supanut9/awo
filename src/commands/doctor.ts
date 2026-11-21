@@ -26,6 +26,7 @@ import {
 import { readEvents, type RunEvent } from "../runs.js";
 import { listWorktrees, unsafeReason } from "../worktrees.js";
 import { redactSecrets } from "../redact.js";
+import { findStaleLocks } from "../file-lock.js";
 import { unwrittenTemplateLines } from "../lifecycle.js";
 import { runAgentOrg } from "./agent-org.js";
 import { readAgentSkills, findInstalled } from "../agent-skills.js";
@@ -947,7 +948,15 @@ export async function runDoctor(
   // ---- stale locks ----
   // INTEGRATION SEAM (Lane D1-7): replace `[]` with `await findStaleLocks(root)` from
   // ../file-lock.js. The finding shape and advice already live in staleLockFindings.
-  const staleLocks: StaleLockReport[] = [];
+  const staleLocks: StaleLockReport[] = (await findStaleLocks(root).catch(() => [])).map((found) => {
+    const owner = (found.owner && typeof found.owner === "object" ? found.owner : {}) as Record<string, unknown>;
+    return {
+      path: found.lock,
+      pid: typeof owner.pid === "number" ? owner.pid : null,
+      host: typeof owner.hostname === "string" ? owner.hostname : typeof owner.host === "string" ? owner.host : null,
+      acquiredAt: typeof owner.acquiredAt === "string" ? owner.acquiredAt : null,
+    };
+  });
   for (const finding of staleLockFindings(root, staleLocks)) add(finding);
 
   // ---- the workspace root as a git repo ----

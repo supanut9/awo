@@ -17,7 +17,10 @@ Sequence for a new ask (`awo req new`), owned by `product-manager`:
    a requirement with no criteria.
 3. **Human approval** — a person reads the criteria and runs
    `awo req approve {{PROJECT_KEY}}-R#` (or `awo req reject {{PROJECT_KEY}}-R# --why "…"`). An agent
-   never approves on its own judgment: approving accepts the terms of the work.
+   never approves on its own judgment: approving accepts the terms of the work. If the
+   human tells an agent to record their approval, the agent says so with
+   `--delegated-by "<name>" --instruction "<their words>"` — awo refuses an agent's
+   approval without it.
 4. **Goal** — only once it is approved: `awo goal new --from {{PROJECT_KEY}}-R#` distils it
    into a goal (objective, definition-of-done, scope/constraints). Pick the
    goal's rigour with `--policy light|standard|strict`.

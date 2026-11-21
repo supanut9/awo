@@ -1,13 +1,13 @@
 {
-  "libraryVersion": "0.7.0",
+  "libraryVersion": "0.7.1",
   "files": {
     ".gitignore": "sha256-0da005fc29c8c4565a967e0ec03a4f9373bbdd7f3d681379541a81326a9bce64",
     ".vscode/settings.json": "sha256-e840a4fd9901e647654b323b9d4945b720a052ab8f4b6166e3e93adfbd12f260",
     ".workspace/agent-skills.json": "sha256-ae40b1bda26101da631ef0b66571ec053d1ced5763cde1774b534b1b9c3fa936",
     ".workspace/connectors.json": "sha256-18da9f76c3a64e26c91f34c769362e62864ea6d5bcf2831b06c8df93cc8afbae",
     ".workspace/credentials/README.md": "sha256-aef0575f4480f67d859290124e87dab06295f7e6e63118555a8f5153bf31f9db",
-    ".workspace/manifest.json": "sha256-8cf970ce906ac8ba932d0f2309794bb6490ccb1ec73b867bac552f28c6717708",
-    "AGENTS.md": "sha256-35f57b53a2b4b6e7d95e84f26c00b2c5faf76ea77ba32837c3242c0992cc648c",
+    ".workspace/manifest.json": "sha256-9d7444210dc7eacd331ff57d6203de7b1f59247caf748a64c25d329faf79e8e6",
+    "AGENTS.md": "sha256-cc5d60687a144035e97035948dcf78c34e1c54437c27f71572020413b86f85c8",
     "CLAUDE.md": "sha256-4f8734db558e89e8960237c3b9890b2b7075c5e751428916dbb1c525b73d1e65",
     "GEMINI.md": "sha256-9a8a2e391feb60d8d69f4fe7579275aef53fef51af3804bf13103b53057a2cad",
     "README.md": "sha256-d1000fb3b2e7f0a1e8309a8409d3bd8310871ff9ce44380ee0cc0f150157a87f",
@@ -26,7 +26,7 @@
     "catalog/skills/review-logs.md": "sha256-6254f76f895f91001a14499576f364d325bdefafb98cbdf5b9eb7a74122d9763",
     "catalog/skills/write-migration.md": "sha256-9532cc22151b0b83777e3035ef1ba99c77ad93e10f36b031d7dc4ca9ecfb3b4f",
     "goals/.gitkeep": "sha256-ced1f7edd6541371185b439b236e18b0ead5a2796245d79e9fe815c21f1d4d39",
-    "instructions/capture-requirement.md": "sha256-3f3fd3b2b02710f3c131996044c729770ca80ca827440067942af81d16685786",
+    "instructions/capture-requirement.md": "sha256-83f685c06e2c1b43473642a7d354cd3e057a210b0fd63e2f48c58c08da52dada",
     "instructions/full-workflow.md": "sha256-e5fb7cff5017d89155bdcc0d3f256ac55ebb87df7597c85e20196a899132ba8f",
     "instructions/plan-a-goal.md": "sha256-cae5450d2815b8fcdaa03926cbb942fd5af579b1522cdcef9894f1144cec3822",
     "instructions/pm-to-pr.md": "sha256-0bf24d2e58c4ed0d00863328ac2156306104d2fbb00d294e60d040d3efed7d35",
@@ -49,12 +49,12 @@
     "skills/chart-the-unknown.md": "sha256-6729d138493ea8394d1f6ed3400befaac734f2be7e1318e7caff534da280b8bf",
     "skills/create-commit.md": "sha256-ad8a58b6f50a6ed51e6b803b9629e4cef419811c693aadedb063f8e796fdd5d5",
     "skills/create-task-worktree.md": "sha256-6b6024ed3ec7e6d1da40581c3d35214b7092b23f0287fee6e0658d755915d80d",
-    "skills/file-bug.md": "sha256-20eb312a02c9907fc2e8bfddf7ad42548434834e24a8048d9b8f6f4988f85b5f",
+    "skills/file-bug.md": "sha256-3f44b9bbcfef54f70a960c5e1a7335ee74f5395328c10706ab5903964854a525",
     "skills/open-pr.md": "sha256-520c0843125a18a338bc1515b2a496ada5c7e191cb3c826df1825a0e2ac44f7f",
     "skills/refine-requirement.md": "sha256-c47a1281149f83ad3d2ce90e951de311defa7744e0058a0735d8dbf220987e0c",
     "skills/resolve-pr.md": "sha256-8a693a3cd7100f03aa4c5d1826b6795e88d9af3275ec521514a2d3f994445b5a",
     "skills/run-tests.md": "sha256-7b2f98a61fcb4ce8b59682ea8e86266796aae28a1a738f47b282c1e3ebe534b0",
     "skills/sync-repos.md": "sha256-9d196199f56b05d495985fb351c616c6708d55c325f63f801c5f2261cf6668db",
-    "skills/verify-acceptance-criteria.md": "sha256-75e38450c6eb74aa2a977807767885d5dbeaff708b186a868ef0d4742881d70d"
+    "skills/verify-acceptance-criteria.md": "sha256-909c0a524a0a39a9298bd2168849a756515e3ee2b86775d6b3633f50e9f12c83"
   }
 }

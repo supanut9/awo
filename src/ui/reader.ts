@@ -6,7 +6,8 @@ import { findGoals, findTasksInGoal, locateTask, type TaskDefinition } from "../
 import { newTaskState, readState, reconcileGoalState, type GoalStatus, type TaskStatus } from "../state.js";
 import { readDay, readDetail, readEvents, readIndex, runSlot, type RunEvent, type RunIndexEntry } from "../runs.js";
 import { runAgentOrg } from "../commands/agent-org.js";
-import { findCriteria, listRequirements, REQ_STATUSES, type Requirement, type ReqStatus } from "../commands/intake.js";
+import { findCriteriaDetailed, listRequirements, REQ_STATUSES, type Requirement, type ReqStatus } from "../commands/intake.js";
+import { traceCriterion } from "../commands/traceability.js";
 import fs from "fs-extra";
 import matter from "gray-matter";
 
@@ -299,13 +300,22 @@ function toView(task: TaskDefinition, state: ReturnType<typeof newTaskState>): T
   };
 }
 
-function coverage(criteria: string[], state?: Awaited<ReturnType<typeof readState>>): RequirementView["criteria"] {
+/**
+ * Coverage the way `goal trace` and readiness count it: labelled evidence follows
+ * its criterion through renumbering, and evidence attached to an earlier wording
+ * does not count. A positional count here showed the board "covered" for criteria
+ * readiness was still blocking on.
+ */
+function coverage(body: string, state?: Awaited<ReturnType<typeof readState>>): RequirementView["criteria"] {
+  const criteria = findCriteriaDetailed(body);
+  if (!state) return { total: criteria.length, covered: 0, exceptions: 0 };
+  const labels = new Set(criteria.map((c) => c.label).filter((label): label is string => label !== null));
   let covered = 0;
   let exceptions = 0;
-  for (let i = 1; i <= criteria.length; i += 1) {
-    const evidence = state?.criteria?.[String(i)] ?? [];
-    if (evidence.some((item) => item.kind === "test" || item.kind === "manual")) covered += 1;
-    else if (evidence.some((item) => item.kind === "exception" && item.acceptedBy?.trim())) exceptions += 1;
+  for (const criterion of criteria) {
+    const status = traceCriterion(state, criterion, labels).status;
+    if (status === "covered") covered += 1;
+    else if (status === "exception") exceptions += 1;
   }
   return { total: criteria.length, covered, exceptions };
 }
@@ -323,7 +333,7 @@ function requirementView(
     source: requirement.source,
     goalId: requirement.goalId,
     file: requirement.file,
-    criteria: coverage(findCriteria(requirement.body), state),
+    criteria: coverage(requirement.body, state),
     archived: requirement.archived ?? false,
   };
 }
@@ -386,9 +396,13 @@ export class FileReader implements WorkspaceReader {
       out.push({
         id: goal.id,
         title: goal.title,
-        status: state.goalStatus === "done"
-          ? (await evaluateGoalReadiness(this.root, goal, raw, tasks)).status
-          : state.goalStatus,
+        // An archived goal shows the status it was filed with: reconciling it again
+        // turned archived `done` goals back into `qa-review` on the board.
+        status: goal.archived && raw.archivedStatus
+          ? raw.archivedStatus
+          : state.goalStatus === "done"
+            ? (await evaluateGoalReadiness(this.root, goal, raw, tasks)).status
+            : state.goalStatus,
         tasks: tasks.map((t) => toView(t, state.tasks[t.id] ?? newTaskState(t.authoredStatus))),
         archived: goal.archived,
       });

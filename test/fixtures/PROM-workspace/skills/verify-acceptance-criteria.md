@@ -22,7 +22,8 @@ After every task under a goal is closed for QA, before the goal is marked `done`
    prose is a claim, and the readiness check treats it as one.
 5. If all criteria are met: record
    `awo goal verdict <goal> --pass --summary "<the verdict in a sentence>" --who "<human>"`.
-   `--summary` is required.
+   `--summary` is required. The verdict belongs to that human: an agent recording it on
+   their instruction adds `--delegated-by "<human>" --instruction "<their words>"`.
 6. If an in-scope gap exists: record `--gap --summary "<the gap>"`; awo creates a
    repair task on the same goal. If a human confirms new scope, use
    `--gap --new-scope --summary "…"` instead.

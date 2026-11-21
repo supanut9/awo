@@ -143,11 +143,12 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 |---|---|
 | `awo init --key <KEY>` | Scaffold a workspace. `<KEY>` prefixes every ID and is permanent. |
 | `awo init --key <KEY> --adopt` | Add awo to a directory that already has a project: keeps every existing file, discovers and registers existing repos. |
-| `awo context [--json]` | Compact orientation digest — run this first in a new session instead of scanning. |
-| `awo doctor` | Version skew, broken links, bad targets, abandoned runs, work claimed without evidence. |
-| `awo upgrade [--dry-run] [--force]` | Adopt the installed awo version: run migrations, three-way merge template changes around your edits, never overwrite them. |
+| `awo context [--json] [--full]` | Compact orientation digest of live work — run this first in a new session instead of scanning. `--full` adds the whole snapshot. |
+| `awo doctor [--scope active\|all] [--secrets] [--json]` | Version skew, broken links, stuck QA, abandoned vs live runs, dangling worktrees, low disk, stale locks, unwritten task bodies, work claimed without evidence — each with the exact fix. |
+| `awo upgrade [--dry-run\|--preview] [--force]` | Adopt the installed awo version: run migrations, three-way merge template changes around your edits, never overwrite them. |
 | `awo resolve [file] [--theirs\|--yours]` | Show the remaining conflicts as a diff and take a side. |
 | `awo rule new <id> --summary <text>` | Add an always-on rule. The AGENTS.md list regenerates itself. |
+| `awo rule\|agent\|skill remove <name> [--force]` | Remove a preset you don't use; refuses while something still references it, and upgrades won't bring it back. |
 | `awo ui [--port]` | Local dashboard: board, run timeline, repos, runs, and analytics by tier/effort. |
 
 **Repos**
@@ -159,36 +160,41 @@ AWO cannot grant or revoke capabilities from an external GitHub credential.
 | `awo list` | Linked repos and their status (present / missing / dirty). |
 | `awo test-command <repo> [cmd]` | Declare how a repo verifies itself. Set it once; the evidence gate uses it. |
 | `awo sync` | Reconcile `repos/` with the manifest — clones what's missing, fast-forwards clean checkouts, never touches dirty ones. |
-| `awo remove <name>` | Unlink. |
+| `awo remove <name> [--delete-checkout] [--dry-run]` | Unregister a repo. A cloned checkout stays on disk unless `--delete-checkout`, which refuses dirty or unpushed work. |
+| `awo worktree list` · `worktree prune [--deps]` | Task worktrees; prune removes merged ones (squash merges included), `--deps` frees `node_modules`/`.next`/`dist` from idle ones. |
 
 **Work**
 
 | Command | Purpose |
 |---|---|
 | `awo req new --title <t>` | Intake: the next `<KEY>-R#`. `--body-file` imports a ticket; `--proposed` skips refinement. |
-| `awo req refine` · `propose` · `approve` · `reject` · `list` | Turn a wish into checkable criteria, then **a human accepts the terms**. `goal new` refuses anything unapproved. |
+| `awo req refine` · `propose` · `approve` · `reject` · `list [--stale <days>]` · `show` | Turn a wish into checkable criteria, then **a human accepts the terms**. `goal new` refuses anything unapproved; an agent recording a human's approval must pass `--delegated-by`. |
 | `awo run --goal <id> [--until <task>] [--yolo]` | Work the plan in dependency order. Stops at the gate, on failure, and always on evidence needing a human. |
-| `awo goal new --from <req>` | Turn a requirement into a goal, moving it in as `requirement.md`. |
+| `awo goal new --from <req> [--policy light\|standard\|strict]` | Turn a requirement into a goal, moving it in as `requirement.md`. The policy sets how much proof `done` needs. |
+| `awo goal show <g>` · `goal list [--needs-verdict]` | One goal's status, coverage, tasks, PRs and worktrees · the live list, or what is waiting on a verdict. |
+| `awo goal close <g> [--dry-run]` | Every blocker between the goal and done as an exact command; when none, archive it and prune its worktrees. |
 | `awo goal list` · `goal trace` · `goal readiness` · `goal verify` · `goal verdict` | Task progress · criterion coverage · completion blockers · attach the QA gate · record its outcome. |
 | `awo goal reconcile <g>` | Persist a conservative authored-task/state repair and log it. |
-| `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`, `--kind`, `--label`. New tasks update state immediately. |
-| `awo task run <id> [--instruction <text>]` | Open a run: resolve dependencies, create the isolated worktree, resolve the model, and **record the brief the worker is given**. |
+| `awo task new --goal <g> --name <n>` | The next `<KEY>-T#`, with `--targets`, `--depends-on`, `--agent`, `--kind`, `--label`, and the body from `--objective`/`--done-when`/`--criteria` or `--body-file`. |
+| `awo task list [goal] [--all] [--json]` · `task show <id> [--json]` | Tasks of live goals · one task with its worktree, base, PRs, owner and last measurement. |
+| `awo task run <id> [--instruction <text>] [--reopen --reason <r>]` | Open a run: resolve dependencies, create the isolated worktree from the fetched base, resolve the model, and **record the brief the worker is given**. Refuses an unwritten body. |
+| `awo task resume <id>` | Hand an open run to a fresh worker: brief, worktrees, events so far, last measurement per repo. |
 | `awo task dispatch <id>` | Open a run **and spawn** the resolved worker, blocking until it exits. |
-| `awo task event <id> <kind>` | Record progress during a run. |
-| `awo task evidence <id> --criterion <n> --kind <test\|manual\|exception> --ref <text>` | Trace evidence to a criterion. Exceptions also require `--who <human>`. |
-| `awo task complete <id> --outcome <o>` | Close it. Governed goals route success to review automatically; `--unchanged <why>` records an intentional no-diff implementation. |
+| `awo task event <id> <kind>` | Record progress. `test --run "<cmd>" --baseline` **measures** (exit 3 on failure, explanation inline); a bare `test` runs the declared `testCommand`. |
+| `awo task evidence <id> --criterion <n,…\|AC-n> --kind <test\|manual\|exception> [--ref <r>]` | Trace evidence to a criterion. `test` binds to a passing measured run of the task; exceptions require `--who <human>`. |
+| `awo task complete <id> --summary <s> [--failed\|--skipped]` | Close it. Governed goals route success to review automatically; `--unchanged <why>` records an intentional no-diff implementation. |
 | `awo task verify <id> [--reject]` | Per-task QA for legacy/non-governed goals. Governed goals finish only through a passing goal verdict. |
 | `awo task recheck <id> --run <cmd>` | Attach real evidence to a task closed without any. Opens a new run; never rewrites the old one. |
-| `awo log list` · `log show` · `log tail` · `log add` | Run history, filterable by task/agent/repo/status/tier/effort. |
+| `awo log list [--limit] [--json]` · `log show <run\|task>` · `log tail [--task <id>]` · `log add "<summary>"` | Run history (open runs included), filterable by task/goal/agent/repo/status/tier/effort. |
 
 **Pull requests**
 
 | Command | Purpose |
 |---|---|
 | `awo pr preflight [--repo <repo>]` | Verify GitHub CLI authentication and linked-repository access. |
-| `awo pr link <task> --repo <repo> --number <n>` · `pr status <task>` | Persist and refresh a task's live PR snapshot. |
-| `awo pr reconcile <task>` | Create repair tasks for newly unresolved GitHub review threads. |
-| `awo pr finalize <task> [--dry-run]` | Enforce merge policy; no AI approval, and merge only as an authorised maintainer. |
+| `awo pr link <task> [--repo] [--number] [--goal <g>]` · `pr status <task>\|--all` | Link and refresh PRs (one per repo; repo and number inferred when unambiguous). A merged PR finishes a non-governed task. |
+| `awo pr reconcile <task>\|--all` | Refresh PRs and file one repair task per pass for new unresolved human review threads (bots skipped). |
+| `awo pr finalize <task> [--repo] [--dry-run]` | Enforce the repo's merge policy and `requiredChecks`; no AI approval, merge only as an authorised maintainer. `--dry-run` writes nothing. |
 
 **Catalog and publishing**
 

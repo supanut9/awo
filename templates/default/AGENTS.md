@@ -27,11 +27,19 @@ awo task new --goal <G> --name "…" --targets <repo> --objective "…" --done-w
 awo task run <T>                                                 open a run: worktree, brief, who should do it
 awo task event <T> test --repo <repo> --run "<cmd>" --baseline   measure — the only test evidence
 awo task event <T> note --message "…"                            progress, a decision, or a blocker
-awo task complete <T> --outcome success --summary "…"            close the run; commits are captured for you
-awo task evidence <T> --criterion <n> --kind test --ref <runId>  tie a measured pass to a criterion
+awo task complete <T> --summary "…"                              close the run (success by default); commits are captured for you
+awo task resume <T>                                              pick up an open run someone else started
+awo task evidence <T> --criterion <n> --kind test               tie the latest measured pass to a criterion
 awo task recheck <T>                                             re-measure a task that is already closed
-awo log add --agent <role> --summary "…"                         record work that is not a task run
+awo goal show <G>                                                status, coverage, tasks, PRs and worktrees
+awo goal close <G> --dry-run                                     what still stands between the goal and done
+awo log tail --task <T>                                          a task's latest run, open runs included
+awo log add "…"                                                  record work that is not a task run
 ```
+
+Human gates (`awo req approve`, `awo goal verdict`) belong to a person. If a human
+tells you to record one for them, say so: `--delegated-by "<name>" --instruction
+"<their words>"`. Never record a decision nobody made.
 
 ## How work is organized
 Work flows down a hierarchy: **Requirement → Goal → Tasks**. Each level is a

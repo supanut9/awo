@@ -42,7 +42,6 @@ import {
 } from "./commands/task.js";
 import { formatEvents, runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { findGoalsNeedingVerdict, formatGoalShow, formatPr, runGoalShow } from "./commands/show.js";
-import { aliasOption, aliasOptions } from "./cli-alias.js";
 import { runUi } from "./commands/ui.js";
 import { parseCriteriaRefs, runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
 import {
