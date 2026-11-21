@@ -151,6 +151,12 @@ test("PR control layer links live GitHub state, traces criteria, repairs reviews
     assert.equal(repeat.code, 0, repeat.stderr);
     assert.doesNotMatch(repeat.stdout, /created:/, "the same review thread must not create duplicate work");
 
+    // finalize merges only work completed in awo; the run itself is not under test here.
+    const stateFile = path.join(workspace, "goals", "TEST-G1-demo", "state.json");
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    state.tasks["TEST-T1"].status = "in-review";
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+
     const blocked = awo(workspace, ["pr", "finalize", "TEST-T1"], github.env);
     assert.equal(blocked.code, 1, blocked.stderr);
     assert.match(blocked.stdout, /blocked/);
@@ -272,7 +278,7 @@ test("a repo can require a gh account, and awo refuses to act as anyone else", (
     const linked = awo(workspace, ["pr", "link", "TEST-T1", "--repo", "api", "--number", "42"], github.env);
     assert.equal(linked.code, 1, "linking as the wrong identity must fail");
     assert.match(linked.stderr, /must be acted on as "supanutOn", but gh is active as "supanut9"/);
-    assert.match(linked.stderr, /gh auth switch --user supanutOn/, "it must give the fix");
+    assert.match(linked.stderr, /gh auth login/, "it must give the fix");
     assert.match(linked.stderr, /not undoable/);
 
     // Nothing was linked, and no PR was touched.

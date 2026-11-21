@@ -84,6 +84,11 @@ export interface PullRequestPolicy {
    * credentials opened it, which is the only assignee awo can infer honestly.
    */
   assignee?: string;
+  /**
+   * Review-thread authors `pr reconcile` never turns into repair work, on top of
+   * bots (which are always skipped). Logins, case-insensitive; a `[bot]` suffix is optional.
+   */
+  ignoreAuthors?: string[];
 }
 
 /**
