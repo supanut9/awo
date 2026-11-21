@@ -55,6 +55,14 @@ export interface GoalDefinition {
   completionPolicy: CompletionPolicy;
   /** True when the goal directory currently sits under `goals/archive/`. */
   archived: boolean;
+  /**
+   * Goal-branch delivery: tasks integrate into this branch (one PR per repo for
+   * the goal) instead of shipping one PR per task. Null means per-task delivery.
+   */
+  deliveryBranch: string | null;
+  /** Per-repo base branch for this goal's work, overriding the manifest's. */
+  baseBranches: Record<string, string>;
+  pullRequestStrategy: "task" | "goal-branch";
 }
 
 /**
@@ -146,6 +154,15 @@ export async function readTaskFile(file: string): Promise<TaskDefinition> {
   };
 }
 
+function stringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "string" && v.trim()) out[k] = v.trim();
+  }
+  return out;
+}
+
 function completionPolicy(value: unknown): CompletionPolicy {
   const policy = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   return {
@@ -189,6 +206,12 @@ export async function findGoals(
       taskIds: tasks.map((t) => t.id),
       completionPolicy: completionPolicy(fm.completionPolicy),
       archived,
+      deliveryBranch:
+        typeof fm.deliveryBranch === "string" && fm.deliveryBranch.trim()
+          ? fm.deliveryBranch.trim()
+          : null,
+      baseBranches: stringRecord(fm.baseBranches),
+      pullRequestStrategy: fm.pullRequestStrategy === "goal-branch" ? "goal-branch" : "task",
     });
   }
   return goals;

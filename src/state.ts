@@ -59,6 +59,39 @@ export interface TaskState {
   blockedReason: string | null;
   /** Runtime link to the PR that implements this task; never authored into task.md. */
   pullRequest?: PullRequestState;
+  /**
+   * Every linked PR keyed by repo, for tasks that span repos. `pullRequest` stays
+   * as the most recently linked one so older readers keep working.
+   */
+  pullRequests?: Record<string, PullRequestState>;
+  /** Who holds the open run — lets doctor/context tell a live run from an abandoned one. */
+  owner?: RunOwner | null;
+  /** Append-only record of lifecycle moves with their reasons (newest last, capped). */
+  transitions?: TransitionRecord[];
+  /** The branch point each target's worktree was cut from, keyed by repo. */
+  base?: Record<string, { ref: string; sha: string | null }>;
+}
+
+export interface RunOwner {
+  runId: string;
+  pid: number | null;
+  host: string;
+  /** `claude` | `codex` | `gemini` | `human` | an AWO_AGENT name. */
+  actor: string;
+  startedAt: string;
+  /** Last time this run recorded anything (event, resume). */
+  heartbeatAt: string;
+}
+
+export interface TransitionRecord {
+  from: TaskStatus;
+  to: TaskStatus;
+  actor: Actor;
+  /** `human`, `claude`, … — who was at the keyboard, not the role. */
+  by: string;
+  reason: string | null;
+  runId: string | null;
+  at: string;
 }
 
 export type PullRequestCheckStatus = "passing" | "failing" | "pending" | "unknown";
@@ -90,6 +123,11 @@ export interface PullRequestState {
   reviews: PullRequestReviewStatus;
   lastCheckedAt: string;
   feedback: Record<string, PullRequestFeedbackState>;
+  /** GitHub's PR state: OPEN | MERGED | CLOSED. Absent on snapshots taken before 0.8. */
+  state?: "OPEN" | "MERGED" | "CLOSED";
+  merged?: boolean;
+  mergedAt?: string | null;
+  mergeCommit?: string | null;
 }
 
 export type CriterionEvidenceKind = "test" | "manual" | "exception";
@@ -101,6 +139,22 @@ export interface CriterionEvidence {
   recordedAt: string;
   /** Exceptions are decisions, not measurements, so name the accepting human. */
   acceptedBy?: string;
+  /** Hash of the criterion text when the evidence was attached — detects edits. */
+  criterionHash?: string;
+  /** The criterion's stable label (`AC-17`) when the requirement declares one. */
+  criterionLabel?: string;
+  /** For `test` evidence: the measured event it points at. */
+  measurement?: {
+    runId: string;
+    command: string;
+    repo: string | null;
+    exitCode: number | null;
+    at: string;
+  };
+  /** False for legacy or free-text references that point at nothing measurable. */
+  verified?: boolean;
+  /** Who attached it: `human`, `claude`, … */
+  by?: string;
 }
 
 export interface GoalQaState {
@@ -114,6 +168,8 @@ export interface GoalQaState {
   /** Human who accepted responsibility for the goal-level decision. */
   verdictBy: string | null;
   model: string | null;
+  /** Set when an agent recorded the verdict on a human's instruction. */
+  delegation?: { by: string; instruction: string | null; via: string } | null;
 }
 
 /** §7.2 — a goal's status is rolled up from its tasks, never hand-authored. */
@@ -138,6 +194,9 @@ export interface GoalState {
   qa?: GoalQaState;
   /** Prior verdicts invalidated by changed evidence, retained for audit. */
   qaHistory?: GoalQaState[];
+  /** Frozen at archive time so later reconciliation cannot rewrite history. */
+  archivedStatus?: GoalStatus;
+  archivedAt?: string;
 }
 
 /** The authored task files are the inventory; state.json supplies their runtime state. */

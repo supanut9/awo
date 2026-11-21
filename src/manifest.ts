@@ -16,6 +16,21 @@ export interface GitRepoEntry {
    * refuse instead of opening a PR as the wrong person, which is not undoable.
    */
   githubAccount?: string;
+  /**
+   * The branch task worktrees are cut from when nothing more specific applies
+   * (a dependency's branch, then the goal's `deliveryBranch`/`baseBranches`).
+   * Absent means the remote's default branch (`origin/HEAD`), fetched first —
+   * never whatever the shared checkout happens to have checked out.
+   */
+  baseBranch?: string;
+  /** Per-repo override of `pullRequests.mergePolicy`. */
+  mergePolicy?: PullRequestMergePolicy;
+  /**
+   * Which checks `pr finalize` waits for. `"none"` declares the repo has no CI, so
+   * an absent check run is not "unknown" — it is expected. A list names the checks
+   * that must pass; others are informational.
+   */
+  requiredChecks?: "none" | string[];
 }
 
 export interface LocalRepoEntry {
@@ -25,6 +40,12 @@ export interface LocalRepoEntry {
   testCommand?: string;
   /** See GitRepoEntry.githubAccount. */
   githubAccount?: string;
+  /** See GitRepoEntry.baseBranch. */
+  baseBranch?: string;
+  /** See GitRepoEntry.mergePolicy. */
+  mergePolicy?: PullRequestMergePolicy;
+  /** See GitRepoEntry.requiredChecks. */
+  requiredChecks?: "none" | string[];
 }
 
 export type RepoEntry = GitRepoEntry | LocalRepoEntry;
@@ -65,6 +86,23 @@ export interface PullRequestPolicy {
   assignee?: string;
 }
 
+/**
+ * How strictly a goal must prove itself before it is `done`.
+ * - `light`: measured checks per task, no per-criterion evidence, no goal verdict.
+ * - `standard`: per-criterion evidence, no goal-level verdict.
+ * - `strict`: per-criterion evidence AND a goal-level QA verdict (the governed default).
+ */
+export type GoalPolicyName = "light" | "standard" | "strict";
+
+export interface GovernancePolicy {
+  /**
+   * May an agent record a human gate (`req approve`, `goal verdict`) on a named
+   * human's instruction (`--delegated-by`)? Default true — delegation is allowed
+   * but always recorded as delegation. `false` makes those gates human-terminal only.
+   */
+  allowDelegation?: boolean;
+}
+
 export interface Manifest {
   libraryVersion: string;
   /**
@@ -81,6 +119,10 @@ export interface Manifest {
   models?: ModelPolicyEntry;
   /** PR authority. Absent preserves the safe human-only default. */
   pullRequests?: PullRequestPolicy;
+  /** Who may pass the human gates, and whether delegation is allowed. */
+  governance?: GovernancePolicy;
+  /** Defaults for new goals. */
+  goals?: { defaultPolicy?: GoalPolicyName };
   /**
    * §7.6 — optional publishing of a projection to MongoDB. Absent means no
    * publishing and no network calls; the connection string never lives here, only
@@ -130,4 +172,24 @@ export function resolvePullRequestMergePolicy(manifest: Manifest): PullRequestMe
     );
   }
   return policy;
+}
+
+/** The effective merge policy for one repo: its own override, else the workspace's. */
+export function resolveRepoMergePolicy(manifest: Manifest, repoName: string): PullRequestMergePolicy {
+  const repo = manifest.repos.find((r) => r.name === repoName);
+  const policy = repo?.mergePolicy ?? resolvePullRequestMergePolicy(manifest);
+  if (policy !== "human-only" && policy !== "authorized-maintainer") {
+    throw new Error(
+      `Invalid mergePolicy "${String(policy)}" on repo ${repoName}. Valid: human-only, authorized-maintainer.`
+    );
+  }
+  return policy;
+}
+
+export function findRepo(manifest: Manifest, repoName: string): RepoEntry | undefined {
+  return manifest.repos.find((r) => r.name === repoName);
+}
+
+export function delegationAllowed(manifest: Manifest): boolean {
+  return manifest.governance?.allowDelegation !== false;
 }
