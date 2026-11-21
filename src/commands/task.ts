@@ -255,7 +255,8 @@ export async function runTaskStatus(
     throw new Error(
       `${task.id} belongs to a governed goal, so one task cannot be approved independently.\n` +
         `  Attach goal-level QA with \`awo goal verify ${goal.id}\`, then record the verdict with\n` +
-        `  \`awo goal verdict ${goal.id} --pass --summary "…" --who "<human>"\`.`
+        `  \`awo goal verdict ${goal.id} --pass --summary "…" --who "<human>"\`\n` +
+        `  (an agent acting on a human's instruction: \`--delegated-by "<human>" --instruction "<their words>"\`).`
     );
   }
   // A parked task with no reason is indistinguishable from a forgotten one.
