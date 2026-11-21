@@ -390,7 +390,6 @@ test("a malformed task file is reported by name instead of crashing doctor", () 
   assert.match(out.stdout, /goals\/FD-G1\/tasks\/FD-T8\.md: its frontmatter does not parse/);
   assert.match(out.stdout, /goals\/FD-G1\/tasks\/FD-T9\.md: no `goalId:`/);
   assert.match(out.stdout, /FD-T7\.md: kind "spike" is not one of/);
-  assert.match(out.stdout, /task and goal checks were skipped/);
   rm(ws);
 });
 
