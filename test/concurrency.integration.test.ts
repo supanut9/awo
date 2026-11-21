@@ -72,7 +72,7 @@ test("a rejected mutation releases its lock without changing the state", async (
   assert.equal((await readState(root, "T-G1")).rev, 1);
 });
 
-test("an interrupted lock owner fails closed until explicit recovery", async (t) => {
+test("a lock fails closed while its owner lives and is reclaimed once that pid is gone", async (t) => {
   const root = await fixture(t);
   const file = path.join(root, "protected.json");
   await fs.writeFile(file, "original");
@@ -85,14 +85,14 @@ test("an interrupted lock owner fails closed until explicit recovery", async (t)
   `], { stdio: ["ignore", "pipe", "pipe"] });
   t.after(async () => { if (child.exitCode === null) child.kill("SIGKILL"); });
   await once(child.stdout!, "data");
-  const exited = once(child, "exit");
-  child.kill("SIGKILL");
-  await exited;
   const { withFileLock, atomicWriteFile } = await import(moduleUrl("file-lock.js"));
   await assert.rejects(withFileLock(file, () => atomicWriteFile(file, "wrong"), 40), /stop all writers/);
   assert.equal(await fs.readFile(file, "utf8"), "original");
-  // The fixture owner is confirmed dead; this models the documented recovery.
-  await fs.rm(`${file}.lock`, { recursive: true });
+  const exited = once(child, "exit");
+  child.kill("SIGKILL");
+  await exited;
+  // The owner was on this host and its pid is gone: provably abandoned, so the
+  // next writer reclaims it instead of waiting for someone to delete it by hand.
   await withFileLock(file, () => atomicWriteFile(file, "recovered"));
   assert.equal(await fs.readFile(file, "utf8"), "recovered");
 });

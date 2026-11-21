@@ -57,7 +57,7 @@ import {
 } from "./commands/pr.js";
 import { runSync, syncHadProblems } from "./commands/sync.js";
 import { doctorExitCode, groupFindings, runDoctor } from "./commands/doctor.js";
-import { listWorktrees, pruneWorktrees, unsafeReason } from "./worktrees.js";
+import { listWorktrees, pruneWorktrees, stripDependencyDirs, unsafeReason } from "./worktrees.js";
 import { readManifest } from "./manifest.js";
 import { findAllTasks } from "./tasks.js";
 import { newTaskState, readState } from "./state.js";
@@ -470,18 +470,21 @@ program
 // skill file asking an agent to do it by hand. Two weeks of real use left 2.0 GB of
 // checkouts for finished tasks. Removal has to be a command, not an instruction.
 /**
- * Tasks in a terminal state, so pruning defaults to work that is provably over.
- * Read from state rather than from the authored `status:`, which is only a
- * starting point (§7.2).
+ * Each task's lifecycle status, read from state rather than from the authored
+ * `status:`, which is only a starting point (§7.2).
  */
-async function finishedTaskIds(root: string): Promise<Set<string>> {
-  const out = new Set<string>();
+async function taskStatuses(root: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
   for (const { task, goal } of await findAllTasks(root)) {
     const state = await readState(goal.dir, goal.id);
-    const status = (state.tasks[task.id] ?? newTaskState(task.authoredStatus)).status;
-    if (status === "done" || status === "cancelled") out.add(task.id);
+    out.set(task.id, (state.tasks[task.id] ?? newTaskState(task.authoredStatus)).status);
   }
   return out;
+}
+
+/** Tasks in a terminal state, so pruning defaults to work that is provably over. */
+function finishedIn(statuses: Map<string, string>): Set<string> {
+  return new Set([...statuses].filter(([, s]) => s === "done" || s === "cancelled").map(([id]) => id));
 }
 
 const worktree = program
@@ -502,9 +505,10 @@ worktree
       for (const w of found) {
         const mb = Math.round(w.bytes / 1024 ** 2);
         const reason = unsafeReason(w);
-        console.log(
-          `${w.path}\t${w.branch ?? "—"}\t${mb}MB\t${reason ? `KEEP — ${reason}` : "safe to remove"}`
-        );
+        const verdict = reason
+          ? `KEEP — ${reason}`
+          : `safe to remove${w.mergedBy ? ` (${w.mergedBy})` : ""}`;
+        console.log(`${w.path}\t${w.branch ?? "—"}\t${mb}MB\t${verdict}`);
       }
       const total = Math.round(found.reduce((a, w) => a + w.bytes, 0) / 1024 ** 2);
       console.log(`\n${found.length} worktree(s), ${total}MB.`);
@@ -517,17 +521,48 @@ worktree
 worktree
   .command("prune")
   .description(
-    "Remove worktrees for finished tasks. Keeps any that is dirty or holds commits no other branch has."
+    "Remove worktrees for finished tasks. Keeps any that is dirty or holds commits that are not merged, pushed or squash-merged. With --deps, strip rebuildable dependency/build directories from idle worktrees instead."
   )
   .option("--task <taskId...>", "prune only these tasks' worktrees")
   .option("--all", "consider every worktree, not only those of finished tasks")
   .option("--force", "remove even a dirty or unmerged worktree — this discards work")
+  .option("--deps", "keep the worktrees; delete their gitignored node_modules/.next/dist/.turbo/.cache/build (idle tasks only)")
   .option("--dry-run", "show what would be removed without touching anything")
-  .action(async (opts: { task?: string[]; all?: boolean; force?: boolean; dryRun?: boolean }) => {
+  .action(async (opts: { task?: string[]; all?: boolean; force?: boolean; deps?: boolean; dryRun?: boolean }) => {
     try {
       const root = findWorkspaceRoot(process.cwd());
       const manifest = await readManifest(root);
-      const finished = await finishedTaskIds(root);
+      const statuses = await taskStatuses(root);
+      const finished = finishedIn(statuses);
+
+      if (opts.deps) {
+        // Default scope is every worktree, not only finished ones: the point is the
+        // disk held by checkouts that must stay, like tasks waiting in review.
+        const running = new Set([...statuses].filter(([, s]) => s === "running").map(([id]) => id));
+        const results = await stripDependencyDirs(root, manifest, {
+          select: (w) => (opts.task ? opts.task.includes(w.leaf) : true),
+          running,
+          dryRun: opts.dryRun,
+        });
+        let freed = 0;
+        for (const r of results) {
+          if (r.skippedBecause) {
+            console.log(`skipped ${r.worktree.path}  (${r.skippedBecause})`);
+            continue;
+          }
+          freed += r.bytes;
+          for (const item of r.removed) {
+            const what = item.link ? "link only" : `${Math.round(item.bytes / 1024 ** 2)}MB`;
+            console.log(`${opts.dryRun ? "would strip" : "stripped"} ${item.path}  (${what})`);
+          }
+        }
+        if (results.length === 0) console.log("No task worktrees to strip.");
+        console.log(
+          `\n${Math.round(freed / 1024 ** 2)}MB ${opts.dryRun ? "would be freed (dry run — nothing was touched)" : "freed"}.` +
+            ` The next \`awo task run\` re-links node_modules; rebuild the rest when you resume a task.`
+        );
+        return;
+      }
 
       const select = (w: { leaf: string }): boolean => {
         if (opts.task) return opts.task.includes(w.leaf);
@@ -544,14 +579,17 @@ worktree
           return;
         }
         for (const w of candidates) {
-          const reason = opts.force ? null : unsafeReason(w);
+          // Mirror pruneWorktrees: --force never removes an active baseline or a
+          // non-empty directory git has no record of.
+          const forced = opts.force && (w.baseline ? !w.active : w.registered || w.empty === true);
+          const reason = forced ? null : unsafeReason(w);
           console.log(`${reason ? "keep  " : "remove"} ${w.path}${reason ? `  (${reason})` : ""}`);
         }
         console.log("\n(dry run — nothing was touched)");
         return;
       }
 
-      const results = await pruneWorktrees(root, manifest, { select, force: opts.force });
+      const results = await pruneWorktrees(root, manifest, { select, force: opts.force, withSizes: true });
       if (results.length === 0) {
         console.log("Nothing to prune.");
         return;
@@ -570,7 +608,7 @@ worktree
       console.log(
         `\n${removed} removed, ${Math.round(freed / 1024 ** 2)}MB freed` +
           (kept > 0
-            ? `; ${kept} kept because they still hold work — inspect them, then \`--force\` if you truly want them gone.`
+            ? `; ${kept} kept because they still hold work — each line says why. Inspect them; \`--force\` discards uncommitted or unmerged work, but awo never deletes what git refused to remove.`
             : ".")
       );
     } catch (err) {
@@ -581,11 +619,24 @@ worktree
 
 program
   .command("remove <name>")
-  .description("Unlink a repo (removes it from the manifest and from repos/).")
-  .action(async (name: string) => {
+  .description(
+    "Unregister a repo. A connected repo loses only its repos/ link; a clone stays on disk unless --delete-checkout."
+  )
+  .option("--delete-checkout", "also delete a cloned checkout — refused unless it is clean, fully pushed and has no task worktrees")
+  .option("--dry-run", "show what would happen without changing anything")
+  .action(async (name: string, opts: { deleteCheckout?: boolean; dryRun?: boolean }) => {
     try {
-      await runRemove({ name });
-      console.log(`Removed ${name}.`);
+      const r = await runRemove({ name, deleteCheckout: opts.deleteCheckout, dryRun: opts.dryRun });
+      const will = r.dryRun ? "would be " : "";
+      const what = {
+        unlinked: `${r.path} ${will}unlinked`,
+        kept: `${r.path} ${will}kept on disk`,
+        deleted: `${r.path} ${will}deleted`,
+        missing: `${r.path} is already gone`,
+      }[r.checkout];
+      console.log(`${r.dryRun ? "Would remove" : "Removed"} ${name} — ${what}.`);
+      for (const note of r.notes) console.log(`  ${note}`);
+      if (r.dryRun) console.log("(dry run — nothing was changed)");
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
