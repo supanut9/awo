@@ -29,6 +29,7 @@ import {
 } from "../state.js";
 import { fallbackHint, invocationHint, resolveModel, type ResolvedModel } from "../models.js";
 import { ensureTaskWorktrees, type Worktree } from "../worktrees.js";
+import { retireQa } from "../qa-history.js";
 import {
   appendEvent,
   appendIndex,
@@ -231,7 +232,11 @@ export async function runTaskStatus(
   await mutateState(goal.dir, goal.id, (state) => {
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
     assertTransition(task.id, ts.status, target, actor);
-    if (ts.status !== target) delete state.qa;
+    if (ts.status !== target) {
+      // The verdict's own transitions rewrite QA right after; anything else retires it.
+      if (options.goalVerdict) delete state.qa;
+      else retireQa(state, `${task.id} moved ${ts.status} -> ${target}`);
+    }
     ts.status = target;
     ts.blockedReason = target === "blocked" ? (options.reason ?? ts.blockedReason) : null;
     state.tasks[task.id] = ts;
@@ -375,7 +380,7 @@ export async function runTaskRun(
 
   await mutateState(goal.dir, goal.id, (s) => {
     // Any new execution makes an earlier goal-level QA brief/verdict stale.
-    delete s.qa;
+    retireQa(s, `${task.id} started run ${runId}`);
     const ts = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
     if (ts.status === "running") throw new Error(`${task.id} is already running (run ${ts.lastRunId}).`);
     if (ts.status === "todo") {

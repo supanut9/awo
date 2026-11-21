@@ -472,8 +472,9 @@ test("goal verify attaches the gate, readiness enforces evidence, and verdict ro
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--gate", "--unchanged", "fixture"]);
   awo(ws, ["task", "run", "PL-T2"]);
   awo(ws, ["task", "complete", "PL-T2", "--outcome", "success", "--gate", "--untested", "no db", "--unchanged", "fixture"]);
+  // Test evidence binds to the measured event, so the ref is that command.
   const evidence = awo(ws, [
-    "task", "evidence", "PL-T1", "--criterion", "1", "--kind", "test", "--ref", "run true",
+    "task", "evidence", "PL-T1", "--criterion", "1", "--kind", "test", "--ref", "true",
   ]);
   assert.equal(evidence.code, 0, evidence.stderr);
 
@@ -492,11 +493,13 @@ test("goal verify attaches the gate, readiness enforces evidence, and verdict ro
   );
   assert.ok(!/--add-dir/.test(v.stdout), "a read-only run needs no write grants");
 
-  // The brief is filed as its own run directory, not loose in logs/.
-  // The brief is a section of the day's runs.md, addressable by its runId.
+  // The gate is a marked run section in the day's runs.md, addressable by its
+  // runId; the brief itself is its own file under logs/<date>/qa/, linked from it.
   const dayMd = fs.readFileSync(onlyDayFile(ws, "runs.md"), "utf8");
   assert.match(dayMd, /awo:run .*_PL-G1 -->/, "the gate brief must be a marked section");
-  const brief = dayMd.slice(dayMd.indexOf("<!-- awo:run"));
+  const briefRel = /brief: {3}(\S+) \(/.exec(v.stdout)?.[1];
+  assert.match(briefRel ?? "", /^logs\/\d{4}-\d{2}-\d{2}\/qa\/.*_PL-G1\.md$/);
+  const brief = fs.readFileSync(path.join(ws, briefRel!), "utf8");
   assert.match(brief, /Judge the goal AS A WHOLE/);
   assert.match(brief, /CONTRACTS BETWEEN them/);
   assert.match(brief, /feature\/PL-T1/);
@@ -896,7 +899,8 @@ test("suspend and cancel move the file out of intake, with the reason recorded",
   awo(ws, ["req", "new", "--title", "Third"]);
   const bare = awo(ws, ["req", "suspend", "PL-R3"]);
   assert.equal(bare.code, 1);
-  assert.match(`${bare.stdout}${bare.stderr}`, /required option '--why/);
+  // Validated by awo rather than commander, so the hidden `--reason` alias counts.
+  assert.match(`${bare.stdout}${bare.stderr}`, /required option '--why|--why is required/);
 
   fs.rmSync(ws, { recursive: true, force: true });
 });

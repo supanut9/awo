@@ -12,6 +12,7 @@ import {
 } from "../models.js";
 import { allocateRunId, writeDetail } from "../runs.js";
 import { mutateState, newTaskState } from "../state.js";
+import { retireQa } from "../qa-history.js";
 
 
 /**
@@ -584,7 +585,7 @@ _What "done" means for this unit._
     await fs.writeFile(goalFile, matter.stringify(parsed.content, fm));
     await mutateState(goal.dir, goal.id, (state) => {
       state.tasks[id] = newTaskState("todo");
-      delete state.qa;
+      retireQa(state, `new task ${id} added to ${goal.id}`);
     });
   } catch (err) {
     await fs.remove(file).catch(() => {});
