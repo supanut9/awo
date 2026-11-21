@@ -2,16 +2,25 @@ import fs from "fs-extra";
 import path from "path";
 import matter from "gray-matter";
 import { findWorkspaceRoot } from "../workspace.js";
-import { readManifest } from "../manifest.js";
-import { findGoals, findAllTasks, TASK_KINDS, type TaskKind } from "../tasks.js";
+import { readManifest, type GoalPolicyName, type Manifest } from "../manifest.js";
+import {
+  findGoals,
+  findAllTasks,
+  TASK_KINDS,
+  type CompletionPolicy,
+  type TaskKind,
+} from "../tasks.js";
 import {
   invocationHint,
   planModeApprovesInSession,
   resolveModel,
+  TIERS,
   type ResolvedModel,
+  type Tier,
 } from "../models.js";
 import { allocateRunId, writeDetail } from "../runs.js";
 import { mutateState, newTaskState } from "../state.js";
+import { atomicWriteFile, withFileLock } from "../file-lock.js";
 
 
 /**
@@ -24,13 +33,33 @@ function requirementPath(root: string, id: string): string {
   return path.join(root, "requirements", `${id}.md`);
 }
 
-async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promise<string> {
-  const used = new Set<number>();
+type IdLetter = "R" | "G" | "T";
+
+/**
+ * The highest number ever issued per id kind, kept beside the manifest.
+ *
+ * Scanning files alone cannot be monotonic: delete the newest task and its number
+ * is free again. A reissued id is not harmless — `task run` reuses an existing
+ * `feature/<id>` branch, so the new task silently starts on the old one's commits.
+ */
+function idCounterFile(root: string): string {
+  return path.join(root, ".workspace", "id-counters.json");
+}
+
+async function readIdCounters(root: string): Promise<Partial<Record<IdLetter, number>>> {
+  const raw = (await fs.readJson(idCounterFile(root)).catch(() => null)) as unknown;
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Partial<Record<IdLetter, number>>)
+    : {};
+}
+
+async function highestUsedId(root: string, key: string, letter: IdLetter): Promise<number> {
+  let highest = 0;
   const pattern = new RegExp(`^${key}-${letter}(\\d+)`);
 
   const consider = (name: string): void => {
     const m = pattern.exec(name);
-    if (m) used.add(Number(m[1]));
+    if (m) highest = Math.max(highest, Number(m[1]));
   };
 
   // `requirements/archive` is included for the same reason the goal folders are
@@ -44,9 +73,12 @@ async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promi
       for (const entry of await fs.readdir(dir)) consider(entry);
     }
   }
+  // findGoals includes goals/archive/, and each goal's taskIds are read from its
+  // task files — so archived work holds on to its numbers too.
   for (const goal of await findGoals(root)) {
     consider(path.basename(goal.dir));
     consider(goal.id);
+    for (const taskId of goal.taskIds) consider(taskId);
 
     // A transformed requirement lives INSIDE the goal folder as
     // requirement.md, so its id is no longer visible in goals/'s listing.
@@ -57,6 +89,8 @@ async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promi
       unknown
     >;
     if (typeof goalFm.requirementId === "string") consider(goalFm.requirementId);
+    // A task deleted from disk is still named here until someone edits it out.
+    if (Array.isArray(goalFm.taskIds)) goalFm.taskIds.forEach((t) => consider(String(t)));
 
     const reqFile = path.join(goal.dir, "requirement.md");
     if (await fs.pathExists(reqFile)) {
@@ -64,11 +98,48 @@ async function nextId(root: string, key: string, letter: "R" | "G" | "T"): Promi
       if (typeof reqFm.id === "string") consider(reqFm.id);
     }
   }
-  for (const { task } of await findAllTasks(root)) consider(task.id);
+  return highest;
+}
 
-  let n = 1;
-  while (used.has(n)) n += 1;
-  return `${key}-${letter}${n}`;
+/**
+ * Allocate the next id — highest ever used + 1, never a gap — and create what it
+ * names while holding the allocation lock.
+ *
+ * Gap-filling reissued numbers that had already meant something, and nothing
+ * serialized allocation: two `task new` calls at the same moment could compute the
+ * same "next" id, and the second write would replace the first file. Creation
+ * happens inside the lock so the next allocator sees the file, and every create
+ * uses an exclusive flag so anything the scan missed fails loudly instead.
+ */
+async function withNextId<T>(
+  root: string,
+  key: string,
+  letter: IdLetter,
+  create: (id: string) => Promise<T>
+): Promise<T> {
+  return withFileLock(idCounterFile(root), async () => {
+    const counters = await readIdCounters(root);
+    const issued = typeof counters[letter] === "number" ? counters[letter]! : 0;
+    const n = Math.max(await highestUsedId(root, key, letter), issued) + 1;
+    const result = await create(`${key}-${letter}${n}`);
+    await atomicWriteFile(idCounterFile(root), `${JSON.stringify({ ...counters, [letter]: n }, null, 2)}\n`);
+    return result;
+  });
+}
+
+/** Write a file that must not exist yet. */
+async function createExclusive(root: string, file: string, text: string): Promise<void> {
+  await fs.ensureDir(path.dirname(file));
+  try {
+    await fs.writeFile(file, text, { flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    throw new Error(
+      `${path.relative(root, file)} already exists, so its id cannot be issued again. Nothing was overwritten.\n` +
+        `  A file placed there by hand is invisible to id allocation until it has a matching \`id:\`; ` +
+        `fix or move it, then re-run the command.`
+    );
+  }
 }
 
 export interface ReqNewResult {
@@ -87,8 +158,6 @@ export async function runReqNew(options: {
 }): Promise<ReqNewResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const { projectKey } = await readManifest(root);
-  const id = await nextId(root, projectKey, "R");
-  const file = requirementPath(root, id);
 
   // Frontmatter is serialized by the YAML library, never string-interpolated:
   // a title or source containing ":" or "#" would otherwise produce a file
@@ -97,10 +166,12 @@ export async function runReqNew(options: {
     ? await fs.readFile(path.resolve(options.cwd ?? process.cwd(), options.bodyFile), "utf8")
     : "";
 
-  const body = matter.stringify(
-    imported
-      ? `\n# ${options.title}\n\n${imported.trim()}\n`
-      : `\n# ${options.title}\n\n## Raw requirement
+  return withNextId(root, projectKey, "R", async (id) => {
+    const file = requirementPath(root, id);
+    const body = matter.stringify(
+      imported
+        ? `\n# ${options.title}\n\n${imported.trim()}\n`
+        : `\n# ${options.title}\n\n## Raw requirement
 _Verbatim of what was asked._
 
 ## Clarifications
@@ -109,39 +180,84 @@ _Q&A gathered during intake._
 ## Draft acceptance criteria
 - _…_
 `,
-    {
-      id,
-      type: "requirement",
-      title: options.title,
-      // `--proposed` says a human already specified this, so it skips refinement —
-      // but never approval. Only a person can accept the terms of the work.
-      status: options.proposed ? "proposed" : "draft",
-      source: options.source ?? "unspecified",
-      createdAt: new Date().toISOString(),
-      goalId: null,
-    }
-  );
-
-  await fs.ensureDir(path.dirname(file));
-  await fs.writeFile(file, body);
-  return { id, file: path.relative(root, file) };
+      {
+        id,
+        type: "requirement",
+        title: options.title,
+        // `--proposed` says a human already specified this, so it skips refinement —
+        // but never approval. Only a person can accept the terms of the work.
+        status: options.proposed ? "proposed" : "draft",
+        source: options.source ?? "unspecified",
+        createdAt: new Date().toISOString(),
+        goalId: null,
+      }
+    );
+    await createExclusive(root, file, body);
+    return { id, file: path.relative(root, file) };
+  });
 }
 
 export interface GoalNewResult {
   id: string;
   dir: string;
   requirementId: string;
+  policy: GoalPolicyName;
   /** The asset directory carried in with the requirement, if it had one. */
   movedAssets: string | null;
+}
+
+/**
+ * How strictly a goal proves itself, by name (see `GoalPolicyName`).
+ *
+ * Every goal used to be strict, so a workspace that did not want a QA verdict for a
+ * one-line change got there by editing `completionPolicy` by hand after the fact —
+ * the only goals that ever reached `done` in one workspace did exactly that.
+ * Choosing at creation is the honest version of the same decision.
+ */
+export const GOAL_POLICIES: Record<GoalPolicyName, CompletionPolicy> = {
+  light: { qaRequired: false, acceptanceEvidenceRequired: false },
+  standard: { qaRequired: false, acceptanceEvidenceRequired: true },
+  strict: { qaRequired: true, acceptanceEvidenceRequired: true },
+};
+
+/** Why a task or goal exists — planned up front, or found by a later step. */
+export const ORIGINS = ["plan", "qa-gap", "pr-feedback", "follow-up"] as const;
+export type Origin = (typeof ORIGINS)[number];
+
+function assertOrigin(origin: string | undefined): Origin {
+  if (origin === undefined) return "plan";
+  if (!ORIGINS.includes(origin as Origin)) {
+    throw new Error(`Unknown origin "${origin}". Valid: ${ORIGINS.join(", ")}.`);
+  }
+  return origin as Origin;
+}
+
+function resolveGoalPolicy(manifest: Manifest, requested: string | undefined): GoalPolicyName {
+  const declared = manifest.goals?.defaultPolicy;
+  const name = requested ?? declared ?? "strict";
+  if (!(name in GOAL_POLICIES)) {
+    throw new Error(
+      requested !== undefined
+        ? `Unknown --policy "${requested}". Valid: ${Object.keys(GOAL_POLICIES).join(", ")}.`
+        : `Invalid goals.defaultPolicy "${String(declared)}" in .workspace/manifest.json. ` +
+            `Valid: ${Object.keys(GOAL_POLICIES).join(", ")}.`
+    );
+  }
+  return name as GoalPolicyName;
 }
 
 export async function runGoalNew(options: {
   from: string;
   title?: string;
   cwd?: string;
+  /** light | standard | strict; defaults to `goals.defaultPolicy`, else strict. */
+  policy?: string;
+  origin?: string;
 }): Promise<GoalNewResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
-  const { projectKey } = await readManifest(root);
+  const manifest = await readManifest(root);
+  const policy = resolveGoalPolicy(manifest, options.policy);
+  const origin = assertOrigin(options.origin);
 
   const reqFile = requirementPath(root, options.from);
   if (!(await fs.pathExists(reqFile))) {
@@ -167,14 +283,6 @@ export async function runGoalNew(options: {
     );
   }
 
-  const parsed = matter(await fs.readFile(reqFile, "utf8"));
-  const fm = parsed.data as Record<string, unknown>;
-  const title = options.title ?? (typeof fm.title === "string" ? fm.title : options.from);
-
-  const id = await nextId(root, projectKey, "G");
-  // Directory is the ID alone. A slug here was truncated at 40 characters, so real
-  // titles produced names cut mid-word with a trailing hyphen, and editing a title
-  // would have stranded the path. The title lives in frontmatter, where it can change.
   // §16 — the gate. Planning from an unapproved requirement is how a wish becomes
   // six tasks and a broken feature: every task inherits the ambiguity, and the cost
   // of resolving it multiplies by the number of workers already building on it.
@@ -193,33 +301,33 @@ export async function runGoalNew(options: {
     );
   }
 
-  const dir = path.join(root, "goals", id);
-  await fs.ensureDir(path.join(dir, "tasks"));
+  return withNextId(root, manifest.projectKey, "G", async (id) => {
+    // Read inside the lock: two `goal new --from` on one requirement would otherwise
+    // both pass the check above and plan it twice.
+    if (!(await fs.pathExists(reqFile))) {
+      throw new Error(`${options.from} was planned by another \`awo goal new\` a moment ago. Nothing was written.`);
+    }
+    const parsed = matter(await fs.readFile(reqFile, "utf8"));
+    const fm = parsed.data as Record<string, unknown>;
+    const title = options.title ?? (typeof fm.title === "string" ? fm.title : options.from);
 
-  // The requirement moves into the goal folder, becoming requirement.md (§4).
-  fm.goalId = id;
-  await fs.writeFile(path.join(dir, "requirement.md"), matter.stringify(parsed.content, fm));
-  await fs.remove(reqFile);
+    // Directory is the ID alone. A slug here was truncated at 40 characters, so real
+    // titles produced names cut mid-word with a trailing hyphen, and editing a title
+    // would have stranded the path. The title lives in frontmatter, where it can change.
+    const dir = path.join(root, "goals", id);
+    await fs.ensureDir(path.dirname(dir));
+    // Not ensureDir: an existing directory is a collision to refuse, not reuse.
+    try {
+      await fs.mkdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      throw new Error(`goals/${id}/ already exists, so ${id} cannot be issued again. Nothing was written.`);
+    }
 
-  // A requirement and the files it links are one artifact, so the sibling asset
-  // directory moves with it.
-  //
-  // It did not, and the document's relative links then resolved to nothing:
-  // SHOP-R2 lost all nine of its Figma exports on 2026-08-03, they were moved by
-  // hand, and the workspace grew a shell script and a required rule to stop it
-  // happening again. That is a lot of process for a directory rename.
-  const assets = path.join(root, "requirements", `${options.from}-assets`);
-  const movedAssets = (await fs.pathExists(assets))
-    ? await fs
-        .move(assets, path.join(dir, `${options.from}-assets`), { overwrite: false })
-        .then(() => true)
-        .catch(() => false)
-    : false;
-
-  await fs.writeFile(
-    path.join(dir, "goal.md"),
-    matter.stringify(
-      `\n## Objective
+    try {
+      await fs.ensureDir(path.join(dir, "tasks"));
+      await createExclusive(root, path.join(dir, "goal.md"), matter.stringify(
+        `\n## Objective
 _One paragraph: the outcome we want._
 
 ## Definition of done
@@ -242,28 +350,55 @@ _Short rationale for how this goal splits into its tasks._
      question is a decision task, a vague area belongs here. See skills/chart-the-unknown.
      Delete this section when the goal was never foggy. -->
 `,
-      {
-        id,
-        title,
-        status: "planning",
-        requirementId: options.from,
-        targets: [],
-        taskIds: [],
-        completionPolicy: {
-          qaRequired: true,
-          acceptanceEvidenceRequired: true,
-        },
-        createdAt: new Date().toISOString(),
-      }
-    )
-  );
+        {
+          id,
+          title,
+          // No authored `status:`. state.json is canonical, and a `status: planning`
+          // written once and never updated outlived the planning phase in 93 of 113
+          // goal files in the largest workspace — readers believed it.
+          requirementId: options.from,
+          targets: [],
+          taskIds: [],
+          completionPolicy: { ...GOAL_POLICIES[policy] },
+          origin,
+          createdAt: new Date().toISOString(),
+        }
+      ));
 
-  return {
-    id,
-    dir: path.relative(root, dir),
-    requirementId: options.from,
-    movedAssets: movedAssets ? `${options.from}-assets` : null,
-  };
+      // The requirement moves into the goal folder, becoming requirement.md (§4).
+      fm.goalId = id;
+      await createExclusive(root, path.join(dir, "requirement.md"), matter.stringify(parsed.content, fm));
+    } catch (err) {
+      // The requirement is still in intake, so the half-made goal is the only thing
+      // to undo.
+      await fs.remove(dir).catch(() => {});
+      throw err;
+    }
+    await fs.remove(reqFile);
+
+    // A requirement and the files it links are one artifact, so the sibling asset
+    // directory moves with it.
+    //
+    // It did not, and the document's relative links then resolved to nothing:
+    // SHOP-R2 lost all nine of its Figma exports on 2026-08-03, they were moved by
+    // hand, and the workspace grew a shell script and a required rule to stop it
+    // happening again. That is a lot of process for a directory rename.
+    const assets = path.join(root, "requirements", `${options.from}-assets`);
+    const movedAssets = (await fs.pathExists(assets))
+      ? await fs
+          .move(assets, path.join(dir, `${options.from}-assets`), { overwrite: false })
+          .then(() => true)
+          .catch(() => false)
+      : false;
+
+    return {
+      id,
+      dir: path.relative(root, dir),
+      requirementId: options.from,
+      policy,
+      movedAssets: movedAssets ? `${options.from}-assets` : null,
+    };
+  });
 }
 
 export interface GoalPlanResult {
@@ -466,15 +601,22 @@ function buildPlanBrief(input: {
     `  \`awo agent list\` shows what is still in the catalog; schema and data-model`,
     `  work belongs to \`data-engineer\`, not \`software-engineer\`.`,
     `- **kind** — implementation, investigation, verification, decision, or`,
-    `  deployment-data. Evidence requirements follow from it.`,
-    `- **tier: high** on a task whose work needs judgment even though its role`,
+    `  deployment-data. Evidence requirements follow from it. Investigation and`,
+    `  decision work changes no repo: omit --targets, name what it delivers with`,
+    `  --output <path>.`,
+    `- **criteria** — which of the requirement's acceptance criteria it serves`,
+    `  (1-based numbers, or AC-<n> labels). The worker's brief shows exactly those.`,
+    `- **--tier high** on a task whose work needs judgment even though its role`,
     `  normally runs low (e.g. "define the data model").`,
     "",
     `Create each one with:`,
-    `  awo task new --goal ${input.goalId} --name "…" --targets <repo> [--depends-on <id>] [--agent <role>] [--kind <kind>]`,
+    `  awo task new --goal ${input.goalId} --name "…" --targets <repo> --objective "…" \\`,
+    `    --done-when "…" "…" [--criteria 1,3] [--depends-on <id>] [--agent <role>] [--kind <kind>] [--tier high]`,
     `It allocates the id, places the file, validates targets, and wires the goal's`,
     `taskIds. Do NOT hand-author task files or invent ids — the command owns both.`,
-    `Then fill in each file's Objective / Steps / Done when.`,
+    `--objective and --done-when become the body, so no task is created as an`,
+    `unwritten template. For a longer body, write the markdown to a file and pass`,
+    `--body-file <path> (or --body-file - to read stdin) instead.`,
     "",
     `Leave every task in \`todo\`. Planning does not start work.`,
     "",
@@ -497,6 +639,76 @@ export interface TaskNewResult {
   goalId: string;
 }
 
+/** The skeleton a task gets when nobody says what it is for. */
+const TASK_TEMPLATE_BODY = `\n## Objective
+_What "done" means for this unit._
+
+## Steps
+1. _…_
+
+## Done when
+- _…_
+`;
+
+/** Kinds whose work changes no repo, so a task may legitimately have no targets. */
+const TARGETLESS_KINDS: readonly TaskKind[] = ["investigation", "decision"];
+
+/**
+ * The task body from what the author supplied.
+ *
+ * 22% of first briefs in the largest workspace were the unwritten skeleton: the
+ * planner ran `task new`, meant to fill the file in afterwards, and the worker was
+ * dispatched first. Taking the objective and done-when at creation means a body
+ * built from flags is finished the moment it exists — it carries no placeholder.
+ */
+function composeTaskBody(options: { body?: string; objective?: string; doneWhen?: string[] }): string {
+  const doneWhen = (options.doneWhen ?? []).map((d) => d.trim()).filter(Boolean);
+  const objective = options.objective?.trim() ?? "";
+  if (options.body !== undefined) {
+    if (objective || doneWhen.length > 0) {
+      throw new Error(
+        `Pass either a body (--body-file) or --objective/--done-when, not both — ` +
+          `the body file would silently replace them. Put the objective in the file.`
+      );
+    }
+    const text = options.body.trim();
+    if (!text) throw new Error(`The task body is empty. Write the Objective and Done when, or drop --body-file.`);
+    if (matter.test(text)) {
+      throw new Error(
+        `The task body starts with its own frontmatter. Pass only the markdown body — ` +
+          `awo writes the frontmatter (id, goalId, targets, …) itself.`
+      );
+    }
+    return `\n${text}\n`;
+  }
+  if (!objective && doneWhen.length === 0) return TASK_TEMPLATE_BODY;
+  return (
+    "\n" +
+    [
+      objective ? `## Objective\n${objective}\n` : "",
+      doneWhen.length > 0 ? `## Done when\n${doneWhen.map((d) => `- ${d}`).join("\n")}\n` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+}
+
+/** `--criteria 1,3,AC-17` → [1, 3, "AC-17"]. */
+export function parseCriteriaRefs(values: string[]): (number | string)[] {
+  return values
+    .flatMap((v) => v.split(","))
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((v) => {
+      if (/^\d+$/.test(v) && Number(v) >= 1) return Number(v);
+      if (/^AC-\d+$/i.test(v)) return v.toUpperCase();
+      throw new Error(
+        `--criteria takes the goal's acceptance-criterion numbers (1-based) or AC-<n> labels, ` +
+          `comma-separated (e.g. --criteria 1,3 or --criteria AC-17); got "${v}".`
+      );
+    });
+}
+
 export async function runTaskNew(options: {
   goal: string;
   name: string;
@@ -506,8 +718,23 @@ export async function runTaskNew(options: {
   kind?: TaskKind;
   /** PR labels for this task. Applied only if the repo already has them (§18). */
   labels?: string[];
-  /** Used by control-plane commands that create a task from external feedback. */
+  /** The whole markdown body — from `--body-file`, or a control-plane command. */
   body?: string;
+  /** Builds the body instead of the skeleton. Not combinable with `body`. */
+  objective?: string;
+  doneWhen?: string[];
+  /** Goal acceptance criteria this task serves: 1-based numbers or AC-<n> labels. */
+  criteria?: (number | string)[];
+  tier?: string;
+  /** What the task delivers besides commits, e.g. a research document. */
+  outputs?: string[];
+  origin?: string;
+  /**
+   * Refuse a task with no targets unless its kind changes no repo. Set by the CLI;
+   * control-plane callers (a QA gap, PR feedback) derive targets themselves, and a
+   * verdict must not fail half-way because a goal declared none.
+   */
+  enforceTargets?: boolean;
   cwd?: string;
 }): Promise<TaskNewResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
@@ -516,6 +743,12 @@ export async function runTaskNew(options: {
   if (options.kind && !TASK_KINDS.includes(options.kind)) {
     throw new Error(`Unknown task kind "${options.kind}". Valid: ${TASK_KINDS.join(", ")}.`);
   }
+  if (options.tier !== undefined && !TIERS.includes(options.tier as Tier)) {
+    throw new Error(`Unknown tier "${options.tier}". Valid: ${TIERS.join(", ")}.`);
+  }
+  const origin = assertOrigin(options.origin);
+  const kind = options.kind ?? "implementation";
+  const body = composeTaskBody(options);
 
   const goals = await findGoals(root);
   const goal = goals.find((g) => g.id === options.goal);
@@ -542,55 +775,95 @@ export async function runTaskNew(options: {
     if (!exists) throw new Error(`dependsOn references unknown task "${dep}".`);
   }
 
-  const id = await nextId(root, manifest.projectKey, "T");
-  const file = path.join(goal.dir, "tasks", `${id}.md`);
-  const taskBody = matter.stringify(
-    options.body ?? `\n## Objective
-_What "done" means for this unit._
+  // A repo the author only mentioned in prose gets no worktree, so implementation
+  // work with no targets has nowhere to happen. Investigation and decision work
+  // changes no repo, which is why those two kinds may leave targets empty.
+  if (options.enforceTargets && (options.targets ?? []).length === 0 && !TARGETLESS_KINDS.includes(kind)) {
+    throw new Error(
+      `${kind} work needs at least one target repo: --targets <repo>` +
+        (known.size > 0 ? ` (linked: ${[...known].join(", ")})` : ` — link one first with \`awo connect\`/\`awo add\``) +
+        `.\n  Work that changes no repo is --kind investigation or --kind decision, which may omit --targets.`
+    );
+  }
 
-## Steps
-1. _…_
+  const criteria = options.criteria ?? [];
+  if (criteria.length > 0) await assertCriteriaExist(root, goal.id, goal.dir, criteria);
 
-## Done when
-- _…_
-`,
-    {
+  return withNextId(root, manifest.projectKey, "T", async (id) => {
+    const file = path.join(goal.dir, "tasks", `${id}.md`);
+    const taskBody = matter.stringify(body, {
       id,
       goalId: goal.id,
       name: options.name,
       targets: options.targets ?? [],
       dependsOn: options.dependsOn ?? [],
       ...(options.agent ? { agent: options.agent } : {}),
-      kind: options.kind ?? "implementation",
-      status: "todo",
-    }
-  );
-
-  // Keep the goal's taskIds in sync — it's the down-link in the traceability
-  // chain, and nothing else maintains it.
-  const goalFile = path.join(goal.dir, "goal.md");
-  const originalGoal = await fs.readFile(goalFile, "utf8");
-  const parsed = matter(originalGoal);
-  const fm = parsed.data as Record<string, unknown>;
-  const ids = Array.isArray(fm.taskIds) ? fm.taskIds.map(String) : [];
-  if (!ids.includes(id)) ids.push(id);
-  fm.taskIds = ids;
-
-  // These three writes are one logical operation. Roll authored files back if
-  // the atomic state writer fails, so a stored `done` goal cannot survive beside
-  // newly-created work (the real SHOP-G12 failure).
-  await fs.writeFile(file, taskBody);
-  try {
-    await fs.writeFile(goalFile, matter.stringify(parsed.content, fm));
-    await mutateState(goal.dir, goal.id, (state) => {
-      state.tasks[id] = newTaskState("todo");
-      delete state.qa;
+      kind,
+      ...(options.tier ? { tier: options.tier } : {}),
+      ...(criteria.length > 0 ? { criteria } : {}),
+      ...(options.outputs?.length ? { outputs: options.outputs } : {}),
+      ...(options.labels?.length ? { labels: options.labels } : {}),
+      // No authored `status:` — a new task is `todo`, the default, and state.json
+      // owns every status after that. A frontmatter `status: todo` beside a task
+      // that has been done for a month is a claim nobody maintains.
+      origin,
+      createdAt: new Date().toISOString(),
     });
-  } catch (err) {
-    await fs.remove(file).catch(() => {});
-    await fs.writeFile(goalFile, originalGoal).catch(() => {});
-    throw err;
-  }
 
-  return { id, file: path.relative(root, file), goalId: goal.id };
+    // Keep the goal's taskIds in sync — it's the down-link in the traceability
+    // chain, and nothing else maintains it. Inside the allocation lock, so two
+    // concurrent `task new` on one goal cannot each drop the other's id.
+    const goalFile = path.join(goal.dir, "goal.md");
+    const originalGoal = await fs.readFile(goalFile, "utf8");
+    const parsed = matter(originalGoal);
+    const fm = parsed.data as Record<string, unknown>;
+    const ids = Array.isArray(fm.taskIds) ? fm.taskIds.map(String) : [];
+    if (!ids.includes(id)) ids.push(id);
+    fm.taskIds = ids;
+
+    // These three writes are one logical operation. Roll authored files back if
+    // the atomic state writer fails, so a stored `done` goal cannot survive beside
+    // newly-created work (the real SHOP-G12 failure).
+    await createExclusive(root, file, taskBody);
+    try {
+      await fs.writeFile(goalFile, matter.stringify(parsed.content, fm));
+      await mutateState(goal.dir, goal.id, (state) => {
+        state.tasks[id] = newTaskState("todo");
+        delete state.qa;
+      });
+    } catch (err) {
+      await fs.remove(file).catch(() => {});
+      await fs.writeFile(goalFile, originalGoal).catch(() => {});
+      throw err;
+    }
+
+    return { id, file: path.relative(root, file), goalId: goal.id };
+  });
+}
+
+/**
+ * A criterion reference that points at nothing is caught here, at authoring time,
+ * for the same reason an unlinked target is: the brief would otherwise hand the
+ * worker a criterion that does not exist.
+ */
+async function assertCriteriaExist(
+  root: string,
+  goalId: string,
+  goalDir: string,
+  refs: (number | string)[]
+): Promise<void> {
+  const reqFile = path.join(goalDir, "requirement.md");
+  if (!(await fs.pathExists(reqFile))) return;
+  const content = matter(await fs.readFile(reqFile, "utf8")).content;
+  const { findCriteria } = await import("./intake.js");
+  const count = findCriteria(content).length;
+  const missing = refs.filter((ref) =>
+    typeof ref === "number" ? ref > count : !new RegExp(`\\b${ref}\\b`, "i").test(content)
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `${goalId} has no acceptance criterion ${missing.join(", ")} — ` +
+        `${path.relative(root, reqFile)} lists ${count}. Check the numbering with \`awo goal trace ${goalId}\`.`
+    );
+  }
 }

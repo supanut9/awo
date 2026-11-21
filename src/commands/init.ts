@@ -23,6 +23,11 @@ const KEY_PATTERN = /^[A-Z][A-Z0-9]{1,4}$/;
 
 export interface InitOptions {
   key: string;
+  /**
+   * The human-facing name. It defaulted to the key with no way to set it, so an
+   * agent hand-edited manifest.json to give the project its real name.
+   */
+  name?: string;
   cwd?: string;
   /**
    * Adopt a directory that already holds a project.
@@ -55,6 +60,11 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     throw new Error(
       `Invalid --key "${key}": must be 2-5 uppercase chars, starting with a letter (e.g. PROM, AB12).`
     );
+  }
+
+  const projectName = options.name?.trim();
+  if (options.name !== undefined && !projectName) {
+    throw new Error(`--name must not be empty. Omit it to use the key (${key}) as the project name.`);
   }
 
   if (!(await fs.pathExists(TEMPLATE_DIR))) {
@@ -124,6 +134,12 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     const original = await fs.readFile(file, "utf8");
     const updated = renderTemplate(original, values);
     if (updated !== original) await fs.writeFile(file, updated, "utf8");
+  }
+
+  if (projectName) {
+    const manifest = await readManifest(targetDir);
+    manifest.projectName = projectName;
+    await writeManifest(targetDir, manifest);
   }
 
   // §17 — generate the rules/skills/agents lists from what was actually laid down,

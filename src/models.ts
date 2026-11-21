@@ -63,7 +63,9 @@ export interface ModelChoice {
    * Reasoning budget, not permission mode (§12.7). This is what thinking-heavy
    * work actually wants, and it is the only way to tier when an account has just
    * one model available: same model, more thinking. Codex takes it as
-   * `-c model_reasoning_effort=<effort>`.
+   * `-c model_reasoning_effort=<effort>`. It is Codex-only: no Claude or Gemini
+   * invocation passes it, so wherever it is printed it says so (`describeModel`)
+   * rather than implying a Claude run thinks harder because of it.
    */
   effort?: string;
   /**
@@ -101,10 +103,19 @@ export interface ResolvedModel extends ModelChoice {
   source: "agent-model" | "byRole" | "tier" | "fallback";
 }
 
+/**
+ * Built-in models when the manifest declares no tier policy.
+ *
+ * `low` resolves to sonnet, not haiku. The cheap tier's own numbers argued against
+ * it: 50% success at 4.1 attempts per task (§9 item 53), and two of the three real
+ * workspaces that ran long enough to notice had already overridden `tiers.low`. A
+ * saving handed back in retries is not a saving, so the default stops paying it. A
+ * workspace that wants haiku says so in `models.tiers.low`.
+ */
 const FALLBACK: Record<Tier, ModelChoice> = {
   high: { runtime: "claude", model: "opus" },
   standard: { runtime: "claude", model: "sonnet" },
-  low: { runtime: "claude", model: "haiku" },
+  low: { runtime: "claude", model: "sonnet" },
 };
 
 export const DEFAULT_ORCHESTRATOR: ModelChoice = {
@@ -135,6 +146,8 @@ export interface AgentDefinition {
   id: string;
   tier: Tier | null;
   model: ModelChoice | null;
+  /** Frontmatter `skills:` — what the role should open before it starts. */
+  skills: string[];
   reportsTo: string | null;
   delegatesTo: string[];
   reviews: string[];
@@ -203,6 +216,7 @@ export async function readAgent(workspaceRoot: string, id: string): Promise<Agen
       id,
       tier: parseTier(fm.tier),
       model: parseChoice(fm.model),
+      skills: relationshipList(fm.skills),
       reportsTo: typeof fm.reportsTo === "string" ? fm.reportsTo : null,
       delegatesTo: relationshipList(fm.delegatesTo),
       reviews: relationshipList(fm.reviews),
@@ -355,6 +369,40 @@ export function fallbackHint(
   );
 }
 
+/**
+ * A path or literal inside double quotes, safe to paste into a POSIX shell.
+ *
+ * The hints used to interpolate paths bare, so a workspace under a directory with a
+ * space produced a command that split into two arguments, and a test command with
+ * its own quotes produced one that did not parse at all.
+ */
+export function shellQuote(value: string): string {
+  return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
+}
+
+/**
+ * A prompt inside double quotes. Unlike a path, `$` is left live on purpose: the
+ * plan and gate hints hand over `"$(awo log show <runId>)"`, which only works if
+ * the shell substitutes it.
+ */
+function quotePrompt(prompt: string): string {
+  return `"${prompt.replace(/(["\\`])/g, "\\$1")}"`;
+}
+
+/**
+ * One line for "which model, how hard": effort is labelled Codex-only on any other
+ * runtime, because only `codex exec` receives it. Printing `claude:sonnet
+ * effort=high` read as a promise the Claude invocation never made.
+ */
+export function describeModel(choice: Pick<ModelChoice, "runtime" | "model" | "effort" | "mode">): string {
+  const effort = !choice.effort
+    ? ""
+    : choice.runtime === "codex"
+      ? ` effort=${choice.effort}`
+      : ` effort=${choice.effort} (Codex-only; not passed to ${choice.runtime})`;
+  return `${choice.runtime}:${choice.model}${effort}${choice.mode ? ` (${choice.mode} mode)` : ""}`;
+}
+
 function invocationFor(
   runtime: string,
   model: string,
@@ -363,12 +411,16 @@ function invocationFor(
   effort?: string,
   context: WorkerContext = {}
 ): string {
-  const prompt = context.prompt ?? `Follow instructions/ship-a-change.md for ${taskId}.`;
-  const cwd = context.cwd ? ` -C ${context.cwd}` : "";
+  const prompt = quotePrompt(context.prompt ?? `Follow instructions/ship-a-change.md for ${taskId}.`);
   // A read-only run needs no write grants; passing them would contradict the intent.
   const allow = context.readOnly
     ? ""
-    : (context.allow ?? []).map((p) => ` --add-dir ${p}`).join("");
+    : (context.allow ?? []).map((p) => ` --add-dir ${shellQuote(p)}`).join("");
+  // Claude Code and Gemini have no "run in this directory" flag — the `-C` this hint
+  // used to print is Codex's, so the Claude form was never runnable as printed.
+  // Changing directory first is the form every runtime accepts. "." is where the
+  // command is already being run, so it needs no prefix.
+  const cd = context.cwd && context.cwd !== "." ? `cd ${shellQuote(context.cwd)} && ` : "";
 
   // `mode: "plan"` may also arrive from the manifest's models policy, per role. It
   // used to be honoured for Claude and dropped on the floor for every other runtime,
@@ -382,16 +434,17 @@ function invocationFor(
       // Codex cannot lift its sandbox on approval, so planning is read-only for the
       // whole process and executing is a second invocation.
       const sandbox = context.readOnly || planning ? " -s read-only" : " -s workspace-write";
-      return `codex exec -m ${model}${eff}${sandbox}${cwd}${allow} "${prompt}"`;
+      const cwd = context.cwd ? ` -C ${shellQuote(context.cwd)}` : "";
+      return `codex exec -m ${model}${eff}${sandbox}${cwd}${allow} ${prompt}`;
     }
     case "gemini":
-      return `gemini -m ${model} -p "${prompt}"`;
+      return `${cd}gemini -m ${model} -p ${prompt}`;
     default: {
       // Claude has no read-only sandbox flag; plan mode is the nearest equivalent.
       // For the QA gate it is exactly right — a reviewer should propose, not act —
       // and for planning it is the approval gate itself (§12.7).
       const m = context.readOnly || planning ? " --permission-mode plan" : "";
-      return `claude --model ${model}${m}${cwd}${allow} "${prompt}"`;
+      return `${cd}claude --model ${model}${m}${allow} ${prompt}`;
     }
   }
 }

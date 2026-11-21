@@ -266,7 +266,7 @@ test("ID allocation skips numbers already used by hand-authored files", () => {
       `---\nid: PL-T${n}\ngoalId: PL-G1\nname: Manual ${n}\nstatus: todo\n---\n\nx\n`
     );
   }
-  const next = awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Third"]);
+  const next = awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Third", "--targets", "api"]);
   assert.equal(next.code, 0, next.stderr);
   assert.match(next.stdout, /PL-T3 created/);
   fs.rmSync(ws, { recursive: true, force: true });

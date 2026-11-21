@@ -47,7 +47,9 @@ function workspaceWithGoal(): { root: string; goalId: string; taskId: string } {
   awo(root, ["req", "propose", "TST-R1"]);
   awo(root, ["req", "approve", "TST-R1", "--who", "tester"]);
   awo(root, ["goal", "new", "--from", "TST-R1"]);
-  awo(root, ["task", "new", "--goal", "TST-G1", "--name", "Do the thing"]);
+  // No repo is linked here, so the task is one that changes none (0.8 requires a
+  // target for implementation work).
+  awo(root, ["task", "new", "--goal", "TST-G1", "--name", "Do the thing", "--kind", "investigation"]);
   return { root, goalId: "TST-G1", taskId: "TST-T1" };
 }
 
@@ -138,7 +140,7 @@ test("a stored `done` that no longer matches its tasks does not count as archiva
   state.goalStatus = "done";
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 
-  awo(root, ["task", "new", "--goal", goalId, "--name", "Added after the fact"]);
+  awo(root, ["task", "new", "--goal", goalId, "--name", "Added after the fact", "--kind", "investigation"]);
 
   assert.doesNotMatch(awo(root, ["context"]), /to archive/);
   assert.match(awoFails(root, ["goal", "archive", goalId]), /would hide live work/);

@@ -27,8 +27,9 @@ import {
   type RunOutcome,
   type TaskStatus,
 } from "../state.js";
-import { fallbackHint, invocationHint, resolveModel, type ResolvedModel } from "../models.js";
+import { fallbackHint, invocationHint, resolveModel, shellQuote, type ResolvedModel } from "../models.js";
 import { ensureTaskWorktrees, type Worktree } from "../worktrees.js";
+import { briefContext } from "../brief-context.js";
 import {
   appendEvent,
   appendIndex,
@@ -239,34 +240,174 @@ export async function runTaskStatus(
   return target;
 }
 
-/**
- * The instruction a worker receives. Composed by awo rather than by whoever is
- * driving, so it is identical whether a human pastes it or `dispatch` spawns it —
- * and so it is always in the log.
- */
-export function composeBrief(input: {
+/** What the brief says about one target repo. A fact that is absent is not printed. */
+export interface BriefTarget {
+  repo: string;
+  /** The task worktree, when one was established. */
+  worktree?: string | null;
+  branch?: string | null;
+  /** The repo's declared testCommand. Absent means the worker asks — never invents. */
+  testCommand?: string | null;
+  /** The branch point the worktree was cut from, when the run recorded one. */
+  base?: { ref: string; sha?: string | null } | null;
+  /** Effective per-repo merge policy (`resolveRepoMergePolicy`). */
+  mergePolicy?: string;
+}
+
+export interface BriefInput {
   taskId: string;
   agent: string | null;
   body: string;
   branch?: string;
   isolated: boolean;
   instruction?: string;
-}): string {
-  return [
-    `You are ${input.agent ?? "software-engineer"} working task ${input.taskId}.`,
-    `Follow instructions/ship-a-change.md and the workspace's rules in AGENTS.md.`,
-    input.isolated
-      ? `You are in an isolated git worktree on ${input.branch}. Work ONLY here — never in repos/<name> directly.`
-      : `WARNING: no worktree isolation was established. Be conservative.`,
-    `Record what you ran with \`awo task event ${input.taskId} test --run "<cmd>" --baseline\` —`,
-    `a claim that tests passed is refused at the gate. Then commit on this branch.`,
-    `Do not push and do not open a PR.`,
-    input.instruction ? `\n## From the orchestrator\n${input.instruction}` : "",
-    "",
-    input.body,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  goalId?: string;
+  /** Per-target facts. Undefined means "not gathered", not "no targets". */
+  targets?: BriefTarget[];
+  /** Skill files to open first, from the agent's frontmatter `skills:`. */
+  skills?: string[];
+  /** The goal's acceptance criteria this task serves — all of them when it declares none. */
+  criteria?: { ref: string; text: string }[];
+  /** Whether `criteria` is the task's declared subset or the goal's whole list. */
+  criteriaDeclared?: boolean;
+  /** Criteria left out to keep the brief short, and where to read them. */
+  criteriaOmitted?: { count: number; file: string };
+  /** What the task delivers besides commits (`--output`). */
+  outputs?: string[];
+}
+
+const MERGE_POLICY_MEANING: Record<string, string> = {
+  "human-only": "a human approves and merges",
+  "authorized-maintainer": "a maintainer may merge once required checks and reviews pass",
+};
+
+/**
+ * The instruction a worker receives. Composed by awo rather than by whoever is
+ * driving, so it is identical whether a human pastes it or `dispatch` spawns it —
+ * and so it is always in the log.
+ *
+ * It names who does what. The old brief said "do not push" and, in the next breath,
+ * told the worker to follow instructions/ship-a-change.md — which had that same
+ * worker open the PR. It also omitted what the worker most needed: only 4.9% of
+ * briefs named a skill and 23% of measurements used the repo's declared
+ * testCommand, because the brief said `--run "<cmd>"` and left the command to be
+ * guessed.
+ */
+export function composeBrief(input: BriefInput): string {
+  const id = input.taskId;
+  const targets = input.targets;
+  const sections: string[] = [];
+
+  sections.push(
+    [
+      `You are ${input.agent ?? "software-engineer"} working task ${id}${input.goalId ? ` (goal ${input.goalId})` : ""}.`,
+      `Follow the worker steps in instructions/ship-a-change.md and the workspace's rules in AGENTS.md.`,
+      input.isolated
+        ? `You are in an isolated git worktree on ${input.branch}. Work ONLY here — never in repos/<name> directly.`
+        : targets && targets.length === 0
+          ? `This task changes no repo, so it has no worktree.`
+          : `WARNING: no worktree isolation was established. Be conservative.`,
+    ].join("\n")
+  );
+
+  if (input.instruction) sections.push(`## From the orchestrator\n${input.instruction}`);
+
+  const job: string[] = ["## Your job (worker)"];
+  if (targets && targets.length === 0) {
+    job.push(
+      input.outputs?.length
+        ? `1. Deliver: ${input.outputs.join(", ")}.`
+        : `1. Find the answer or make the decision the task asks for.`,
+      `2. Record progress and findings as you go:  awo task event ${id} note --message "…"`,
+      `3. Close the run:  awo task complete ${id} --outcome success --summary "<the finding or decision>"`
+    );
+  } else if (targets) {
+    job.push(`1. Work only in:`);
+    for (const t of targets) {
+      const base = t.base?.ref ? `, cut from ${t.base.ref}${t.base.sha ? ` @ ${t.base.sha.slice(0, 7)}` : ""}` : "";
+      job.push(
+        t.worktree
+          ? `   - ${t.repo}: ${t.worktree} on ${t.branch ?? `feature/${id}`}${base}`
+          : `   - ${t.repo}: no worktree was established — ask the orchestrator before editing repos/${t.repo}`
+      );
+    }
+    job.push(`2. Measure every target — a claim that tests passed is refused at the gate:`);
+    for (const t of targets) {
+      job.push(
+        t.testCommand
+          ? `   awo task event ${id} test --repo ${t.repo} --run ${shellQuote(t.testCommand)} --baseline`
+          : `   ${t.repo}: no testCommand is declared — ask the orchestrator which command verifies it; do not invent one.`
+      );
+    }
+    job.push(
+      `3. Commit on the task branch. Commits and diffs are captured automatically — do not record them as events.`,
+      `4. Close the run:  awo task complete ${id} --outcome success --summary "<what changed, how it was verified>"`,
+      `   (--outcome failed --summary "<what stopped you>" if you could not finish)`
+    );
+    if (input.outputs?.length) job.push(`   Also deliver: ${input.outputs.join(", ")}.`);
+  } else {
+    job.push(
+      `1. Measure what you change:  awo task event ${id} test --run "<cmd>" --baseline`,
+      `   A claim that tests passed is refused at the gate.`,
+      `2. Commit on this branch, then close the run:  awo task complete ${id} --outcome success --summary "…"`
+    );
+  }
+  job.push(`Do NOT push, open, or merge a PR unless the orchestrator's instruction says so.`);
+  sections.push(job.join("\n"));
+
+  const byPolicy = new Map<string, string[]>();
+  for (const t of targets ?? []) {
+    if (t.mergePolicy) byPolicy.set(t.mergePolicy, [...(byPolicy.get(t.mergePolicy) ?? []), t.repo]);
+  }
+  sections.push(
+    [
+      `## Not your job (orchestrator)`,
+      `Pushing and PRs (open, link, reconcile, finalize), acceptance evidence, and the goal's QA verdict —`,
+      `the orchestrator steps in instructions/ship-a-change.md.`,
+      ...(byPolicy.size > 0
+        ? [
+            `Merge policy: ${[...byPolicy]
+              .map(([policy, repos]) =>
+                `${policy} for ${repos.join(", ")}${MERGE_POLICY_MEANING[policy] ? ` (${MERGE_POLICY_MEANING[policy]})` : ""}`
+              )
+              .join("; ")}.`,
+          ]
+        : []),
+    ].join("\n")
+  );
+
+  if (input.skills?.length) {
+    sections.push(`## Skills to open first\n${input.skills.map((s) => `- ${s}`).join("\n")}`);
+  }
+
+  if (input.criteria?.length) {
+    const goal = input.goalId ? ` (${input.goalId})` : "";
+    sections.push(
+      [
+        input.criteriaDeclared
+          ? `## Acceptance criteria this task serves${goal}`
+          : `## Goal acceptance criteria${goal} — this task declares none, so read them all`,
+        ...input.criteria.map((c) => `${c.ref}. ${c.text}`),
+        ...(input.criteriaOmitted
+          ? [`… ${input.criteriaOmitted.count} more in ${input.criteriaOmitted.file}`]
+          : []),
+      ].join("\n")
+    );
+  }
+
+  const card: [string, string][] = [
+    [`awo task event ${id} test --repo <repo> --run "<cmd>" --baseline`, "measure — the only test evidence the gate accepts"],
+    [`awo task event ${id} note --message "…"`, "progress, a decision, or a blocker"],
+    [`awo task complete ${id} --outcome success --summary "…"`, "close your run"],
+    [`awo task evidence ${id} --criterion <n> --kind test --ref <runId>`, "tie a measured pass to a criterion"],
+    [`awo task recheck ${id}`, "re-measure a task that is already closed"],
+    [`awo log add --agent <role> --summary "…"`, "record work that is not this task"],
+  ];
+  const width = Math.max(...card.map(([cmd]) => cmd.length));
+  sections.push(`## Command card\n${card.map(([cmd, what]) => `${cmd.padEnd(width)}  ${what}`).join("\n")}`);
+
+  sections.push(input.body);
+  return sections.filter(Boolean).join("\n\n");
 }
 
 export interface TaskRunResult {
@@ -458,6 +599,7 @@ export async function runTaskRun(
     branch: worktrees.find((w) => !w.error)?.branch,
     isolated,
     instruction: options.instruction,
+    ...(await briefContext(workspaceRoot, manifest, task, goal, usable)),
   });
   await appendEvent(workspaceRoot, runId, "brief", {
     text: brief,
