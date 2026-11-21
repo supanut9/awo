@@ -9,21 +9,23 @@ summary: give a task its own isolated git worktree + branch.
 ---
 
 ## When to use
-Before implementing any task, for each repo in that task's `targets` —
-right after `sync-repos`, before touching any files.
+Before implementing any task, for each repo in that task's `targets`.
 
 ## Steps
-1. For each target repo, check whether a worktree already exists at
-   `repos/.worktrees/<repo-name>/<taskId>`. If so, reuse it — do not recreate.
-2. If not, create the task branch (`feature/<taskId>-<slug>`) off the
-   repo's declared `ref`, then:
-   `git -C repos/<repo-name> worktree add ../.worktrees/<repo-name>/<taskId> feature/<taskId>-<slug>`
-3. All implementation, commits, and pushes for this task happen **inside
-   that worktree path** — never in `repos/<repo-name>` directly.
+1. `awo task run <taskId>` creates the worktree for every target — you do not.
+   Each one is at `repos/.worktrees/<repo>/<taskId>` on branch
+   `feature/<taskId>`, cut from the dependency's branch when the task has one.
+   Running it again for the same task reuses the same checkout.
+2. Read the path from the brief (or `awo task show <taskId>`). Never create a
+   worktree or branch by hand: a hand-made path is invisible to `awo worktree`
+   and to the gate, and an invented one has landed outside the gitignored
+   `repos/` tree before.
+3. All implementation and commits for this task happen **inside that worktree
+   path** — never in `repos/<repo>` directly.
 
 ## Done when
-- The task has its own worktree + branch, isolated from every other task
-  currently active on the same repo.
+- You are working in the worktree `awo task run` reported, isolated from every
+  other task currently active on the same repo.
 
 ## Cleanup
 Do **not** remove a worktree by hand. `awo` owns this:

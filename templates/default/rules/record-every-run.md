@@ -10,8 +10,11 @@ Work that is not recorded did not happen, as far as the audit trail is
 concerned. Before you report finishing anything, make sure it left a log entry.
 
 - **Task work:** `awo task run` opens the run and `awo task complete` closes it,
-  writing the log for you. Report progress in between with `awo task event` so
-  the record shows *what* happened, not just that something did.
+  writing the log for you. In between, measure with `awo task event <id> test
+  --run "<cmd>" --baseline` and note progress with `awo task event <id> note
+  --message "…"`, so the record shows *what* happened, not just that something
+  did. Commits and diffs are captured from git automatically — do not record
+  them as events.
 - **Everything else — intake, planning, QA verdicts, audits, one-off prompts:**
   nothing logs it automatically. Finish with
   `awo log add --agent <your-role> --summary "<what you did>"`, adding

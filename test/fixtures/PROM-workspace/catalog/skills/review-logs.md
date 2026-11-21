@@ -10,7 +10,9 @@ requires:
 Periodically, or for a specific goal/time range under audit.
 
 ## Steps
-1. Start from a goal (or a date range in `logs/index.jsonl`).
+1. Start from a goal (`awo log list --task <id>`), or a date range: each day is
+   `logs/<date>/runs.jsonl` (events and one row per run) and
+   `logs/<date>/runs.md` (the written records).
 2. Trace PROM-G# → its PROM-T#s → each task's run(s) → log detail.
 3. Confirm: commits followed `conventional-commits`; no direct pushes to
    main; PRs met `pr-requirements`; `run-tests` passed before shipping;

@@ -49,16 +49,21 @@ Sequence for `awo goal plan {{PROJECT_KEY}}-G#`, owned by `tech-lead` (preceded 
    think of them — the ordering is what `awo context` uses to tell the next session
    what is actually takeable.
 4. Create each task with `awo task new --goal {{PROJECT_KEY}}-G# --name "…" --targets <repo>
-   [--depends-on {{PROJECT_KEY}}-T#] [--agent <agent>]`. It allocates the next task ID,
-   places the file under `tasks/`, validates `targets` against the manifest, and
-   wires the goal's `taskIds`. Then fill in Objective / Steps / Done when.
+   --objective "…" --done-when "…" "…" [--criteria 1,3] [--depends-on {{PROJECT_KEY}}-T#]
+   [--agent <agent>] [--kind <kind>]`. It allocates the next task ID, places the
+   file under `tasks/`, validates `targets` against the manifest, and wires the
+   goal's `taskIds`. `--objective` / `--done-when` write the body, so no task
+   waits as an unwritten template; for a longer body pass `--body-file <path>`
+   (`-` reads stdin). `--criteria` names the acceptance criteria the task serves,
+   and the worker's brief shows exactly those. Investigation and decision tasks
+   change no repo: omit `--targets` and name what they deliver with `--output`.
    Do NOT hand-author task files or invent IDs — the command owns both.
    - **Pick the right role.** `awo agent list` shows what is installed and what is
      still in the catalog; `awo agent add <name>` installs one. Schema/data-model
      work belongs to `data-engineer`, not `software-engineer` — install it rather
      than assigning data work to an implementer.
-   - **Flag thinking-heavy work.** A task's model tier follows its role, so add
-     `tier: high` to a task whose work needs judgment even though the role
+   - **Flag thinking-heavy work.** A task's model tier follows its role, so pass
+     `--tier high` for a task whose work needs judgment even though the role
      normally runs low (e.g. "define the data model"). See §12.
 5. Leave tasks in `todo` status for human review before `awo task run`
    is used (draft → approve gate).

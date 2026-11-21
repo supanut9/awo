@@ -12,9 +12,10 @@ Only after a human confirms that a QA gap is outside the approved goal scope.
 In-scope gaps stay on the goal as repair tasks.
 
 ## Steps
-1. Run `awo goal verdict <goal> --gap --new-scope --summary "…" --who "<human>"`,
-   with `source` noting which goal/task surfaced it.
-2. Set `status: refined` if the gap is already well-understood, else `draft`.
+1. Run `awo goal verdict <goal> --gap --new-scope --summary "…" --who "<human>"`.
+   It files the new requirement as a `draft`, with `source` naming the goal.
+2. If the gap is already well understood, write its acceptance criteria and
+   `awo req propose` it; otherwise leave it for `refine-requirement`.
 3. Link back: reference the originating `goalId`/`taskId` in the body so the
    bug's provenance is traceable.
 

@@ -38,13 +38,13 @@ next, so you don't spend tokens scanning the tree.
 | `awo req suspend PROM-R# --why "…"` / `req cancel … --why "…"` | Park it, or drop it. Both move the file to `requirements/archive/`. |
 | `awo req resume PROM-R#` | Bring a shelved requirement back into intake, at the status it left from. |
 | `awo req list [--all\|--archived]` | Intake by default; the shelved ones on request. |
-| `awo goal new --from PROM-R#` | Distil an approved requirement into a goal. |
+| `awo goal new --from PROM-R# [--policy light\|standard\|strict]` | Distil an approved requirement into a goal; the policy decides how it must prove itself. |
 | `awo goal plan PROM-G#` | Brief the tech-lead to decompose it — in plan mode, so you approve the breakdown before any task exists. |
-| `awo task new --goal PROM-G# --name "…" --targets <repo> --kind implementation` | Add a typed task; allocates `PROM-T#` and updates state. |
-| `awo task run PROM-T#` | Open a run: creates the worktree, prints the model to use. |
-| `awo task event PROM-T# test --data '{"repo":"…","pass":42}'` | Record what ran. |
-| `awo task complete PROM-T# --outcome success` | Close it; governed goals route success to review automatically. |
-| `awo task evidence PROM-T# --criterion 1 --kind test --ref "<run or command>"` | Trace task evidence to an acceptance criterion. |
+| `awo task new --goal PROM-G# --name "…" --targets <repo> --objective "…" --done-when "…"` | Add a typed task with its body written; allocates `PROM-T#` and updates state. |
+| `awo task run PROM-T#` | Open a run: creates the worktree, prints the brief and the model to use. |
+| `awo task event PROM-T# test --repo <repo> --run "<testCommand>" --baseline` | Have awo run and measure the tests — the only test evidence the gate accepts. |
+| `awo task complete PROM-T# --outcome success --summary "…"` | Close it; governed goals route success to review automatically. Commits are captured for you. |
+| `awo task evidence PROM-T# --criterion 1 --kind test --ref <runId>` | Trace task evidence to an acceptance criterion. |
 | `awo goal trace PROM-G#` | Show criterion coverage and any accepted exceptions. |
 | `awo goal readiness PROM-G#` | Show all task, criterion, and QA blockers. |
 | `awo goal reconcile PROM-G#` | Persist and log authored-task/state repair. |

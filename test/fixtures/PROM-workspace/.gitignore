@@ -11,6 +11,11 @@
 **/state.json.lock/
 **/state.json.*.tmp
 /.workspace/run-id-reservations/
+/.workspace/id-counters.json.lock/
+
+# Per-machine notes and agent scratch space inside the workspace — never shared
+/.workspace/local/
+/.workspace/scratch/
 
 # Connector credentials / secrets — never commit the contents,
 # but keep the folder + its README so the "no config in ~" rule is documented

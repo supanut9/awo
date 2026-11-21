@@ -4,6 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { Command } from "commander";
 import { findWorkspaceRoot } from "./workspace.js";
+import { describeModel } from "./models.js";
 import {
   findCriteria,
   isArchivedStatus,
@@ -36,7 +37,7 @@ import {
 import { aliasOption } from "./cli-alias.js";
 import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
-import { runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
+import { parseCriteriaRefs, runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
 import {
   runGoalArchive,
   runGoalRestore,
@@ -119,14 +120,17 @@ program
   .command("init")
   .description("Scaffold a new awo workspace in the current directory.")
   .requiredOption("--key <key>", "short, permanent project code (2-5 uppercase letters, e.g. PROM)")
+  .option("--name <projectName>", "human-readable project name (default: the key)")
   .option(
     "--adopt",
     "add awo to a directory that already has a project: keeps every existing file, discovers repos"
   )
-  .action(async (opts: { key: string; adopt?: boolean }) => {
+  .action(async (opts: { key: string; name?: string; adopt?: boolean }) => {
     try {
-      const r = await runInit({ key: opts.key, adopt: opts.adopt });
-      console.log(`awo workspace initialized with project key ${opts.key}.`);
+      const r = await runInit({ key: opts.key, name: opts.name, adopt: opts.adopt });
+      console.log(
+        `awo workspace initialized with project key ${opts.key}${opts.name ? ` (${opts.name.trim()})` : ""}.`
+      );
 
       if (r.adoptedRepos.length > 0) {
         console.log(`\nAdopted ${r.adoptedRepos.length} repo(s) into repos/:`);
@@ -885,13 +889,20 @@ goal
   .description("Turn a requirement into a goal folder, moving it in as requirement.md.")
   .requiredOption("--from <reqId>", "requirement to transform (e.g. PROM-R1)")
   .option("--title <title>", "goal title (defaults to the requirement's)")
-  .action(async (opts: { from: string; title?: string }) => {
+  .option(
+    "--policy <policy>",
+    "light (measured tasks only) | standard (+ per-criterion evidence) | strict (+ goal QA verdict); default goals.defaultPolicy, else strict"
+  )
+  .option("--origin <origin>", "why it exists: plan (default) | qa-gap | pr-feedback | follow-up")
+  .action(async (opts: { from: string; title?: string; policy?: string; origin?: string }) => {
     try {
       const g = await runGoalNew(opts);
-      console.log(`${g.id} created at ${g.dir}/ (from ${g.requirementId})`);
+      console.log(`${g.id} created at ${g.dir}/ (from ${g.requirementId}, ${g.policy} policy)`);
       // Say it, so a reader knows the document's relative links still resolve.
       if (g.movedAssets) console.log(`  brought ${g.movedAssets}/ along with it`);
-      console.log(`Then add tasks: awo task new --goal ${g.id} --name "…" --targets <repo>`);
+      console.log(
+        `Then add tasks: awo task new --goal ${g.id} --name "…" --targets <repo> --objective "…" --done-when "…"`
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -940,9 +951,7 @@ goal
     try {
       const r = await runGoalPlan(goalId, opts);
       console.log(`brief:   awo log show ${r.briefRunId}`);
-      console.log(
-        `model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}  (high tier — decomposition is judgment work)`
-      );
+      console.log(`model:   ${describeModel(r.model)}  (high tier — decomposition is judgment work)`);
       console.log(`targets: ${r.targets.join(", ") || "none declared in the goal"}`);
       if (r.existingTasks.length > 0) {
         console.log(`exists:  ${r.existingTasks.join(", ")} — the planner is told not to recreate these`);
@@ -1153,13 +1162,20 @@ const task = program.command("task").description("Inspect and run tasks (§7.2/�
 
 task
   .command("new")
-  .description("Create the next task skeleton under a goal (allocates <KEY>-T# and wires taskIds).")
+  .description("Create the next task under a goal (allocates <KEY>-T# and wires taskIds).")
   .requiredOption("--goal <goalId>", "goal this task belongs to")
   .requiredOption("--name <name>", "what the task does")
-  .option("--targets <repos>", "comma-separated repo names from the manifest", (v) => v.split(","))
+  .option("--targets <repos>", "comma-separated repo names from the manifest (optional for investigation/decision)", (v) => v.split(","))
   .option("--depends-on <taskIds>", "comma-separated task ids that must finish first", (v) => v.split(","))
   .option("--agent <agent>", "agent that should run it")
   .option("--kind <kind>", "evidence contract: implementation, investigation, verification, decision, deployment-data")
+  .option("--objective <text>", "the outcome, written into the body as ## Objective")
+  .option("--done-when <text...>", "checkable completion conditions, written into the body as ## Done when")
+  .option("--body-file <path>", "the whole markdown body from a file, or - to read it from stdin")
+  .option("--criteria <refs>", "goal acceptance criteria this task serves: 1-based numbers or AC-<n>, comma-separated")
+  .option("--tier <tier>", "override the role's model tier for this task: high | standard | low")
+  .option("--output <path...>", "what it delivers besides commits, e.g. docs/research/options.md")
+  .option("--origin <origin>", "why it exists: plan (default) | qa-gap | pr-feedback | follow-up")
   .option("--label <name...>", "PR labels for this task — applied only if the repo already has them")
   .action(
     async (opts: {
@@ -1169,11 +1185,45 @@ task
       dependsOn?: string[];
       agent?: string;
       kind?: "implementation" | "investigation" | "verification" | "decision" | "deployment-data";
+      objective?: string;
+      doneWhen?: string[];
+      bodyFile?: string;
+      criteria?: string;
+      tier?: string;
+      output?: string[];
+      origin?: string;
       label?: string[];
     }) => {
     try {
-      const t = await runTaskNew(opts);
+      const body =
+        opts.bodyFile === undefined
+          ? undefined
+          : opts.bodyFile === "-"
+            ? fs.readFileSync(0, "utf8")
+            : fs.readFileSync(path.resolve(opts.bodyFile), "utf8");
+      const t = await runTaskNew({
+        goal: opts.goal,
+        name: opts.name,
+        targets: opts.targets,
+        dependsOn: opts.dependsOn,
+        agent: opts.agent,
+        kind: opts.kind,
+        body,
+        objective: opts.objective,
+        doneWhen: opts.doneWhen,
+        criteria: opts.criteria ? parseCriteriaRefs([opts.criteria]) : undefined,
+        tier: opts.tier,
+        outputs: opts.output,
+        origin: opts.origin,
+        labels: opts.label,
+        enforceTargets: true,
+      });
       console.log(`${t.id} created at ${t.file}`);
+      if (body === undefined && !opts.objective && !opts.doneWhen?.length) {
+        // Said here because `task run` hands the body to a worker verbatim: an
+        // unwritten skeleton becomes the worker's whole instruction.
+        console.log(`Its body is still the skeleton — write the Objective and Done when in ${t.file} before running it.`);
+      }
       console.log(`Run it with: awo task run ${t.id}`);
     } catch (err) {
       console.error((err as Error).message);

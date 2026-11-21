@@ -8,7 +8,9 @@ summary: reconcile `repos/` with the manifest before starting work.
 ---
 
 ## When to use
-At the start of any task, or whenever a linked repo might be stale/missing.
+Before `awo task run`, or whenever a linked repo might be stale/missing — the
+orchestrator's step. A worker already inside a task worktree does not pull in
+`repos/<name>`: that checkout is shared with every other task.
 
 ## Steps
 1. Read `.workspace/manifest.json`.

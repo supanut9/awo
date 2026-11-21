@@ -38,13 +38,13 @@ next, so you don't spend tokens scanning the tree.
 | `awo req suspend {{PROJECT_KEY}}-R# --why "…"` / `req cancel … --why "…"` | Park it, or drop it. Both move the file to `requirements/archive/`. |
 | `awo req resume {{PROJECT_KEY}}-R#` | Bring a shelved requirement back into intake, at the status it left from. |
 | `awo req list [--all\|--archived]` | Intake by default; the shelved ones on request. |
-| `awo goal new --from {{PROJECT_KEY}}-R#` | Distil an approved requirement into a goal. |
+| `awo goal new --from {{PROJECT_KEY}}-R# [--policy light\|standard\|strict]` | Distil an approved requirement into a goal; the policy decides how it must prove itself. |
 | `awo goal plan {{PROJECT_KEY}}-G#` | Brief the tech-lead to decompose it — in plan mode, so you approve the breakdown before any task exists. |
-| `awo task new --goal {{PROJECT_KEY}}-G# --name "…" --targets <repo> --kind implementation` | Add a typed task; allocates `{{PROJECT_KEY}}-T#` and updates state. |
-| `awo task run {{PROJECT_KEY}}-T#` | Open a run: creates the worktree, prints the model to use. |
-| `awo task event {{PROJECT_KEY}}-T# test --data '{"repo":"…","pass":42}'` | Record what ran. |
-| `awo task complete {{PROJECT_KEY}}-T# --outcome success` | Close it; governed goals route success to review automatically. |
-| `awo task evidence {{PROJECT_KEY}}-T# --criterion 1 --kind test --ref "<run or command>"` | Trace task evidence to an acceptance criterion. |
+| `awo task new --goal {{PROJECT_KEY}}-G# --name "…" --targets <repo> --objective "…" --done-when "…"` | Add a typed task with its body written; allocates `{{PROJECT_KEY}}-T#` and updates state. |
+| `awo task run {{PROJECT_KEY}}-T#` | Open a run: creates the worktree, prints the brief and the model to use. |
+| `awo task event {{PROJECT_KEY}}-T# test --repo <repo> --run "<testCommand>" --baseline` | Have awo run and measure the tests — the only test evidence the gate accepts. |
+| `awo task complete {{PROJECT_KEY}}-T# --outcome success --summary "…"` | Close it; governed goals route success to review automatically. Commits are captured for you. |
+| `awo task evidence {{PROJECT_KEY}}-T# --criterion 1 --kind test --ref <runId>` | Trace task evidence to an acceptance criterion. |
 | `awo goal trace {{PROJECT_KEY}}-G#` | Show criterion coverage and any accepted exceptions. |
 | `awo goal readiness {{PROJECT_KEY}}-G#` | Show all task, criterion, and QA blockers. |
 | `awo goal reconcile {{PROJECT_KEY}}-G#` | Persist and log authored-task/state repair. |

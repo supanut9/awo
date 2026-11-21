@@ -12,8 +12,8 @@ alternatives to it. Use this file when asked "what's our normal workflow."
 ## Stages
 
 1. **Intake** — owner: `product-manager`. Instruction: `capture-requirement`.
-   Raw ask → refined requirement (`PROM-R#`) → scoped goal (`PROM-G#`,
-   `status: planning`).
+   Raw ask → refined, proposed, then **human-approved** requirement
+   (`PROM-R#`) → scoped goal (`PROM-G#`, `planning`).
 2. **Plan** — owner: `tech-lead`. Instruction: `plan-a-goal`.
    Goal → tasks (`PROM-T#`), each with `targets` and `dependsOn`. Tasks wait
    `todo` for human approval before running (draft → approve gate).

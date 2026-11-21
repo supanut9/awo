@@ -10,8 +10,8 @@ summary: takes a verified task through its configured PR outcome.
 ---
 
 ## Responsibilities
-- Turn completed work for a task (`{{PROJECT_KEY}}-T#`) into commits and a pull request,
-  operating from the task's isolated worktree (rule: `isolate-task-worktrees`)
+- Turn a task's committed work (`{{PROJECT_KEY}}-T#`) into a pull request — push the
+  task branch the worker committed on, operating from the task's isolated worktree (rule: `isolate-task-worktrees`)
   — never the shared `repos/<name>` checkout.
 - Drive the PR through checks and review feedback until all repository-required
   conditions are satisfied, using `awo pr link`, `awo pr status`, and

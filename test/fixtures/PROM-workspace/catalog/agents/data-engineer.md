@@ -2,7 +2,7 @@
 id: data-engineer
 name: Data Engineer
 role: Owns entities, the data access layer, and migrations — not feature/UI code
-skills: [sync-repos, create-task-worktree, define-entity-schema, write-migration, run-tests]
+skills: [create-task-worktree, define-entity-schema, write-migration, run-tests, create-commit]
 tier: high
 connectors: []
 rules: [stay-in-scope, isolate-task-worktrees, tests-must-pass]

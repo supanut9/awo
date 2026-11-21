@@ -572,7 +572,8 @@ test("tier follows the work: agent default, manifest policy, and per-task overri
   let out = awo(ws, ["task", "run", "TEST-T1"]);
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /agent:\s+software-engineer — low tier \(from agent\)/);
-  assert.match(out.stdout, /model:\s+claude:haiku effort=medium/);
+  // The built-in low tier is sonnet: haiku's 50% success at 4.1 attempts (§9 item 53).
+  assert.match(out.stdout, /model:\s+claude:sonnet effort=medium/);
 
   // A tiers policy maps the kind of work to a runtime+model.
   setModels({
@@ -636,15 +637,16 @@ test("task run creates the isolated worktree at the specced path", () => {
   // The printed command must be runnable: a worker sandboxed to the workspace
   // cannot commit unless it can also write the repo that owns the worktree's
   // .git (§9 item 40).
-  assert.match(out.stdout, /hand to: .* -C repos\/\.worktrees\/api\/TEST-T1 --add-dir /);
+  // Claude Code has no -C flag, so the hint changes directory first; paths are quoted.
+  assert.match(out.stdout, /hand to: cd "repos\/\.worktrees\/api\/TEST-T1" && claude .*--add-dir /);
   // ONLY the git metadata dir — granting the repo itself would let the worker
   // edit the real checkout instead of the worktree (§9 item 42).
   assert.ok(
-    out.stdout.includes(`--add-dir ${path.join(repoPath, ".git")}`),
+    out.stdout.includes(`--add-dir "${path.join(repoPath, ".git")}"`),
     "the worktree's git dir must be granted"
   );
   assert.ok(
-    !new RegExp(`--add-dir ${repoPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`).test(out.stdout),
+    !out.stdout.includes(`--add-dir "${repoPath}"`),
     "the repo itself must NOT be granted"
   );
 
