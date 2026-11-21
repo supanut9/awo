@@ -419,7 +419,7 @@ test("the built-in low tier is sonnet and hints are runnable: cd for Claude, quo
 
   // No policy: the low-tier role resolves to sonnet.
   const { ws, root } = makeWorkspace();
-  awo(ws, ["task", "new", "--goal", "AU-G1", "--name", "x", "--targets", "web", "--agent", "software-engineer"]);
+  awo(ws, ["task", "new", "--goal", "AU-G1", "--name", "x", "--targets", "web", "--agent", "software-engineer", "--objective", "x"]);
   const out = awo(ws, ["task", "run", "AU-T1"]);
   assert.match(out.stdout, /low tier/);
   assert.match(out.stdout, /model:\s+claude:sonnet/);

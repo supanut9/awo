@@ -125,7 +125,7 @@ export async function runGoalArchive(
                 : `state unknown (snapshot predates 0.8) — refresh: awo pr status ${pr.taskId}`)
           )
           .join("\n") +
-        `\nMerge or close them first, or archive anyway with --unmerged-ok.`
+        `\nMerge them first — or, if the work landed another way, archive anyway with --unmerged-ok.`
     );
   }
 

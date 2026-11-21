@@ -431,7 +431,7 @@ test("task resume re-briefs a fresh worker into the open run and takes ownership
   assert.match(out, /schema drafted/);
   assert.match(out, /api: `\.\/t\.sh` exit 0/);
   assert.match(out, /Do the first thing/);
-  assert.match(out, /hand to: claude .*--add-dir/);
+  assert.match(out, /hand to: (?:cd "[^"]+" && )?claude .*--add-dir/);
 
   const t1 = taskState(ws, "TEST-T1");
   assert.equal(t1.status, "running");

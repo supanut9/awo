@@ -633,7 +633,7 @@ test("task run creates the isolated worktree at the specced path", () => {
 
   const out = awo(ws, ["task", "run", "TEST-T1"]);
   assert.equal(out.code, 0, out.stderr);
-  assert.match(out.stdout, /work in: repos\/\.worktrees\/api\/TEST-T1  \(api on feature\/TEST-T1\)/);
+  assert.match(out.stdout, /work in: repos\/\.worktrees\/api\/TEST-T1  \(api on feature\/TEST-T1 from main\)/);
   // The printed command must be runnable: a worker sandboxed to the workspace
   // cannot commit unless it can also write the repo that owns the worktree's
   // .git (§9 item 40).
@@ -846,7 +846,7 @@ test("task run reuses the worktree already holding the branch, and never fakes i
 
   const out = awo(ws, ["task", "run", "TEST-T1"]);
   assert.equal(out.code, 0, out.stderr);
-  assert.match(out.stdout, /work in: \.worktrees\/api\/TEST-T1  \(api on feature\/TEST-T1, reused\)/);
+  assert.match(out.stdout, /work in: \.worktrees\/api\/TEST-T1  \(api on feature\/TEST-T1(?: from \S+)?, reused\)/);
   assert.ok(!/WARNING: no isolation/.test(out.stdout));
 
   // The canonical path must NOT be advertised, because it does not exist.

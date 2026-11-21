@@ -1506,9 +1506,11 @@ task
             console.log(`WARNING: no isolation for ${wt.repo} — ${wt.error}`);
             continue;
           }
+          const from = wt.base?.ref ?? wt.basedOn;
           console.log(
-            `work in: ${wt.path}  (${wt.repo} on ${wt.branch}${wt.basedOn ? ` from ${wt.basedOn}` : ""}${wt.reused ? ", reused" : ""})`
+            `work in: ${wt.path}  (${wt.repo} on ${wt.branch}${from ? ` from ${from}` : ""}${wt.reused ? ", reused" : ""})`
           );
+          for (const w of wt.warnings ?? []) console.log(`  note: ${w}`);
         }
         if (r.targets.length === 0) console.log(`work in: no repository — this task has no targets`);
         else if (r.worktrees.length === 0) console.log(`work in: shared checkout — NO worktree isolation`);
@@ -1516,7 +1518,7 @@ task
         if (r.fallbackInvocation) console.log(`if quota: ${r.fallbackInvocation}`);
         if (r.body) console.log(`\n${r.body}`);
         console.log(
-          `\nRecord progress with \`awo task event ${r.taskId} <kind> --label "…"\`, then close with \`awo task complete ${r.taskId} --outcome success\`.`
+          `\nMeasure with \`awo task event ${r.taskId} test --run "<cmd>"\`, then close with \`awo task complete ${r.taskId} --summary "…"\`.`
         );
       } catch (err) {
         console.error((err as Error).message);
@@ -1558,7 +1560,7 @@ task
       console.log(`\n--- brief${r.briefFrom ? ` (unchanged since run ${r.briefFrom})` : ""} ---`);
       console.log(r.brief ?? "(no brief recorded for this run)");
       console.log(
-        `\nRecord progress with \`awo task event ${r.taskId} <kind> --label "…"\`, then close with \`awo task complete ${r.taskId} --outcome success\`.`
+        `\nMeasure with \`awo task event ${r.taskId} test --run "<cmd>"\`, then close with \`awo task complete ${r.taskId} --summary "…"\`.`
       );
     } catch (err) {
       console.error((err as Error).message);

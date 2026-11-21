@@ -1451,9 +1451,36 @@ async function linkDependencies(repoPath: string, worktreePath: string): Promise
       continue;
     }
     // Best effort: a failed link leaves the worktree usable, just untestable.
-    await fs.symlink(source, target, "dir").then(() => linked.push(source)).catch(() => undefined);
+    const made = await fs.symlink(source, target, "dir").then(() => true).catch(() => false);
+    if (!made) continue;
+    linked.push(source);
+    await ignoreDependencyLink(worktreePath, dir);
   }
   return linked;
+}
+
+/**
+ * Keep awo's dependency link out of the worker's commits. The common gitignore
+ * line `node_modules/` matches directories only, so git sees the symlink as an
+ * untracked FILE and `git add -A` in a task worktree commits it — a link into
+ * the shared checkout, landed on the task branch. The repo's local
+ * `info/exclude` (never versioned, shared by its worktrees) gets an anchored
+ * `/node_modules` line, only when the link is not already ignored.
+ */
+async function ignoreDependencyLink(worktreePath: string, name: string): Promise<void> {
+  if ((await gitExitCode(worktreePath, ["check-ignore", "-q", name])) === 0) return;
+  const common = await simpleGit(worktreePath)
+    .raw(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    .then((out) => out.trim())
+    .catch(() => "");
+  if (!common) return;
+  const exclude = path.join(common, "info", "exclude");
+  const line = `/${name}`;
+  const existing = await fs.readFile(exclude, "utf8").catch(() => "");
+  if (existing.split("\n").some((l) => l.trim() === line)) return;
+  const prefix = existing === "" || existing.endsWith("\n") ? "" : "\n";
+  await fs.ensureDir(path.dirname(exclude));
+  await fs.appendFile(exclude, `${prefix}# awo: task worktrees link the repo's install here\n${line}\n`).catch(() => undefined);
 }
 
 /** Paths an existing/reused worktree needs written, recomputed on each run. */

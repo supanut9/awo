@@ -266,7 +266,7 @@ export async function runGoalClose(
 
   // Archive first: it is the step that can still refuse, and a refused close must not
   // have already deleted anything.
-  const archived = await runGoalArchive(goal.id, { cwd: root });
+  const archived = await runGoalArchive(goal.id, { cwd: root, unmergedOk: options.unmergedOk });
   result.archivedTo = archived.to;
   result.status = archived.status;
   result.closed = true;
