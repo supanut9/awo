@@ -130,7 +130,7 @@ test("doctor treats unregistered historical targets as information but active ta
   assert.ok(findings.some((f: any) => f.area === "tasks" && f.severity === "error" && f.message.includes("retired")));
   await fs.mkdir(path.join(root, "goals/archive"), { recursive: true });
   await fs.rename(goal, path.join(root, "goals/archive/TST-G1"));
-  findings = await runDoctor({ cwd: root });
+  findings = await runDoctor({ cwd: root, scope: "all" });
   assert.ok(!findings.some((f: any) => f.area === "tasks" && f.severity === "error" && f.message.includes("retired")));
   assert.ok(findings.some((f: any) => f.severity === "info" && f.message.includes("retired")));
   assert.ok(!(await runDoctor({ cwd: root, scope: "active" })).some((f: any) => f.message.includes("retired")));

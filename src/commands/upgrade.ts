@@ -28,7 +28,35 @@ import {
 interface Migration {
   version: string;
   description: string;
-  apply: (ctx: { root: string; manifest: Manifest }) => Promise<boolean>;
+  /** `notes` collects what the user must be told — e.g. where preserved data went. */
+  apply: (ctx: { root: string; manifest: Manifest; notes: string[] }) => Promise<boolean>;
+}
+
+/** Filesystem-safe and sortable: lexical order is chronological order. */
+function timestamp(at: Date = new Date()): string {
+  return at.toISOString().replace(/[:.]/g, "-");
+}
+
+/**
+ * Every migration move goes through here: a destination that already exists stops
+ * the upgrade instead of being overwritten.
+ *
+ * The moves used to pass `overwrite: true`, so a workspace holding both
+ * `goals/X-G1-old-slug/` and `goals/X-G1/` — a half-finished earlier upgrade, or a
+ * goal recreated by hand — silently lost one of them. Two copies of user content
+ * are a decision for a person, not for a migration.
+ */
+async function moveOrStop(root: string, from: string, to: string): Promise<void> {
+  if (await fs.pathExists(to)) {
+    const rel = (p: string): string => path.relative(root, p);
+    throw new Error(
+      `Upgrade stopped: moving ${rel(from)} to ${rel(to)} would overwrite what is already there.\n` +
+        `  Neither path was changed. Compare the two, keep the one you want (move the other out of the workspace), then re-run \`awo upgrade\`.\n` +
+        `  The workspace version is only bumped once an upgrade completes, so re-running is safe.`
+    );
+  }
+  await fs.ensureDir(path.dirname(to));
+  await fs.move(from, to);
 }
 
 // Kept in version order, and applied in that order (see planUpgrade). An entry
@@ -47,8 +75,8 @@ const MIGRATIONS: Migration[] = [
   },
   {
     version: "0.0.32",
-    description: "restructure logs, goals and requirements; clear stale worktrees",
-    apply: async ({ root }) => restructureWorkspace(root),
+    description: "restructure logs, goals and requirements; set aside stale worktrees",
+    apply: async ({ root, notes }) => restructureWorkspace(root, notes),
   },
   {
     version: "0.0.35",
@@ -89,16 +117,13 @@ async function shelveArchivedRequirements(root: string): Promise<boolean> {
     const status = /^status:\s*"?([a-z-]+)"?\s*$/m.exec(text)?.[1];
     if (!status || !SHELVED.has(status)) continue;
 
-    await fs.ensureDir(archive);
-    await fs.move(from, path.join(archive, name), { overwrite: true });
+    await moveOrStop(root, from, path.join(archive, name));
 
     // Assets travel with the document that links them, or its relative links break.
     const id = name.replace(/\.md$/, "");
     const assets = path.join(dir, `${id}-assets`);
     if (await fs.pathExists(assets)) {
-      await fs.move(assets, path.join(archive, `${id}-assets`), { overwrite: true }).catch(
-        () => undefined
-      );
+      await moveOrStop(root, assets, path.join(archive, `${id}-assets`));
     }
     moved = true;
   }
@@ -240,14 +265,25 @@ async function collapseLogsIntoDayFiles(root: string): Promise<boolean> {
 
     if (at && at.worker && (await fs.pathExists(at.worker))) {
       const { date, slot, time } = runSlot(runId);
-      const to = path.join(logs, date, "workers", `${time}-${slot}.log`);
-      await fs.ensureDir(path.dirname(to));
-      await fs.move(at.worker, to, { overwrite: true });
+      await moveOrStop(root, at.worker, path.join(logs, date, "workers", `${time}-${slot}.log`));
     }
   }
 
   for (const target of remove) await fs.remove(target);
   return true;
+}
+
+/** `<repo>/<task>` entries under a legacy `.worktrees/`, for telling the user what was kept. */
+async function legacyWorktreeListing(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const repo of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (!repo.isDirectory()) continue;
+    const leaves = (await fs.readdir(path.join(dir, repo.name), { withFileTypes: true }).catch(() => []))
+      .filter((e) => e.isDirectory())
+      .map((e) => `${repo.name}/${e.name}`);
+    out.push(...(leaves.length > 0 ? leaves : [repo.name]));
+  }
+  return out.sort();
 }
 
 /**
@@ -257,7 +293,7 @@ async function collapseLogsIntoDayFiles(root: string): Promise<boolean> {
  * Everything here is idempotent and additive-then-move: nothing is deleted that
  * has not first been copied, so a half-finished migration re-runs cleanly.
  */
-async function restructureWorkspace(root: string): Promise<boolean> {
+async function restructureWorkspace(root: string, notes: string[] = []): Promise<boolean> {
   let changed = false;
 
   // 3. goals/<ID>-<truncated-slug>/ -> goals/<ID>/, and tasks/<ID>-<slug>.md ->
@@ -271,16 +307,14 @@ async function restructureWorkspace(root: string): Promise<boolean> {
     if (!(await fs.stat(dir)).isDirectory()) continue;
     const m = idOnly.exec(name);
     if (m && m[1] !== name) {
-      await fs.move(dir, path.join(goalsRoot, m[1]), { overwrite: true });
+      await moveOrStop(root, dir, path.join(goalsRoot, m[1]));
       changed = true;
     }
     const tasksDir = path.join(goalsRoot, m ? m[1] : name, "tasks");
     for (const file of (await fs.pathExists(tasksDir)) ? await fs.readdir(tasksDir) : []) {
       const tm = idOnly.exec(file.replace(/\.md$/, ""));
       if (tm && `${tm[1]}.md` !== file) {
-        await fs.move(path.join(tasksDir, file), path.join(tasksDir, `${tm[1]}.md`), {
-          overwrite: true,
-        });
+        await moveOrStop(root, path.join(tasksDir, file), path.join(tasksDir, `${tm[1]}.md`));
         changed = true;
       }
     }
@@ -292,17 +326,31 @@ async function restructureWorkspace(root: string): Promise<boolean> {
   await fs.ensureDir(reqRoot);
   for (const name of (await fs.pathExists(goalsRoot)) ? await fs.readdir(goalsRoot) : []) {
     if (!/^[A-Za-z][A-Za-z0-9]*-R\d+\.md$/.test(name)) continue;
-    await fs.move(path.join(goalsRoot, name), path.join(reqRoot, name), { overwrite: true });
+    await moveOrStop(root, path.join(goalsRoot, name), path.join(reqRoot, name));
     changed = true;
   }
 
   // 5. Worktrees were created at <root>/.worktrees before moving under repos/, so a
   //    workspace upgraded across that change has full checkouts in a location
-  //    nothing reads — invisible, and gigabytes. Remove only registered-and-stale
-  //    ones; git prune keeps its own bookkeeping straight.
+  //    nothing reads — invisible, and gigabytes.
+  //
+  //    This used to `rm -rf` the directory, uncommitted work and unpushed commits
+  //    included, with nothing checked and nothing said. A migration may move user
+  //    content but never destroy it: the checkouts go somewhere nothing reads, the
+  //    user is told exactly what was kept, and deleting it is their call.
   const stray = path.join(root, ".worktrees");
   if (await fs.pathExists(stray)) {
-    await fs.remove(stray);
+    const kept = path.join(root, ".workspace", `legacy-worktrees-${timestamp()}`);
+    const contents = await legacyWorktreeListing(stray);
+    await moveOrStop(root, stray, kept);
+    // Self-ignoring, so gigabytes of checkouts never show up as untracked files in a
+    // workspace that is itself a git repo.
+    await fs.writeFile(path.join(kept, ".gitignore"), "*\n");
+    const rel = path.relative(root, kept);
+    notes.push(
+      `preserved the legacy .worktrees/ checkouts in ${rel}/ (${contents.length > 0 ? contents.join(", ") : "empty"}) — ` +
+        `nothing reads them any more; check them for uncommitted work, then delete with \`rm -rf ${rel}\``
+    );
     changed = true;
   }
 
@@ -324,6 +372,34 @@ async function restructureWorkspace(root: string): Promise<boolean> {
 
 /** `.workspace/manifest.json` is owned by migrations, never file reconciliation. */
 const NOT_RECONCILED = new Set([".workspace/manifest.json", ".workspace/template.lock"]);
+
+/**
+ * Template files awo itself rewrites after laying them down, and the keys it owns
+ * in them.
+ *
+ * `add`/`connect`/`sync` write `git.scanRepositories` into `.vscode/settings.json`
+ * (vscode-workspace.ts), so every workspace with a linked repo read as having
+ * customized the file: "user-edited" on every upgrade, and a `.new` conflict the
+ * moment the template touched it. A change awo made is not a change you made, so
+ * these keys are set aside before comparing — and regenerated after every upgrade.
+ */
+const REGENERATED_KEYS: Record<string, string[]> = {
+  ".vscode/settings.json": ["git.scanRepositories"],
+};
+
+/** The form of a file that drift is judged on: awo-owned keys removed. */
+function comparableContent(rel: string, content: string): string {
+  const owned = REGENERATED_KEYS[rel];
+  if (!owned) return content;
+  try {
+    const data = JSON.parse(content) as Record<string, unknown>;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return content;
+    for (const key of owned) delete data[key];
+    return `${JSON.stringify(data, null, 2)}\n`;
+  } catch {
+    return content;
+  }
+}
 
 export type FileAction =
   | "replace"
@@ -356,6 +432,8 @@ export interface UpgradeResult extends UpgradePlan {
   migrationsRun: string[];
   /** True when the workspace isn't a git repo, so §11.4's review gate can't apply. */
   unreviewable: boolean;
+  /** Things the user must be told, e.g. where a migration preserved data. */
+  notes: string[];
 }
 
 const CHANGED_ACTIONS = new Set<FileAction>(["replace", "add", "conflict"]);
@@ -394,7 +472,7 @@ async function planFiles(
       await fs.readFile(templateSourcePath(rel), "utf8"),
       { projectKey }
     );
-    const newHash = hashForLock(rendered);
+    const newHash = hashForLock(comparableContent(rel, rendered));
     const lockHash = lock?.files[rel];
 
     if (!(await fs.pathExists(onDisk))) {
@@ -403,7 +481,7 @@ async function planFiles(
       continue;
     }
 
-    const currentHash = hashForLock(await fs.readFile(onDisk));
+    const currentHash = hashForLock(comparableContent(rel, await fs.readFile(onDisk, "utf8")));
 
     if (currentHash === newHash) {
       plans.push({ path: rel, action: "unchanged" });
@@ -493,6 +571,7 @@ export async function runUpgrade(
     migrationsRun: [],
     mergedFiles: [],
     unreviewable: !isRepo,
+    notes: [],
   };
 
   if (options.dryRun) return base;
@@ -516,7 +595,11 @@ export async function runUpgrade(
   }
 
   const manifest = await readManifest(root);
-  const backupDir = path.join(root, ".workspace", "upgrade-backups", `${plan.from}-to-${plan.to}`);
+  // Timestamped, so re-running an upgrade (after an interruption, or a collision
+  // stop) never overwrites the backup holding the files as they were before the
+  // first attempt — `${from}-to-${to}` alone was the same directory every time.
+  let backupDir = path.join(root, ".workspace", "upgrade-backups", `${timestamp()}_${plan.from}-to-${plan.to}`);
+  for (let n = 2; await fs.pathExists(backupDir); n += 1) backupDir = `${backupDir.replace(/~\d+$/, "")}~${n}`;
   const conflictFiles: string[] = [];
   const mergedFiles: string[] = [];
   let touchedAnything = false;
@@ -570,8 +653,9 @@ export async function runUpgrade(
   }
 
   const migrationsRun: string[] = [];
+  const notes: string[] = [];
   for (const migration of plan.migrations) {
-    const changed = await migration.apply({ root, manifest });
+    const changed = await migration.apply({ root, manifest, notes });
     if (changed) migrationsRun.push(`${migration.version}: ${migration.description}`);
   }
 
@@ -598,5 +682,6 @@ export async function runUpgrade(
     conflictFiles,
     mergedFiles,
     migrationsRun,
+    notes,
   };
 }

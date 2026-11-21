@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { Command } from "commander";
+import { aliasOption } from "./cli-alias.js";
 import { findWorkspaceRoot } from "./workspace.js";
 import { describeModel } from "./models.js";
 import {
@@ -17,7 +18,7 @@ import {
 } from "./commands/intake.js";
 import { runAuto } from "./commands/autorun.js";
 import { listConflicts, runResolve } from "./commands/resolve.js";
-import { runRuleNew } from "./commands/catalog.js";
+import { runCatalogRemove, runRuleNew, type CatalogRemoveResult } from "./commands/catalog.js";
 import { runInit } from "./commands/init.js";
 import { runAdd } from "./commands/add.js";
 import { runConnect } from "./commands/connect.js";
@@ -44,6 +45,7 @@ import {
   runGoalList,
   formatGoalProgress,
 } from "./commands/goal-archive.js";
+import { runGoalClose } from "./commands/goal-close.js";
 import { runGoalTrace, runTaskEvidence } from "./commands/traceability.js";
 import {
   runPrFinalize,
@@ -317,14 +319,17 @@ program
     }
   });
 
-program
+const upgrade = program
   .command("upgrade")
   .description(
     "Bring this workspace up to the INSTALLED awo version (not npm's latest): run migrations and reconcile scaffolding (§11). Use `npx @supanut9/awo@latest upgrade` to target the newest release."
   )
-  .option("--dry-run", "show what would change without touching anything")
+  .option("--dry-run", "show what would change without touching anything (alias: --preview)")
   .option("--to <version>", "assert the intended target version (must match the installed awo)")
-  .option("--force", "proceed even with uncommitted changes in the workspace")
+  .option("--force", "proceed even with uncommitted changes in the workspace");
+// `--preview` is the word people reach for before a risky command.
+aliasOption(upgrade, "--preview", "dryRun");
+upgrade
   .action(async (opts: { dryRun?: boolean; to?: string; force?: boolean }) => {
     try {
       const r = await runUpgrade(opts);
@@ -380,6 +385,7 @@ program
         console.log(`\nRun \`awo upgrade\` to apply.`);
         return;
       }
+      for (const note of r.notes) console.log(`  note: ${note}`);
       if (r.backupDir) console.log(`\nReplaced files backed up to ${r.backupDir}`);
       if (r.conflictFiles.length > 0) {
         console.log(`${r.conflictFiles.length} conflict(s) need you: awo resolve`);
@@ -396,11 +402,12 @@ program
   .description("Diagnose the workspace: version skew, broken links, bad targets, abandoned runs.")
   .option("--all", "list every instance instead of collapsing repeated findings")
   .option("--json", "machine-readable findings")
-  .option("--scope <scope>", "active or all (includes historical findings)", "all")
-  .action(async (opts: { all?: boolean; json?: boolean; scope: string }) => {
+  .option("--scope <scope>", "active (live goals) or all (includes archived history)", "active")
+  .option("--secrets", "also scan logs/ for recorded credentials (reports file and count, never the value)")
+  .action(async (opts: { all?: boolean; json?: boolean; scope: string; secrets?: boolean }) => {
     try {
       if (opts.scope !== "active" && opts.scope !== "all") throw new Error("--scope must be active or all");
-      const findings = await runDoctor({ scope: opts.scope });
+      const findings = await runDoctor({ scope: opts.scope, secrets: opts.secrets });
       if (opts.json) {
         console.log(JSON.stringify(findings, null, 2));
         process.exitCode = doctorExitCode(findings);
@@ -835,6 +842,26 @@ rule
     }
   );
 
+/** Shared by `agent|skill|rule remove`: what went, and what it left dangling. */
+function reportRemoval(kind: string, r: CatalogRemoveResult): void {
+  console.log(`removed ${kind} ${r.name} (${r.file}); AGENTS.md's list regenerated`);
+  for (const ref of r.references) console.log(`  ! still referenced: ${ref.file}: ${ref.detail}`);
+  if (r.reinstall) console.log(`Reinstall with: ${r.reinstall}`);
+}
+
+rule
+  .command("remove <id>")
+  .description("Delete a rule and regenerate AGENTS.md. Refuses while an agent or skill still cites it.")
+  .option("--force", "delete it even though something still references it")
+  .action(async (id: string, opts: { force?: boolean }) => {
+    try {
+      reportRemoval("rule", await runCatalogRemove("rule", id, { force: opts.force }));
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
 program
   .command("run")
   .description("Work a goal's tasks in dependency order, stopping before the QA verdict.")
@@ -935,6 +962,44 @@ goal
     try {
       const r = await runGoalRestore(goalId);
       console.log(`${r.id} (${r.status}) restored: ${r.from} -> ${r.to}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+goal
+  .command("close <goalId>")
+  .description(
+    "Close a goal: list every blocker as the exact command that clears it; when nothing blocks, archive it and prune its clean, merged worktrees."
+  )
+  .option("--dry-run", "list blockers and what would be archived/pruned, change nothing")
+  .option("--unmerged-ok", "close even though linked PRs are not merged (closed, or the work landed another way)")
+  .option("--json", "machine-readable result")
+  .action(async (goalId: string, opts: { dryRun?: boolean; unmergedOk?: boolean; json?: boolean }) => {
+    try {
+      const r = await runGoalClose(goalId, { dryRun: opts.dryRun, unmergedOk: opts.unmergedOk });
+      if (opts.json) {
+        console.log(JSON.stringify(r, null, 2));
+      } else if (r.blockers.length > 0) {
+        console.log(`${r.goalId} (${r.status}) cannot close yet — ${r.blockers.length} blocker(s):`);
+        for (const b of r.blockers) {
+          console.log(`  ✗ ${b.message}`);
+          for (const command of b.commands) console.log(`      ${command}`);
+        }
+        console.log(opts.dryRun ? "\n(dry run — nothing was touched)" : "\nNothing was changed.");
+      } else if (r.dryRun) {
+        console.log(`${r.goalId} (${r.status}) can close — nothing blocks it.`);
+        console.log(`  would archive -> ${r.archivedTo}`);
+        for (const p of r.pruned) console.log(`  would prune ${p}`);
+        console.log("\n(dry run — nothing was touched)");
+      } else {
+        console.log(`${r.goalId} (${r.status}) closed: archived to ${r.archivedTo}`);
+        for (const p of r.pruned) console.log(`  pruned ${p}`);
+        for (const k of r.kept) console.log(`  kept   ${k.path}  (${k.reason})`);
+        console.log(`Undo the archive with: awo goal restore ${r.goalId}`);
+      }
+      if (r.blockers.length > 0 && !opts.dryRun) process.exitCode = 1;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1941,7 +2006,7 @@ program
 for (const kind of ["agent", "skill"] as CatalogKind[]) {
   const group = program
     .command(kind)
-    .description(`Install ${kind}s from the workspace catalog (§7.1).`);
+    .description(`Install or remove ${kind}s (catalog: catalog/${kind}s, installed: ${kind}s/) (§7.1).`);
 
   group
     .command("list")
@@ -1964,6 +2029,23 @@ for (const kind of ["agent", "skill"] as CatalogKind[]) {
       try {
         const r = await runCatalogAdd(kind, name);
         console.log(`installed ${kind} ${r.name} at ${r.file}`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  group
+    .command("remove <name>")
+    .description(
+      kind === "agent"
+        ? "Uninstall a role. Refuses while a live task, another role, or AGENTS.md prose still names it."
+        : "Delete an awo skill. Refuses while a role's `skills:` or AGENTS.md prose still names it."
+    )
+    .option("--force", "remove it even though something still references it")
+    .action(async (name: string, opts: { force?: boolean }) => {
+      try {
+        reportRemoval(kind, await runCatalogRemove(kind, name, { force: opts.force }));
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

@@ -138,8 +138,13 @@ test("an unmodified scaffolding file is replaced; a customized one is never over
   assert.ok(!fs.existsSync(`${customized}.new`), "a non-overlapping edit needs no conflict file");
   assert.match(out.stdout, /~ AGENTS\.md — you edited it; template changes merged in cleanly/);
 
-  // Replaced files are backed up (§11.4).
-  const backup = path.join(ws, ".workspace", "upgrade-backups", `0.0.1-to-${INSTALLED}`);
+  // Replaced files are backed up (§11.4), each upgrade into its own timestamped
+  // directory so a re-run never overwrites an earlier backup.
+  const backups = path.join(ws, ".workspace", "upgrade-backups");
+  const backup = path.join(
+    backups,
+    fs.readdirSync(backups).find((d) => d.endsWith(`_0.0.1-to-${INSTALLED}`)) ?? "missing"
+  );
   assert.ok(fs.existsSync(path.join(backup, "rules", "no-push-to-main.md")));
   assert.match(out.stdout, /backed up to \.workspace\/upgrade-backups/);
 
