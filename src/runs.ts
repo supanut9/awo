@@ -427,3 +427,15 @@ export async function resolveRunFile(
   }
   return current;
 }
+
+/**
+ * One day's raw lines, for bulk readers (the dashboard, `context`, `log tail`)
+ * that otherwise re-read the same day file once per run — 2.3 s of `awo context`
+ * on atlas-shop was one day file parsed again for each of 3,900 runs.
+ */
+export async function readDay(
+  workspaceRoot: string,
+  date: string
+): Promise<Array<{ type: "event" | "run"; runId: string; [key: string]: unknown }>> {
+  return readDayLines(workspaceRoot, date);
+}

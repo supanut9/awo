@@ -331,7 +331,7 @@ export async function mutateState(
     mutate(next);
     // Lazy import avoids a runtime cycle with tasks.ts.
     const { findTasksInGoal } = await import("./tasks.js");
-    const reconciled = reconcileGoalState(next, await findTasksInGoal(goalDir));
+    const reconciled = reconcileGoalState(next, await findTasksInGoal(goalDir, { strict: true }));
     const persisted = reconciled.state;
     for (const id of reconciled.orphanedTaskIds) delete persisted.tasks[id];
     persisted.goalId = goalId;
