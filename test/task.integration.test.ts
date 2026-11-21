@@ -175,14 +175,18 @@ test("pre-0.0.2 task files authored with the old status vocabulary still load", 
   assert.match(out.stdout, /TEST-T9\ttodo/, "pending must translate to todo");
   assert.match(out.stdout, /TEST-T8\tdone/, "success must translate to done");
 
-  // A genuinely unknown status is still an error, and names what it saw.
+  // A genuinely unknown status is still an error for that file, and names what it
+  // saw — but the file is skipped rather than failing every listing (0.8).
   fs.writeFileSync(
     path.join(tasksDir, "TEST-T7-bogus.md"),
     `---\nid: TEST-T7\ngoalId: TEST-G1\nname: Bogus\nstatus: wat\n---\n\nx\n`
   );
   const bad = awo(ws, ["task", "list"]);
-  assert.equal(bad.code, 1);
-  assert.match(bad.stderr, /has status "wat"/);
+  assert.equal(bad.code, 0);
+  assert.doesNotMatch(bad.stdout, /TEST-T7/);
+  const shown = awo(ws, ["task", "show", "TEST-T7"]);
+  assert.equal(shown.code, 1);
+  assert.match(shown.stderr, /has status "wat"/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
 

@@ -4,7 +4,7 @@ import { readManifest } from "../manifest.js";
 import { runList, type RepoStatusEntry } from "../commands/list.js";
 import { findGoals, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
 import { newTaskState, readState, reconcileGoalState, type GoalStatus, type TaskStatus } from "../state.js";
-import { readDetail, readEvents, readIndex, type RunEvent, type RunIndexEntry } from "../runs.js";
+import { readDay, readDetail, readEvents, readIndex, runSlot, type RunEvent, type RunIndexEntry } from "../runs.js";
 import { runAgentOrg } from "../commands/agent-org.js";
 import { findCriteria, listRequirements, REQ_STATUSES, type Requirement, type ReqStatus } from "../commands/intake.js";
 import fs from "fs-extra";
@@ -102,6 +102,17 @@ export interface Stats {
   /** Runs that closed as success without a test event — the evidence gap. */
   untestedSuccesses: number;
   byTier: TierStat[];
+  /**
+   * Task runs only. `totalRuns`/`successRate` also count `log add` journal rows,
+   * which are always "success" — on atlas-shop that read as 99% success while
+   * 736 measured test commands had failed.
+   */
+  workerRuns?: number;
+  workerSuccessRate?: number | null;
+  medianWorkerDurationSec?: number | null;
+  /** `log add` records: planning, intake, audits — not work a worker did. */
+  journalEntries?: number;
+  medianJournalDurationSec?: number | null;
 }
 
 export interface Snapshot {
@@ -137,6 +148,137 @@ export interface WorkspaceReader {
   runs(): Promise<RunIndexEntry[]>;
   runEvents(runId: string): Promise<RunEvent[]>;
   snapshot(): Promise<Snapshot>;
+}
+
+type DayLine = Awaited<ReturnType<typeof readDay>>[number];
+
+/**
+ * The run log, each day file read at most once per request.
+ *
+ * Every reader used to go through `readEvents(runId)`, which re-reads and
+ * re-parses the run's whole day file — fine for one run, but the dashboard asked
+ * once per successful run: 2.3 s of `awo context` on atlas-shop (3,931 runs, 25 MB
+ * of day files). Scope an instance to one request; a long-lived one would serve
+ * stale events, since day files are appended to while runs are open.
+ */
+export class RunLedger {
+  private dayNames: Promise<string[]> | null = null;
+  private readonly dayLines = new Map<string, Promise<DayLine[]>>();
+
+  constructor(private readonly root: string) {}
+
+  /** Day folders, oldest first. */
+  days(): Promise<string[]> {
+    this.dayNames ??= (async () => {
+      const logs = path.join(this.root, "logs");
+      const entries = await fs.readdir(logs, { withFileTypes: true }).catch(() => []);
+      return entries
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort();
+    })();
+    return this.dayNames;
+  }
+
+  day(date: string): Promise<DayLine[]> {
+    let lines = this.dayLines.get(date);
+    if (!lines) {
+      lines = readDay(this.root, date);
+      this.dayLines.set(date, lines);
+    }
+    return lines;
+  }
+
+  /** Completed runs, oldest first — what `readIndex` returns, from one pass. */
+  async index(): Promise<RunIndexEntry[]> {
+    const entries: RunIndexEntry[] = [];
+    const perDay = await Promise.all(
+      (await this.days()).map(async (date) =>
+        this.dayLines.has(date) ? (await this.day(date)).filter((l) => l.type === "run") : this.runRows(date)
+      )
+    );
+    for (const rows of perDay) {
+      for (const line of rows) {
+        const { type: _type, ...rest } = line;
+        entries.push(rest as unknown as RunIndexEntry);
+      }
+    }
+    if (entries.length > 0) return entries.sort((a, b) => a.runId.localeCompare(b.runId));
+    return readIndex(this.root);
+  }
+
+  /**
+   * A day's run rows without parsing its events. Events are ~90% of a day file
+   * (briefs, test tails), and the index is all `context` and `log list` need:
+   * parsing every event of 25 MB of history was most of their time on atlas-shop.
+   * A line that does not parse is skipped, as the full reader skips it.
+   */
+  private async runRows(date: string): Promise<DayLine[]> {
+    const file = path.join(this.root, "logs", date, "runs.jsonl");
+    // Searched as bytes and decoded per row: decoding the whole file cost more
+    // than everything else here put together.
+    const buf = await fs.readFile(file).catch(() => Buffer.alloc(0));
+    const rows: DayLine[] = [];
+    const marker = Buffer.from('"type":"run"');
+    for (let at = buf.indexOf(marker); at >= 0; ) {
+      const start = at === 0 ? 0 : buf.lastIndexOf(0x0a, at) + 1;
+      const newline = buf.indexOf(0x0a, at);
+      const end = newline < 0 ? buf.length : newline;
+      try {
+        const parsed = JSON.parse(buf.toString("utf8", start, end)) as DayLine;
+        if (parsed.type === "run") rows.push(parsed);
+      } catch {
+        // an incomplete trailing line or a hand edit — not this reader's to report
+      }
+      at = newline < 0 ? -1 : buf.indexOf(marker, end);
+    }
+    return rows;
+  }
+
+  async events(runId: string): Promise<RunEvent[]> {
+    const lines = await this.day(runSlot(runId).date);
+    const own = lines
+      .filter((l) => l.type === "event" && l.runId === runId)
+      .map(({ type: _type, runId: _runId, ...rest }) => rest as unknown as RunEvent);
+    // A day with a runs.jsonl is in the current layout, so a run with no events
+    // there has none (a `log add` entry). Only a day without one can hold an
+    // earlier layout worth probing.
+    if (own.length > 0 || lines.length > 0) return own;
+    return readEvents(this.root, runId);
+  }
+
+  /** Runs that have at least one event on this day, oldest first. */
+  async runsWithEvents(date: string): Promise<string[]> {
+    const ids = new Set<string>();
+    for (const line of await this.day(date)) if (line.type === "event") ids.add(line.runId);
+    return [...ids].sort();
+  }
+}
+
+export function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+/** Worker runs vs journal entries, shared by the snapshot and `awo context`. */
+export function runStats(runs: RunIndexEntry[]): Required<
+  Pick<Stats, "workerRuns" | "workerSuccessRate" | "medianWorkerDurationSec" | "journalEntries" | "medianJournalDurationSec">
+> {
+  const durations = (rs: RunIndexEntry[]) =>
+    rs.map((r) => r.durationSec).filter((d): d is number => typeof d === "number");
+  const worker = runs.filter((r) => r.taskId !== null && r.taskId !== undefined);
+  const journal = runs.filter((r) => r.taskId === null || r.taskId === undefined);
+  const finished = worker.filter((r) => r.status !== "running");
+  return {
+    workerRuns: worker.length,
+    workerSuccessRate:
+      finished.length > 0 ? finished.filter((r) => r.status === "success").length / finished.length : null,
+    medianWorkerDurationSec: median(durations(worker)),
+    journalEntries: journal.length,
+    medianJournalDurationSec: median(durations(journal)),
+  };
 }
 
 function toView(task: TaskDefinition, state: ReturnType<typeof newTaskState>): TaskView {
@@ -284,8 +426,8 @@ export class FileReader implements WorkspaceReader {
     return runList({ cwd: this.root });
   }
 
-  async runs(): Promise<RunIndexEntry[]> {
-    return (await readIndex(this.root)).sort((a, b) => b.runId.localeCompare(a.runId));
+  async runs(ledger: RunLedger = new RunLedger(this.root)): Promise<RunIndexEntry[]> {
+    return (await ledger.index()).sort((a, b) => b.runId.localeCompare(a.runId));
   }
 
   async runEvents(runId: string): Promise<RunEvent[]> {
@@ -297,22 +439,23 @@ export class FileReader implements WorkspaceReader {
    * explicit `--untested "<why>"`, so a non-zero count is a list of exemptions
    * someone chose — worth seeing rather than burying in individual run logs.
    */
-  private async countUntestedSuccesses(runs: RunIndexEntry[]): Promise<number> {
+  private async countUntestedSuccesses(runs: RunIndexEntry[], ledger: RunLedger): Promise<number> {
     let n = 0;
     for (const r of runs.filter((x) => x.status === "success")) {
-      const events = await readEvents(this.root, r.runId);
+      const events = await ledger.events(r.runId);
       if (events.length > 0 && !events.some((e) => e.kind === "test")) n += 1;
     }
     return n;
   }
 
   async snapshot(): Promise<Snapshot> {
+    const ledger = new RunLedger(this.root);
     const [project, requirements, goals, repos, runs, agents] = await Promise.all([
       this.project(),
       this.requirements(),
       this.goals(),
       this.repos(),
-      this.runs(),
+      this.runs(ledger),
       this.agents(),
     ]);
 
@@ -370,8 +513,9 @@ export class FileReader implements WorkspaceReader {
             ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
             : null,
         openRuns: tasks.filter((t) => t.status === "running").length,
-        untestedSuccesses: await this.countUntestedSuccesses(runs),
+        untestedSuccesses: await this.countUntestedSuccesses(runs, ledger),
         byTier,
+        ...runStats(runs),
       },
       generatedAt: new Date().toISOString(),
     };

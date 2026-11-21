@@ -1,21 +1,110 @@
+import fs from "fs-extra";
+import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
-import { FileReader } from "../ui/reader.js";
+import { FileReader, RunLedger, runStats, type ProjectSummary, type Snapshot } from "../ui/reader.js";
 import { readLibraryVersion } from "../template.js";
 import { resolveOrchestrator } from "../models.js";
-import type { Snapshot } from "../ui/reader.js";
 import type { RunIndexEntry } from "../runs.js";
-import { findGoals } from "../tasks.js";
+import { findGoals, findTasksInGoal, goalArchiveDir } from "../tasks.js";
+import { newTaskState, readState, reconcileGoalState, type GoalStatus, type TaskStatus } from "../state.js";
+import { runList, type RepoStatusEntry } from "./list.js";
 import { findArchivableGoals, type ArchivableGoal } from "./goal-archive.js";
+import { awaitingVerdict, effectiveGoalStatus } from "./show.js";
+
+/** An open run with nothing recorded for this long is presumed abandoned. */
+const STALE_RUN_HOURS = 24;
+
+export interface ContextGoal {
+  id: string;
+  title: string;
+  status: GoalStatus;
+  total: number;
+  done: number;
+  cancelled: number;
+  inReview: number;
+  blocked: number;
+  qaRequired: boolean;
+  /** Governed, every task in review or done, no passing verdict yet. */
+  awaitingVerdict: boolean;
+}
+
+/** A live task that needs a look: running or blocked. */
+export interface ContextTask {
+  id: string;
+  goalId: string;
+  name: string;
+  status: TaskStatus;
+  blockedReason: string | null;
+  lastRunId: string | null;
+  /** Running tasks: hours since the open run last recorded anything. */
+  idleHours: number | null;
+  /** Running with no event for 24 h — reported, never offered as the next step. */
+  stale: boolean;
+}
+
+export interface ContextStats {
+  workerRuns: number;
+  workerSuccessRate: number | null;
+  medianWorkerDurationSec: number | null;
+  journalEntries: number;
+  medianJournalDurationSec: number | null;
+}
 
 export interface ContextResult {
-  snapshot: Snapshot;
+  project: ProjectSummary;
   installedVersion: string;
   orchestrator: string;
+  repos: RepoStatusEntry[];
+  /** Live goals only — the digest answers "what is in flight". */
+  goals: ContextGoal[];
+  archivedGoals: number;
+  /** Task counts across live goals; archived goals' tasks are history, not load. */
+  tasks: { total: number; byStatus: Record<string, number> };
+  attention: ContextTask[];
   looseRequirements: string[];
   recent: RunIndexEntry[];
+  stats: ContextStats;
   /** Finished goals still sitting in the live list, waiting to be filed away. */
   archivable: ArchivableGoal[];
   next: string;
+  /** `--full` only: the whole dashboard snapshot, as 0.7 returned it. */
+  snapshot?: Snapshot;
+}
+
+interface LiveTask {
+  id: string;
+  goalId: string;
+  name: string;
+  status: TaskStatus;
+  blockedReason: string | null;
+  lastRunId: string | null;
+  startedAt: string | null;
+  heartbeatAt: string | null;
+  dependsOn: string[];
+  governed: boolean;
+}
+
+async function countArchivedGoals(root: string): Promise<number> {
+  const archive = goalArchiveDir(root);
+  const entries = await fs.readdir(archive, { withFileTypes: true }).catch(() => []);
+  let n = 0;
+  for (const e of entries) {
+    if (e.isDirectory() && (await fs.pathExists(path.join(archive, e.name, "goal.md")))) n += 1;
+  }
+  return n;
+}
+
+/** When the open run last showed signs of life: owner heartbeat, last event, or start. */
+async function idleHours(ledger: RunLedger, task: LiveTask, now: number): Promise<number | null> {
+  const stamps: number[] = [];
+  if (task.heartbeatAt) stamps.push(Date.parse(task.heartbeatAt));
+  if (task.lastRunId) {
+    const last = (await ledger.events(task.lastRunId)).at(-1);
+    if (last?.t) stamps.push(Date.parse(last.t));
+  }
+  if (task.startedAt) stamps.push(Date.parse(task.startedAt));
+  const latest = Math.max(...stamps.filter((t) => !Number.isNaN(t)));
+  return Number.isFinite(latest) ? Math.max(0, (now - latest) / 3_600_000) : null;
 }
 
 /**
@@ -29,81 +118,197 @@ export interface ContextResult {
  * truth) applies to summaries too. The token saving is real but comes from *not
  * scanning*, not from caching: one command reads the few files that matter and
  * prints ~20 lines, instead of an agent globbing the tree to work it out.
+ *
+ * Reads live goals only. It used to build the whole dashboard snapshot — every
+ * archived goal, every requirement, every run's events — to print those ~20
+ * lines: 4 s and a 2.7 MB `--json` on atlas-shop, which is why agents stopped
+ * running it. `--full` still returns the snapshot for the few callers that want it.
  */
-export async function runContext(options: { cwd?: string } = {}): Promise<ContextResult> {
+export async function runContext(options: { cwd?: string; full?: boolean } = {}): Promise<ContextResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const reader = new FileReader(root);
+  const ledger = new RunLedger(root);
+  const now = Date.now();
 
-  const snapshot = await reader.snapshot();
-  const orchestrator = await resolveOrchestrator(root);
-  const goalPolicies = new Map(
-    (await findGoals(root)).map((goal) => [goal.id, goal.completionPolicy])
-  );
+  const [project, orchestrator, repos, archivedGoals, runs] = await Promise.all([
+    reader.project(),
+    resolveOrchestrator(root),
+    runList({ cwd: root }),
+    countArchivedGoals(root),
+    ledger.index(),
+  ]);
+
+  const goals: ContextGoal[] = [];
+  const live: LiveTask[] = [];
+  const byStatus: Record<string, number> = {};
+  for (const goal of await findGoals(root, { includeArchived: false })) {
+    const tasks = await findTasksInGoal(goal.dir);
+    const raw = await readState(goal.dir, goal.id);
+    const state = reconcileGoalState(raw, tasks).state;
+    const statuses: TaskStatus[] = [];
+    for (const task of tasks) {
+      const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
+      statuses.push(ts.status);
+      byStatus[ts.status] = (byStatus[ts.status] ?? 0) + 1;
+      live.push({
+        id: task.id,
+        goalId: goal.id,
+        name: task.name,
+        status: ts.status,
+        blockedReason: ts.blockedReason,
+        lastRunId: ts.lastRunId,
+        startedAt: ts.startedAt,
+        heartbeatAt: ts.owner?.heartbeatAt ?? null,
+        dependsOn: task.dependsOn,
+        governed: goal.completionPolicy.qaRequired,
+      });
+    }
+    const count = (s: TaskStatus) => statuses.filter((x) => x === s).length;
+    goals.push({
+      id: goal.id,
+      title: goal.title,
+      status: await effectiveGoalStatus(root, goal, raw, tasks),
+      total: tasks.length,
+      done: count("done"),
+      cancelled: count("cancelled"),
+      inReview: count("in-review"),
+      blocked: count("blocked"),
+      qaRequired: goal.completionPolicy.qaRequired,
+      awaitingVerdict: awaitingVerdict(goal, statuses, raw),
+    });
+  }
+
+  const attention: ContextTask[] = [];
+  for (const t of live.filter((x) => x.status === "running" || x.status === "blocked")) {
+    const idle = t.status === "running" ? await idleHours(ledger, t, now) : null;
+    attention.push({
+      id: t.id,
+      goalId: t.goalId,
+      name: t.name,
+      status: t.status,
+      blockedReason: t.blockedReason,
+      lastRunId: t.lastRunId,
+      idleHours: idle === null ? null : Math.round(idle * 10) / 10,
+      stale: idle !== null && idle >= STALE_RUN_HOURS,
+    });
+  }
 
   // Requirements still sitting in intake — invisible on the board, so a new
   // session would otherwise never learn they exist.
-  const fs = await import("fs-extra");
-  const path = await import("path");
-  const looseRequirements = (
-    await fs.default.readdir(path.default.join(root, "requirements")).catch(() => [])
-  )
+  const looseRequirements = (await fs.readdir(path.join(root, "requirements")).catch(() => [] as string[]))
     .filter((f: string) => f.endsWith(".md"))
     .map((f: string) => f.replace(/\.md$/, ""));
 
-  const tasks = snapshot.goals.flatMap((g) => g.tasks);
-  const blocked = tasks.filter((t) => t.status === "blocked");
-  const running = tasks.filter((t) => t.status === "running");
-  const review = tasks.filter((t) => t.status === "in-review");
-  const todo = tasks.filter((t) => t.status === "todo");
+  const archivable = await findArchivableGoals(root);
+  const next = await nextStep(root, { goals, live, attention, looseRequirements, archivable });
+  const stats = runStats(runs);
 
-  // The single most useful line: what a session should actually do next.
-  let next: string;
+  return {
+    project,
+    installedVersion: readLibraryVersion(),
+    orchestrator: `${orchestrator.runtime}:${orchestrator.model}`,
+    repos,
+    goals,
+    archivedGoals,
+    tasks: { total: live.length, byStatus },
+    attention,
+    looseRequirements,
+    recent: [...runs].sort((a, b) => b.runId.localeCompare(a.runId)).slice(0, 3),
+    stats,
+    archivable,
+    next,
+    ...(options.full ? { snapshot: await reader.snapshot() } : {}),
+  };
+}
+
+/**
+ * The single most useful line: what a session should actually do next.
+ *
+ * Finishing outranks starting. A goal waiting on a verdict, or work waiting on a
+ * review, is the bottleneck the real workspaces sat in for weeks while this line
+ * kept saying "start the next task". A run that has been silent for a day is
+ * named as probably abandoned, not offered as the thing to do: it pointed every
+ * new session at a worker that had died long ago.
+ */
+async function nextStep(
+  root: string,
+  view: {
+    goals: ContextGoal[];
+    live: LiveTask[];
+    attention: ContextTask[];
+    looseRequirements: string[];
+    archivable: ArchivableGoal[];
+  }
+): Promise<string> {
+  const { goals, live, attention, looseRequirements } = view;
+  const running = attention.filter((t) => t.status === "running" && !t.stale);
+  const stale = attention.filter((t) => t.status === "running" && t.stale);
+  const blocked = attention.filter((t) => t.status === "blocked");
+  const verdicts = goals.filter((g) => g.awaitingVerdict);
+  // In a governed goal, tasks wait in review for the goal-level verdict — they are
+  // not individually approvable, so they are not a per-task review backlog.
+  const review = live.filter((t) => t.status === "in-review" && !t.governed);
+  const todo = live.filter((t) => t.status === "todo");
+  const closed = new Set(live.filter((t) => ["done", "in-review", "cancelled"].includes(t.status)).map((t) => t.id));
+  const ready = todo.find((t) => t.dependsOn.every((d) => closed.has(d))) ?? todo[0];
+  const unplanned = goals.find((g) => g.total === 0);
+
   if (running.length > 0) {
-    next = `${running[0].id} is running — close it with \`awo task complete ${running[0].id} --outcome <success|failed>\``;
-  } else if (blocked.length > 0) {
-    next = `unblock ${blocked[0].id} (${blocked[0].blockedReason ?? "no reason recorded"}) — \`awo task status ${blocked[0].id} todo\``;
-  } else if (todo.length > 0) {
-    next = `start ${todo[0].id} — \`awo task run ${todo[0].id}\``;
-  } else if (review.length > 0) {
-    const candidate = review[0];
-    next = goalPolicies.get(candidate.goalId)?.qaRequired
-      ? `inspect ${candidate.goalId} completion blockers — \`awo goal readiness ${candidate.goalId}\`, then \`awo goal verify ${candidate.goalId}\``
-      : `verify ${candidate.id} — \`awo task verify ${candidate.id}\``;
-  } else if (snapshot.goals.some((g) => !g.archived && g.status === "qa-review")) {
-    const goal = snapshot.goals.find((g) => !g.archived && g.status === "qa-review")!;
-    next = `inspect ${goal.id} completion blockers — \`awo goal readiness ${goal.id}\``;
-  } else if (looseRequirements.length > 0) {
+    return `${running[0].id} is running — close it with \`awo task complete ${running[0].id} --outcome <success|failed>\``;
+  }
+  if (verdicts.length > 0) {
+    const g = verdicts[0];
+    const more = verdicts.length > 1 ? ` (+${verdicts.length - 1} more — \`awo goal list --needs-verdict\`)` : "";
+    return `${g.id} awaits a verdict (${g.inReview} in review) — \`awo goal readiness ${g.id}\`, then \`awo goal verify ${g.id}\`${more}`;
+  }
+  if (review.length > 0) {
+    const more = review.length > 1 ? ` (${review.length} in review)` : "";
+    return `verify ${review[0].id}${more} — \`awo task verify ${review[0].id}\``;
+  }
+  if (blocked.length > 0) {
+    return `unblock ${blocked[0].id} (${blocked[0].blockedReason ?? "no reason recorded"}) — \`awo task status ${blocked[0].id} todo\``;
+  }
+  if (ready) return `start ${ready.id} — \`awo task run ${ready.id}\``;
+  if (unplanned) return `plan ${unplanned.id} into tasks — \`awo goal plan ${unplanned.id}\``;
+  if (stale.length > 0) {
+    const t = stale[0];
+    return `${t.id}'s run looks abandoned (no events for ${Math.round(t.idleHours ?? 0)}h) — inspect \`awo log tail --task ${t.id}\`, then close it with \`awo task complete ${t.id} --outcome failed\``;
+  }
+  const qaReview = goals.find((g) => g.status === "qa-review");
+  if (qaReview) {
+    return `inspect ${qaReview.id} completion blockers — \`awo goal readiness ${qaReview.id}\``;
+  }
+  if (looseRequirements.length > 0) {
     const { readRequirement } = await import("./intake.js");
     const requirement = await readRequirement(root, looseRequirements[0]);
     if (requirement.status === "draft") {
-      next = `refine ${requirement.id} into checkable criteria — \`awo req refine ${requirement.id}\``;
+      return `refine ${requirement.id} into checkable criteria — \`awo req refine ${requirement.id}\``;
     } else if (requirement.status === "proposed") {
-      next = `have a human accept ${requirement.id} — \`awo req approve ${requirement.id}\``;
+      return `have a human accept ${requirement.id} — \`awo req approve ${requirement.id}\``;
     } else if (requirement.status === "rejected") {
-      next = `revise ${requirement.id} and propose it again — \`awo req propose ${requirement.id}\``;
-    } else {
-      next = `turn ${requirement.id} into a goal — \`awo goal new --from ${requirement.id}\``;
+      return `revise ${requirement.id} and propose it again — \`awo req propose ${requirement.id}\``;
     }
-  } else if (snapshot.goals.length === 0) {
-    next = `nothing planned yet — \`awo req new --title "…"\``;
-  } else {
-    next = "all tasks are closed — inspect `awo goal readiness <goalId>` and verify the definition-of-done";
+    return `turn ${requirement.id} into a goal — \`awo goal new --from ${requirement.id}\``;
   }
+  if (goals.length === 0) {
+    return `nothing live — start with \`awo req new --title "…"\``;
+  }
+  const target = view.archivable[0] ?? goals[0];
+  return `all tasks are closed — inspect \`awo goal readiness ${target.id}\` and verify the definition-of-done${
+    view.archivable.length > 0 ? `, then \`awo goal archive ${view.archivable[0].id}\`` : ""
+  }`;
+}
 
-  return {
-    snapshot,
-    installedVersion: readLibraryVersion(),
-    orchestrator: `${orchestrator.runtime}:${orchestrator.model}`,
-    looseRequirements,
-    recent: snapshot.runs.slice(0, 3),
-    archivable: await findArchivableGoals(root),
-    next,
-  };
+function duration(sec: number | null): string {
+  if (sec === null) return "—";
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60 ? `${String(sec % 60).padStart(2, "0")}s` : ""}`;
+  return `${(sec / 3600).toFixed(1)}h`;
 }
 
 /** ~20 lines an agent can read instead of scanning the tree. */
 export function formatContext(c: ContextResult): string {
-  const { project, repos, goals, stats } = c.snapshot;
+  const { project, repos, goals } = c;
   const lines: string[] = [];
 
   const skew =
@@ -122,19 +327,18 @@ export function formatContext(c: ContextResult): string {
   // Archived goals are deliberately not listed. This digest answers "what is live
   // right now", and a finished goal is not — it stays one `awo goal restore` away,
   // and the count keeps it from vanishing silently.
-  const live = goals.filter((g) => !g.archived);
-  const archivedCount = goals.length - live.length;
-
-  if (live.length === 0) lines.push("goals         none live");
-  for (const g of live) {
-    const done = g.tasks.filter((t) => t.status === "done").length;
-    const cancelled = g.tasks.filter((t) => t.status === "cancelled").length;
-    const cancelledText = cancelled
-      ? ` + ${cancelled} cancelled (${done + cancelled}/${g.tasks.length} closed)`
+  if (goals.length === 0) lines.push("goals         none live");
+  for (const g of goals) {
+    const cancelledText = g.cancelled
+      ? ` + ${g.cancelled} cancelled (${g.done + g.cancelled}/${g.total} closed)`
       : "";
-    lines.push(`goal          ${g.id} ${g.status} — ${done}/${g.tasks.length} done${cancelledText} · ${g.title}`);
+    const reviewText = g.inReview ? `, ${g.inReview} in review` : "";
+    const verdictText = g.awaitingVerdict ? " — awaiting verdict" : "";
+    lines.push(
+      `goal          ${g.id} ${g.status} — ${g.done}/${g.total} done${cancelledText}${reviewText}${verdictText} · ${g.title}`
+    );
   }
-  if (archivedCount > 0) lines.push(`              (${archivedCount} archived — \`awo goal list --archived\`)`);
+  if (c.archivedGoals > 0) lines.push(`              (${c.archivedGoals} archived — \`awo goal list --archived\`)`);
 
   // Finished goals still in the live list. Named, because an archive you have to
   // remember to use is an archive that stays empty.
@@ -144,17 +348,21 @@ export function formatContext(c: ContextResult): string {
     );
   }
 
-  const byStatus = Object.entries(stats.byStatus)
+  const byStatus = Object.entries(c.tasks.byStatus)
     .map(([k, v]) => `${k} ${v}`)
     .join(" · ");
   if (byStatus) lines.push(`tasks         ${byStatus}`);
 
-  for (const g of goals) {
-    for (const t of g.tasks.filter((x) => x.status === "blocked" || x.status === "running")) {
-      lines.push(
-        `              ${t.id} ${t.status}${t.blockedReason ? ` — ${t.blockedReason}` : ""}`
-      );
-    }
+  for (const t of c.attention) {
+    const detail =
+      t.status === "running"
+        ? t.stale
+          ? ` — stale (abandoned?) no events for ${Math.round(t.idleHours ?? 0)}h`
+          : ""
+        : t.blockedReason
+          ? ` — ${t.blockedReason}`
+          : "";
+    lines.push(`              ${t.id} ${t.status}${detail}`);
   }
 
   if (c.looseRequirements.length > 0) {
@@ -168,17 +376,27 @@ export function formatContext(c: ContextResult): string {
       const how = [r.tier, r.effort ? `effort=${r.effort}` : null, r.attempts && r.attempts > 1 ? `try#${r.attempts}` : null]
         .filter(Boolean)
         .join(" ");
+      const who = r.taskId ?? `${r.agent ?? "adhoc"} (log add)`;
       lines.push(
-        `run           ${r.taskId ?? r.agent ?? "adhoc"} ${r.status}${how ? ` ${how}` : ""}${r.durationSec !== null ? ` ${r.durationSec}s` : ""}`
+        `run           ${who} ${r.status}${how ? ` ${how}` : ""}${r.durationSec !== null ? ` ${r.durationSec}s` : ""}`
       );
     }
   }
 
-  if (stats.totalRuns > 0 && stats.successRate !== null) {
-    lines.push(
-      `history       ${stats.totalRuns} runs · ${Math.round(stats.successRate * 100)}% success`
+  // Worker runs and journal entries are counted apart: a `log add` row is always
+  // "success", so mixing them reported 99% success on atlas-shop while 736
+  // measured test commands had failed.
+  const s = c.stats;
+  const history: string[] = [];
+  if (s.workerRuns > 0) {
+    history.push(
+      `${s.workerRuns} runs${s.workerSuccessRate !== null ? ` · ${Math.round(s.workerSuccessRate * 100)}% success` : ""} · median ${duration(s.medianWorkerDurationSec)}`
     );
   }
+  if (s.journalEntries > 0) {
+    history.push(`${s.journalEntries} journal entries · median ${duration(s.medianJournalDurationSec)}`);
+  }
+  if (history.length > 0) lines.push(`history       ${history.join(" · ")}`);
 
   lines.push(`NEXT          ${c.next}`);
   return lines.join("\n");

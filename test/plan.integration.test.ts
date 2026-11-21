@@ -391,11 +391,13 @@ test("context orients a new session and says what to do next", () => {
   assert.match(out.stdout, /NEXT.*unblock PL-T1/);
   assert.match(out.stdout, /history {7}1 runs · 0% success/);
 
-  // --json is the same data for a machine.
+  // --json is the same digest for a machine; --full adds the dashboard snapshot.
   const j = JSON.parse(awo(ws, ["context", "--json"]).stdout);
-  assert.equal(j.snapshot.project.projectKey, "PL");
+  assert.equal(j.project.projectKey, "PL");
   assert.match(j.next, /unblock PL-T1/);
   assert.equal(j.recent.length, 1);
+  assert.equal(j.snapshot, undefined, "the digest must not carry the full snapshot");
+  assert.equal(JSON.parse(awo(ws, ["context", "--full"]).stdout).snapshot.project.projectKey, "PL");
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
