@@ -163,9 +163,17 @@ Either way, you read the criteria and decide:
 
 ```sh
 awo req list
-awo req approve SHOP-R1 --who supanut
+awo req show SHOP-R1                  # criteria (with AC-n labels) and the decision record
+awo req approve SHOP-R1 --who "PM name"
 awo req reject  SHOP-R1 --why "the versioning story isn't settled"
 ```
+
+Approval is the human's. When an agent records it on a human's instruction, awo
+requires it to say so — `--delegated-by "<human>" --instruction "<their words>"` —
+and the record shows the delegation. A person typing through an agent's shell
+passthrough can prefix `AWO_HUMAN=1`. Set `governance.allowDelegation: false` in the
+manifest to make these gates human-terminal only. Detection is environmental, so it
+keeps the record honest; it is not a security boundary.
 
 `awo goal new --from` refuses anything not approved. Rejection requires `--why`,
 because one without a reason cannot be acted on. Both decisions are recorded as runs,
@@ -230,14 +238,19 @@ During the run, the agent records progress:
 
 ```sh
 awo task event SHOP-T1 step.start --label "reading the layout config"
-awo task event SHOP-T1 commit --label "584a55a feat(faq): add model"
+awo task event SHOP-T1 note -m "chose the BFF route; the UI only renders"
 awo task event SHOP-T1 test --run "npx jest --silent" --baseline
 ```
+
+Commits and diffs are captured automatically — do not record them. A measured
+`test` exits 3 when the command fails and prints why; a bare `test` (no `--run`)
+measures the repo's declared `testCommand`. Lost the thread? `awo task resume
+SHOP-T1` re-briefs a fresh worker into the open run.
 
 Close it:
 
 ```sh
-awo task complete SHOP-T1 --outcome success --summary "…"
+awo task complete SHOP-T1 --summary "…"          # --outcome defaults to success
 ```
 
 New goals require goal-level QA, so success routes to `in-review` automatically.
@@ -392,8 +405,8 @@ would change, and `awo pr link --no-meta` links without touching the PR.
 Per task, for legacy/non-governed goals:
 
 ```sh
-awo task verify SHOP-T1              # in-review -> done
-awo task verify SHOP-T1 --reject     # back to blocked, with a reason
+awo task verify SHOP-T1                            # in-review -> done
+awo task verify SHOP-T1 --reject --reason "…"      # back to todo; the reason is kept
 ```
 
 Per goal — the one that catches what per-task checks cannot:
@@ -404,7 +417,16 @@ awo goal trace SHOP-G1                # each acceptance criterion vs its evidenc
 awo goal readiness SHOP-G1            # every current completion blocker
 awo goal verdict SHOP-G1 --pass --summary "meets the definition of done" --who "QA owner"
 awo goal verdict SHOP-G1 --gap  --summary "FAQ ordering is not applied on the BFF route" --who "QA owner"
+awo goal close SHOP-G1 --dry-run      # what still stands between the goal and the archive
 ```
+
+Criterion evidence is bound, not claimed: `awo task evidence SHOP-T1 --criterion
+1,3 --kind test` attaches the task's latest passing measured test (or `--ref
+<runId|command>`), and `--criterion AC-17` follows a labelled criterion through
+renumbering. Editing a criterion after its evidence was attached is flagged by
+`trace` and `readiness`. A goal created with `--policy light` skips per-criterion
+evidence and the verdict; `standard` keeps evidence but no verdict; `strict` (the
+default) needs both.
 
 For a governed goal, individual `task verify` approvals cannot bypass this gate.
 `--pass` requires every task closed, every criterion covered (or an exception named
@@ -524,9 +546,10 @@ awo log list --tier low --status failed
 ```sh
 awo context               # run this FIRST in any new session
 awo log list --task SHOP-T2
-awo log show <runId>
-awo log tail
-awo ui                    # local dashboard on 127.0.0.1
+awo log show <runId|taskId>   # open runs too
+awo log tail --task SHOP-T2   # that task's latest run, including one still open
+awo goal show SHOP-G1         # status, policy, coverage, tasks, PRs, worktrees
+awo ui                        # local dashboard on 127.0.0.1
 ```
 
 `awo context` is a derived digest — project, repos, goals, blocked and running tasks,
@@ -577,19 +600,30 @@ awo resolve AGENTS.md --theirs       # or --yours
 
 ## 14. Troubleshooting
 
-**"cannot close as success on a test event awo did not run"** — you recorded a claim.
-Re-record it as a measurement: `awo task event <id> test --run "<cmd>" --baseline`.
-Or, if there is genuinely nothing to run, be honest: `--untested "<why>"`, which is
-recorded in the log.
+**"test claims are not accepted"** — record a measurement:
+`awo task event <id> test --run "<cmd>" --baseline`. If there is genuinely nothing
+to run, be honest at completion: `--untested "<why>"` — which excuses only the
+absence of a measurement, never a failing one.
 
-**"has evidence that needs a human, so it cannot go straight to done"** — the
-measurement passed but is inconclusive (usually a test edited alongside its own code).
-Close with `--gate` and look at it.
+**"has evidence that needs a human, so it cannot go straight to done"** — an
+existing test lost an assertion. Close with `--gate` and look at it (QA-governed
+goals route to review on their own).
+
+**"needs --delegated-by"** — an agent tried to pass a human gate. Ask the human, or
+record their instruction with `--delegated-by "<human>" --instruction "<their words>"`.
+
+**A run nobody is driving** — `awo doctor` tells a possibly-live run from an
+abandoned one. Continue it with `awo task resume <id>`, or close it:
+`awo task complete <id> --outcome failed --summary "abandoned"`.
 
 **"is proposed, not approved"** — intake is waiting on you: `awo req approve <id>`.
 
-**"has unmet dependencies"** — a predecessor isn't `done`. If it's `in-review`, that's
-the gate working; give the verdict.
+**"has unmet dependencies"** — a predecessor isn't finished (`in-review` counts as
+finished for dependents). Nothing was changed; run the predecessor first.
+
+**Disk filling with worktrees** — `awo worktree prune` removes merged ones (squash
+merges included), `awo worktree prune --deps` frees `node_modules`/`.next`/`dist`
+from idle ones, and `awo goal close <G>` prunes a finished goal's worktrees.
 
 **`recheck` says `pre-existing`** — that command fails at the branch point, so it
 proves nothing about this task. Get the base green, or use a narrower command that
@@ -631,21 +665,33 @@ Honest state of things, so you can decide rather than discover.
   can describe policy ("deploy via Cloud Build, never `gcloud run deploy`"), but
   nothing *enforces* it. A rule an agent chooses to ignore is documentation. Until
   awo invokes those tools itself, treat deployment policy as advisory.
-- **`awo run` with real workers is lightly exercised.** The plan, scoping and stop
-  conditions are tested; long autonomous chains with live models are not. Start with
-  `--dry-run`, then `--until`, before letting it run a whole goal.
+- **`awo run` with real workers is lightly exercised.** The plan, scoping, stop
+  conditions and dependency policy are tested and now match `task run`; long
+  autonomous chains with live models are not, and there is no automatic fallback to
+  another runtime when one hits its quota. Start with `--dry-run`, then `--until`.
+- **Human gates are honest, not enforced.** awo detects an agent runtime from its
+  environment and makes it declare `--delegated-by`; an agent that lies about its
+  environment (`AWO_HUMAN=1`) is not stopped. The record is truthful by default,
+  which is what was missing; it is not access control.
+- **A worktree that cannot be created leaves the run open without isolation** (with a
+  warning naming why — e.g. diverged dependency branches). Treat that warning as a stop.
+- **Goal-branch delivery is partly modelled.** `deliveryBranch`/`baseBranches` set
+  worktree bases and `pr link --goal` links one PR to a goal's tasks, but integration
+  branches, releases and post-release obligations still live in your own docs.
 - **The hosted dashboard has no auth.** Whoever holds the connection string sees
   everything in that cluster. Fine for local use; decide before deploying it.
 - **`publish --detail full` sends prose** — task bodies, run records, prompts. That
   describes your code and your instructions. It is opt-in for that reason.
 - **Nothing verifies that an agent's tests are meaningful.** awo checks that the
-  command ran and passed, and flags tests edited alongside their own code — but a
-  vacuous assertion that passes still passes. Reviewing *new test files* is a good use
-  of the ten minutes you saved.
+  command ran and passed, and flags an existing test that lost assertions — but a
+  vacuous new assertion that passes still passes. Reviewing *new test files* is a good
+  use of the ten minutes you saved.
 
 **What is solid**
 
-Isolation, the evidence gate, the intake gate, the lifecycle state machine, the audit
-trail, and upgrades — each has tests, and most exist because something went wrong
-first. `PROJECT_PLAN.md` §9 records 78 such findings with what broke and what it
+Isolation, the evidence gate (measured, content-bound, per-repo), criterion evidence
+bound to measurements, the lifecycle state machine with its transition audit, the
+audit trail, and upgrades — each has tests, and most exist because something went
+wrong first. 0.8.0's changes come from a study of five real workspaces and 4,216
+recorded awo invocations; `awo-upgrade-plan.md` holds the findings. `PROJECT_PLAN.md` §9 records 78 such findings with what broke and what it
 taught; it is the most useful thing to read before trusting any of this.

@@ -265,7 +265,13 @@ test("publish --watch follows logs/<date>/runs.jsonl, including day folders crea
 
   fs.mkdirSync(path.join(day, "workers"), { recursive: true });
   fs.writeFileSync(path.join(day, "workers", "10-00-00-GU-T1.log"), "worker output\n");
-  await new Promise((r) => setTimeout(r, 600));
+  // Let the day folder's own creation event land: a fixed 600 ms raced it on a
+  // loaded machine. Settled = no new publish for 700 ms (bounded at 8 s).
+  for (let stableSince = Date.now(), last = seen.length, start = Date.now(); Date.now() - start < 8000; ) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (seen.length !== last) [last, stableSince] = [seen.length, Date.now()];
+    else if (Date.now() - stableSince >= 700) break;
+  }
   // The day folder's creation may itself fire; worker output alone must not keep firing.
   const afterWorker = seen.length;
   fs.appendFileSync(path.join(day, "workers", "10-00-00-GU-T1.log"), "more output\n");

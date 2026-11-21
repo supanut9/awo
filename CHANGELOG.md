@@ -4,7 +4,151 @@ All notable changes to AWO are documented in this file.
 
 ## [Unreleased]
 
-### Fixed
+## [0.8.0] - 2026-11-22
+
+"The finish line." Grounded in a study of five real workspaces (atlas-shop,
+atlas-sales-crm, atlas-auth, blender, awo-dashboard) and 4,216 mined awo
+invocations from Claude Code and Codex sessions, cross-checked by independent
+Claude and Codex reviews — see `awo-upgrade-plan.md`. awo already measured work
+honestly; it did not yet help anyone *finish*: 112 of 129 tasks in one workspace
+sat in review with zero verdicts, every "human" approval was typed by an agent,
+half the criterion evidence was prose, and `log tail` showed agents the wrong run
+74 times out of 75.
+
+### Breaking / behaviour changes
+
+- `task event --run` exits **3** when the measured command fails (`--no-fail` for 0).
+  A `test` event without `--run` now measures the repo's declared `testCommand`;
+  test *claims* (`--data '{"pass":n}'`) are refused, and fields awo writes itself
+  (`verified`, `exitCode`, `treeId`, `diagnosis`, …) cannot be supplied.
+- Under an agent runtime (Claude Code, Codex, Gemini CLI, or `AWO_AGENT`),
+  `req approve` and `goal verdict` require `--delegated-by <human>` (optionally
+  `--instruction "<their words>"`) and record the delegation. A human typing
+  through an agent's shell can prefix `AWO_HUMAN=1`. `governance.allowDelegation:
+  false` makes those gates human-terminal only. `--who` never defaults to "human".
+- `req approve` only accepts a `proposed` requirement that has criteria.
+- `task evidence --kind test` must bind to a passing measured test of the task
+  (`--ref <runId|command>`, or omit it for the latest). Legacy prose is shown as
+  `claimed`.
+- `task run` refuses a body that is still the `task new` template (or empty)
+  unless `--instruction` or `--allow-empty-body`; unmet dependencies are refused
+  without marking the task `blocked`.
+- `task new` without `--targets` is refused for implementation work.
+- `awo remove` keeps cloned checkouts on disk unless `--delete-checkout`.
+- `doctor` defaults to `--scope active`.
+- The built-in `low` tier resolves to Claude sonnet, not haiku.
+- `engines.node` is `>=20.19` (the real floor of chokidar 5 / mongodb 7).
+
+### Evidence and completion
+
+- `--untested` only excuses a run with no measurement; failing, stale and
+  needs-human results always block, and `dispatch` no longer passes it for every
+  exit 0. A multi-repo task needs a passing measurement in every repo it changed.
+- Receipts are keyed on tested *content* (`treeId`), so committing exactly what
+  was tested no longer stales the receipt.
+- Measured commands run under `bash -o pipefail`; timeouts kill the process group;
+  a command ending in `|| true` is refused; exit 2/127 at both head and base is
+  `not-runnable`, not evidence.
+- Runner-specific counts (vitest — no more "61 tests" that were 61 files — jest,
+  node:test, mocha, go, pytest) with cases and suites recorded separately.
+- `test-and-code-changed` escalates only when an existing test loses an
+  assertion; in QA-governed goals the hint is recorded without `needsHuman`.
+- Secrets (`*_PASSWORD=`, `*_TOKEN=`, `mysql -p…`, URL credentials, known token
+  formats) are redacted in every event, run record and measurement artifact.
+- `task complete` defaults `--outcome` to success, adds `--failed`/`--skipped`
+  and `--model` (the model that actually ran); `task event` accepts `--note`,
+  `--msg`, `-m`, `--sha` and suggests the right kind.
+
+### Lifecycle and runs
+
+- `blocked` is no longer a dead end: the runner may start a blocked task, and
+  humans may park `todo`/`queued`/`in-review` tasks as blocked with `--reason`
+  and restore cancelled ones. Every move is recorded in `transitions[]` with who
+  and why.
+- `task run --reopen --reason` for repair rounds; `task run` on a running task
+  re-prints its run instead of erroring.
+- **New** `awo task resume <id>` hands an open run to a fresh worker (brief,
+  worktrees, events so far, last measurement per repo) and takes ownership.
+- Runs record their owner (pid, host, actor), `intendedModel` and `executedBy`;
+  an unchanged brief is stored once and pointed at.
+- `awo run` shares the dependency policy of `task run`.
+- Archived goals are read-only until restored; `goal archive` freezes the status
+  and refuses unmerged linked PRs unless `--unmerged-ok`.
+
+### Governance and acceptance
+
+- Criteria parsing reads every acceptance-criteria section (amendments), ignores
+  sub-bullets and struck items, and keeps `AC-17` labels stable; evidence stores
+  the criterion hash, and trace/readiness flag criteria edited after evidence.
+- `task evidence --criterion 1,3,5` and `--criterion AC-17`.
+- QA verdict history is kept on every overwrite (`qaHistory`).
+- QA briefs are written to `logs/<date>/qa/<runId>.md` and linked.
+- **New** `req show`, `req list --stale <days>`; `--reason`/`--why` and
+  `--by`/`--who` accepted interchangeably.
+
+### Worktrees and delivery
+
+- Task branches are cut from the fetched remote default branch (or the goal's
+  `deliveryBranch`, `baseBranches[repo]`, the repo's `baseBranch`) — never from
+  whatever the shared checkout happens to have checked out. The base is recorded.
+- Reused worktree paths are validated; diverged dependency branches are refused.
+- Prune never deletes what git refused to remove, recognises squash-merged and
+  PR-merged branches, and nulls dangling pointers; `worktree prune --deps` frees
+  `node_modules`/`.next`/`dist` from idle worktrees.
+- Baselines prune stale registrations first and never link the candidate's
+  `node_modules` into an installing command; an installer in a task worktree gets
+  a private `node_modules` instead of rewriting the shared one. awo's dependency
+  link is excluded from commits even under a `node_modules/` ignore.
+- Stale locks are reclaimed when their owner process is gone.
+- PRs: merged state is recorded and a merged PR finishes a non-governed task;
+  `pr status|reconcile --all`; one PR per repo per task; `pr link` infers
+  `--repo`/`--number` and supports `--goal` (goal-branch delivery);
+  `pr finalize` honours per-repo `mergePolicy` and `requiredChecks: "none" |
+  [names]` and its `--dry-run` writes nothing; review feedback becomes one
+  repair task per pass with bot threads skipped; a repo's `githubAccount` is
+  honoured by token, without switching the global `gh` account.
+
+### Authoring and templates
+
+- `task new --body-file|--objective|--done-when|--criteria|--tier|--output|--origin`;
+  investigation and decision tasks may have no targets. New files record
+  `createdAt` and `origin` and no longer carry a stale `status:`.
+- IDs are monotonic and allocated under a lock, so a deleted task's id (and its
+  old branch) is never reissued.
+- `goal new --policy light|standard|strict` (default `goals.defaultPolicy`).
+- The worker brief separates worker from orchestrator duties and carries a
+  command card, the skills to open first, an exact measured test line per target,
+  the criteria the task serves, its base branch and the per-repo merge policy.
+- Templates no longer name commands that do not exist or the removed log layout;
+  capture-requirement, run-tests, create-task-worktree, verify-acceptance-criteria
+  and ship-a-change match the CLI; connectors ship empty; `init --name`.
+
+### Doctor, closure, upgrade
+
+- **New** `awo goal close <G> [--dry-run]`: every blocker as an exact command,
+  then archive and prune the goal's safe worktrees.
+- Doctor: stable finding codes; stuck QA review, goals without evidence, empty
+  planning goals, dangling worktree pointers, low disk, unwritten bodies, fast
+  approvals without delegation, a workspace-root git repo, live vs abandoned
+  open runs (with a legal fix), malformed task files, stale locks, stray files,
+  and `--secrets`.
+- Upgrade backups are timestamped; the legacy `.worktrees` migration preserves
+  checkouts; collisions stop the upgrade; awo's own `.vscode/settings.json` edits
+  are not drift; `--preview`.
+- **New** `awo agent|skill|rule remove <name>` with reference checks.
+
+### UI, publish, dashboard
+
+- Local UI and the hosted dashboard handle suspended/cancelled requirements and
+  archived goals; UI types come from the reader.
+- Publish carries `projectionVersion`, archived state and `finishedAt`, watches
+  the day-file log layout, redacts field-aware (briefs and checkout paths
+  withheld by default, secrets always masked) and purges full-detail events when
+  detail is reduced. `agent org` counts runtime status.
+- In-major dependency updates (fs-extra, mongodb, uuid, vite, react, tailwind,
+  marked, …); majors (commander, chokidar, simple-git, TypeScript) deferred.
+
+### Fixed (stabilization, previously unreleased)
 
 - Task completion rejects failed or stale measurements even when routed to QA;
   only the latest rerun of the same repo/command replaces an earlier result.
@@ -20,7 +164,7 @@ All notable changes to AWO are documented in this file.
   errors for active tasks. Add `doctor --scope active|all` and `--json`.
 - Align package-lock version metadata and track missing init fixture placeholders.
 
-### Added
+### Added (stabilization, previously unreleased)
 
 - `version --verbose` / `--json` with build commit, source hash and dirty-source flag.
 - `verify:package` to install a packed artifact and smoke-test its CLI and template.
@@ -116,7 +260,8 @@ All notable changes to AWO are documented in this file.
 - Goal completion now requires reconciled task state and complete delivery evidence before transitioning to `done`.
 - Template policy and generated workspace guidance now document the stricter completion contract.
 
-[Unreleased]: https://github.com/supanut9/awo/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/supanut9/awo/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/supanut9/awo/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/supanut9/awo/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/supanut9/awo/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/supanut9/awo/compare/v0.5.0...v0.6.0

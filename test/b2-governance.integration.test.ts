@@ -101,7 +101,7 @@ function goalAwaitingVerdict(): { ws: string; repo: string } {
   const id = proposedRequirement(ws);
   assert.equal(awo(ws, ["req", "approve", id, "--who", "lead-reviewer"]).code, 0);
   assert.equal(awo(ws, ["goal", "new", "--from", id]).code, 0);
-  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api"]);
+  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api", "--objective", "Compute tax"]);
   awo(ws, ["task", "run", "GV-T1"]);
   awo(ws, ["task", "event", "GV-T1", "test", "--run", "true"]);
   const done = awo(ws, ["task", "complete", "GV-T1", "--outcome", "success", "--gate", "--unchanged", "fixture"]);
@@ -369,7 +369,7 @@ test("test evidence binds to a measured passing test of the task, never to prose
   const id = proposedRequirement(ws);
   awo(ws, ["req", "approve", id, "--who", "lead-reviewer"]);
   awo(ws, ["goal", "new", "--from", id]);
-  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api"]);
+  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api", "--objective", "Compute tax"]);
 
   const nothing = awo(ws, ["task", "evidence", "GV-T1", "--criterion", "1", "--kind", "test", "--ref", "unit tests pass"]);
   assert.equal(nothing.code, 1);
@@ -427,7 +427,7 @@ test("--criterion takes lists and labels; trace and readiness flag criteria edit
   const id = proposedRequirement(ws);
   awo(ws, ["req", "approve", id, "--who", "lead-reviewer"]);
   awo(ws, ["goal", "new", "--from", id]);
-  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api"]);
+  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api", "--objective", "Compute tax"]);
 
   const both = awo(ws, ["task", "evidence", "GV-T1", "--criterion", "1,AC-2", "--kind", "manual", "--ref", "checked by hand"]);
   assert.equal(both.code, 0, both.stderr);
@@ -476,7 +476,7 @@ test("labelled evidence follows its criterion when an amendment re-numbers the l
   const id = proposedRequirement(ws);
   awo(ws, ["req", "approve", id, "--who", "lead-reviewer"]);
   awo(ws, ["goal", "new", "--from", id]);
-  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api"]);
+  awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "Tax", "--targets", "api", "--objective", "Compute tax"]);
   assert.equal(awo(ws, ["task", "evidence", "GV-T1", "--criterion", "AC-2", "--kind", "manual", "--ref", "seen"]).code, 0);
 
   const requirement = path.join(ws, "goals", "GV-G1", "requirement.md");
@@ -522,7 +522,7 @@ test("QA briefs get their own file, and every overwrite or invalidation keeps th
   assert.match(verify.stdout, new RegExp(`cat logs/${day}/qa/${second}\\.md`));
 
   // New work retires QA into history instead of deleting it.
-  const added = awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "More", "--targets", "api"]);
+  const added = awo(ws, ["task", "new", "--goal", "GV-G1", "--name", "More", "--targets", "api", "--objective", "More"]);
   assert.equal(added.code, 0, added.stderr);
   let state = goalState(ws);
   assert.equal(state.qa, undefined);
