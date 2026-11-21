@@ -3,7 +3,8 @@ import fs from "fs-extra";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
 import { readManifest, resolvePullRequestMergePolicy } from "../manifest.js";
-import { appendEvent, workerLogFile } from "../runs.js";
+import { detachable, superviseGroup } from "../process-group.js";
+import { appendEvent, readEvents, workerLogFile } from "../runs.js";
 import { runTaskComplete, runTaskRun, type TaskRunResult } from "./task.js";
 
 /**
@@ -35,6 +36,8 @@ export interface DispatchResult {
   outputPath: string;
   outcome: "success" | "failed" | "skipped";
   completed: boolean;
+  /** Why closing the run was refused; the run is left open when this is set. */
+  completionError?: string;
 }
 
 export async function runDispatch(
@@ -131,20 +134,31 @@ export async function runDispatch(
   const outcome: DispatchResult["outcome"] = code === 0 && !timedOut ? "success" : "failed";
 
   let completed = false;
+  let completionError: string | undefined;
   if (!options.noComplete) {
     // A dispatched worker rarely records its own `test` event, so an honest
-    // success needs the reason stated rather than the evidence faked.
-    await runTaskComplete(taskId, {
-      cwd: root,
-      outcome,
-      summary: timedOut
-        ? `Worker timed out after ${options.timeoutMinutes ?? 45} minutes.`
-        : `Worker (${opened.model.runtime}:${opened.model.model}) exited ${code}. Output: ${path.relative(root, outputPath)}`,
-      untested: outcome === "success" ? "dispatched worker did not record a test event" : undefined,
-      note: [`worker output: ${path.relative(root, outputPath)}`],
-    }).then(() => {
+    // success needs the reason stated rather than the evidence faked. But only
+    // then: passing `untested` unconditionally let a worker that measured a red
+    // suite close as success, because the excuse switched the whole gate off.
+    const recordedTest = (await readEvents(root, runId)).some((event) => event.kind === "test");
+    try {
+      await runTaskComplete(taskId, {
+        cwd: root,
+        outcome,
+        summary: timedOut
+          ? `Worker timed out after ${options.timeoutMinutes ?? 45} minutes.`
+          : `Worker (${opened.model.runtime}:${opened.model.model}) exited ${code}. Output: ${path.relative(root, outputPath)}`,
+        untested:
+          outcome === "success" && !recordedTest ? "dispatched worker did not record a test event" : undefined,
+        model: `${opened.model.runtime}:${opened.model.model}`,
+        note: [`worker output: ${path.relative(root, outputPath)}`],
+      });
       completed = true;
-    });
+    } catch (err) {
+      // A gate refusal is the answer, not a crash: the run stays open so the
+      // failing check can be fixed and the run closed by hand.
+      completionError = (err as Error).message;
+    }
   }
 
   return {
@@ -157,6 +171,7 @@ export async function runDispatch(
     outputPath: path.relative(root, outputPath),
     outcome,
     completed,
+    ...(completionError ? { completionError } : {}),
   };
 }
 
@@ -186,39 +201,27 @@ function buildArgv(opened: TaskRunResult, prompt: string, writable: string[]): s
   }
 }
 
-function runWorker(
+async function runWorker(
   argv: string[],
   cwd: string,
   outputPath: string,
   timeoutMs: number
 ): Promise<{ code: number | null; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    const out = fs.createWriteStream(outputPath);
-    // stdin closed deliberately: a worker that waits on stdin it will never get
-    // hangs forever, which is how a dogfood run lost 20 minutes (§9 item 35).
-    const child = spawn(argv[0], argv.slice(1), { cwd, stdio: ["ignore", "pipe", "pipe"] });
+  const out = fs.createWriteStream(outputPath);
+  // stdin closed deliberately: a worker that waits on stdin it will never get
+  // hangs forever, which is how a dogfood run lost 20 minutes (§9 item 35).
+  // Detached, so a timeout kills the worker's whole process group — its shells,
+  // test runners and dev servers — not just the CLI at the top.
+  const child = spawn(argv[0], argv.slice(1), { cwd, detached: detachable, stdio: ["ignore", "pipe", "pipe"] });
 
-    child.stdout?.pipe(out);
-    child.stderr?.pipe(out);
+  child.stdout?.pipe(out, { end: false });
+  child.stderr?.pipe(out, { end: false });
 
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
-    }, timeoutMs);
-
-    child.on("error", (err) => {
-      // A missing CLI must fail the task, never silently become someone else's job.
-      out.write(`\nawo: failed to spawn ${argv[0]}: ${err.message}\n`);
-      clearTimeout(timer);
-      resolve({ code: 127, timedOut: false });
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      out.end();
-      resolve({ code, timedOut });
-    });
-  });
+  const { code, timedOut, error } = await superviseGroup(child, timeoutMs);
+  if (error) {
+    // A missing CLI must fail the task, never silently become someone else's job.
+    out.write(`\nawo: failed to spawn ${argv[0]}: ${error.message}\n`);
+  }
+  await new Promise<void>((resolve) => out.end(resolve));
+  return { code: error ? 127 : code, timedOut };
 }
