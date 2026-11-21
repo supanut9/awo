@@ -30,8 +30,8 @@ expected outcome is a review-ready pull request.
    attaches the read-only gate with `awo goal verify <goal>`, and records the
    verdict. An in-scope gap becomes a repair task on the same goal; only explicit
    `--new-scope` becomes a follow-up requirement.
-5. **Open and maintain the PR** — `release-engineer` commits, pushes the task
-   branch, opens a PR with evidence, runs `awo pr link <task> --repo <repo>
+5. **Open and maintain the PR** — the worker has already committed on the task
+   branch; `release-engineer` pushes it, opens a PR with evidence, runs `awo pr link <task> --repo <repo>
    --number <n>`, then repeatedly runs `awo pr reconcile <task>` to address
    actionable comments and failing checks. Re-request review after every
    meaningful push.

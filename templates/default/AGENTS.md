@@ -17,6 +17,22 @@ digest is derived fresh from the manifest, `state.json` and the run index every
 time, so it cannot be stale. For the full history use `awo log list`; for one run
 use `awo log show <runId>`.
 
+## Command card
+The commands a session needs most, with the flags that exist — check here before
+reaching for `--help`:
+
+```
+awo context                                                      where things stand, and what to do next
+awo task new --goal <G> --name "…" --targets <repo> --objective "…" --done-when "…"
+awo task run <T>                                                 open a run: worktree, brief, who should do it
+awo task event <T> test --repo <repo> --run "<cmd>" --baseline   measure — the only test evidence
+awo task event <T> note --message "…"                            progress, a decision, or a blocker
+awo task complete <T> --outcome success --summary "…"            close the run; commits are captured for you
+awo task evidence <T> --criterion <n> --kind test --ref <runId>  tie a measured pass to a criterion
+awo task recheck <T>                                             re-measure a task that is already closed
+awo log add --agent <role> --summary "…"                         record work that is not a task run
+```
+
 ## How work is organized
 Work flows down a hierarchy: **Requirement → Goal → Tasks**. Each level is a
 markdown file with YAML frontmatter. IDs are project-key prefixed:
@@ -130,15 +146,16 @@ machine and will not survive a clone or a scheduled run.
 > This is the **default baseline** installed at init — domain-agnostic, just
 > enough for the link → plan → work → ship loop to function. Anything
 > project-specific (a deploy skill, a specialized agent, a new rule) is added
-> later via `awo skill new`, `awo rule new`, `awo agent new`, or pulled from
-> the library's catalog via `awo skill add <name>` / `awo rule add <name>`.
+> later: a rule with `awo rule new <id>`, a skill or role by dropping its file
+> into `skills/` or `agents/`, or one from the library's catalog with
+> `awo skill add <name>` / `awo agent add <name>`.
 
 ## Configuration is workspace-local — never in `$HOME`
 Every command (`awo skill add`, `awo agent add`, `awo goal new`, `awo task run`,
 …) reads and writes **only inside this workspace directory**. Nothing lands in
 `~/.config/awo/`, `~/.awo/`, or any machine-global path. If an agent runtime
 (Claude Code, Gemini CLI, etc.) invokes `awo`, all resulting state changes
-appear here — clone this workspace on another machine and it behaves
+appear here — copy this workspace to another machine and it behaves
 identically.
 
 The one exception is connector credentials (MCP tokens, API keys), which
@@ -149,6 +166,11 @@ can't be tracked in git. They live in `.workspace/credentials/` (gitignored)
 Linked repos live in `repos/` (gitignored). The **manifest is the source of
 truth** — `repos/` is reconstructed from it via `awo sync`. Do not assume
 `repos/` contents travel with this workspace.
+
+**Never turn the workspace root into a git repository** (`git init` here). Code
+history lives in the linked repos and their task worktrees; a repo at the root
+nests every one of them inside it, and editors stop discovering the linked repos
+in folder mode.
 
 ## Connectors
 Declared in `.workspace/connectors.json`. Agents receive least-privilege access.
