@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { TASK_STATUSES, type GoalView, type TaskStatus, type TaskView } from "../api";
+import { TASK_STATUSES, type GoalViewWithArchive, type TaskStatus, type TaskView } from "../api";
 
 const ACCENT: Record<TaskStatus, string> = {
   todo: "border-l-stone-400",
@@ -18,7 +18,9 @@ const OUTCOME: Record<string, string> = {
 };
 
 interface Props {
-  goals: GoalView[];
+  goals: GoalViewWithArchive[];
+  /** Archived goals filtered out by the caller, so an empty board can say why. */
+  hiddenArchived?: number;
   selectedTask: string | null;
   onSelect: (taskId: string) => void;
   onMove: (taskId: string, status: TaskStatus) => void;
@@ -61,16 +63,20 @@ function Card({
   );
 }
 
-export default function Board({ goals, selectedTask, onSelect, onMove, groupByGoal }: Props) {
+export default function Board({ goals, hiddenArchived = 0, selectedTask, onSelect, onMove, groupByGoal }: Props) {
   const [over, setOver] = useState<string | null>(null);
-  const swimlanes = groupByGoal
+  const swimlanes: GoalViewWithArchive[] = groupByGoal
     ? goals
-    : [{ id: "__all", title: "", status: "", tasks: goals.flatMap((g) => g.tasks) }];
+    : [{ id: "__all", title: "", status: "planning", archived: false, tasks: goals.flatMap((g) => g.tasks) }];
 
   if (goals.every((g) => g.tasks.length === 0)) {
     return (
       <div className="p-10 text-center text-sm text-ink/55">
-        No tasks yet. Author one under <code className="font-mono">goals/&lt;goal&gt;/tasks/</code>.
+        {hiddenArchived > 0 ? (
+          <>No live tasks. {hiddenArchived} archived goal{hiddenArchived === 1 ? " is" : "s are"} hidden; use "Show archived goals" to see them.</>
+        ) : (
+          <>No tasks yet. Author one under <code className="font-mono">goals/&lt;goal&gt;/tasks/</code>.</>
+        )}
       </div>
     );
   }
@@ -84,8 +90,13 @@ export default function Board({ goals, selectedTask, onSelect, onMove, groupByGo
               <span className="font-mono text-xs font-bold text-moss-deep">{lane.id}</span>
               <span className="text-xs text-ink/60">{lane.title}</span>
               <span className="rounded-full bg-wash px-2 py-0.5 text-[10px] font-semibold text-ink/60">
-                {lane.status}
+                {lane.archived ? lane.archivedStatus ?? lane.status : lane.status}
               </span>
+              {lane.archived && (
+                <span className="rounded-full border border-ink/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink/50">
+                  archived
+                </span>
+              )}
             </div>
           )}
           <div className="grid min-w-[1050px] grid-cols-7 gap-3">
