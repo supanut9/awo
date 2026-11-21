@@ -3,6 +3,7 @@ import { spawn } from "child_process";
 import fs from "fs-extra";
 import path from "path";
 import { simpleGit } from "simple-git";
+import { prepareDependencyDirs, runsInstaller, writeBaselineLease } from "./worktrees.js";
 
 /**
  * §16 — evidence is a measurement, never a claim.
@@ -279,7 +280,7 @@ export async function branchPoint(repoDir: string, baseRef: string): Promise<str
  * A stash-and-checkout dance in the task's own worktree would risk the agent's
  * uncommitted work, so the baseline runs in a throwaway worktree of the same repo.
  * Node projects need their dependencies, so node_modules is linked in rather than
- * installed — the same trick task worktrees use.
+ * installed — the same trick task worktrees use — unless the command installs.
  */
 export async function measureBaseline(
   repoDir: string,
@@ -287,26 +288,43 @@ export async function measureBaseline(
   command: string,
   scratchDir: string,
   timeoutMinutes = 30
-): Promise<{ measurement: Measurement | null; error?: string }> {
+): Promise<{ measurement: Measurement | null; error?: string; note?: string }> {
   const git = simpleGit(repoDir);
   // NOT under repoDir/.git: inside a worktree that is a FILE, not a directory, so
   // creating anything beneath it fails. The caller supplies a scratch path it owns.
+  // One fresh directory per measurement — never a fixed path a crashed run left
+  // registered — holding the checkout and the lease that tells prune it is in use.
   await fs.ensureDir(scratchDir);
-  const tmp = await fs.mkdtemp(path.join(scratchDir, `${ref.slice(0, 12)}-`));
+  const dir = await fs.mkdtemp(path.join(scratchDir, `${ref.slice(0, 12)}-`));
+  const checkout = path.join(dir, "checkout");
+  const notes: string[] = [];
   try {
-
-    await git.raw(["worktree", "add", "--detach", tmp, ref]);
+    await writeBaselineLease(dir, { ref, command });
+    // A checkout deleted without git's knowledge keeps its registration, and
+    // `worktree add` then fails with "missing but already registered worktree"
+    // until someone prunes by hand — one of the ways baselines failed in the real
+    // workspaces (F11).
+    await git.raw(["worktree", "prune"]).catch(() => {});
+    await git.raw(["worktree", "add", "--detach", checkout, ref]);
     const deps = path.join(repoDir, "node_modules");
-    if (await fs.pathExists(deps)) {
-      await fs.ensureSymlink(deps, path.join(tmp, "node_modules"), "dir").catch(() => {});
+    if (runsInstaller(command)) {
+      // `npm ci` deletes node_modules first; through a link that is the candidate's
+      // install — the shared one — which is how baselines damaged it (F11).
+      notes.push("The command installs dependencies, so the baseline installs its own instead of linking the candidate's node_modules.");
+    } else if (await fs.pathExists(deps)) {
+      await fs.ensureSymlink(deps, path.join(checkout, "node_modules"), "dir").catch(() => {});
     }
-    return { measurement: await measure(command, tmp, timeoutMinutes) };
+    const prepared = await prepareDependencyDirs(checkout, command);
+    if (prepared) notes.push(prepared);
+    const measurement = await measure(command, checkout, timeoutMinutes);
+    return { measurement, ...(notes.length > 0 ? { note: notes.join(" ") } : {}) };
   } catch (err) {
     // Reported, never swallowed: a silently absent baseline turns every failure into
     // "unknown", which is the answer this whole mechanism exists to avoid.
     return { measurement: null, error: (err as Error).message };
   } finally {
-    await git.raw(["worktree", "remove", "--force", tmp]).catch(() => {});
-    await fs.remove(tmp).catch(() => {});
+    await git.raw(["worktree", "remove", "--force", checkout]).catch(() => {});
+    // Takes the lease with it.
+    await fs.remove(dir).catch(() => {});
   }
 }
