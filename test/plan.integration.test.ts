@@ -126,7 +126,7 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
   assert.match(listed.stdout, /PL-T1\ttodo/);
   assert.match(listed.stdout, /PL-T2\ttodo/);
 
-  const run = awo(ws, ["task", "run", "PL-T1"]);
+  const run = awo(ws, ["task", "run", "PL-T1", "--allow-empty-body"]);
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /PL-T1 is running/);
 
@@ -139,7 +139,7 @@ test("req -> goal -> task walks the whole pipeline and allocates IDs in order", 
     /NEXT.*start PL-T2/,
     "an in-review predecessor must not hide the next runnable task"
   );
-  assert.equal(awo(ws, ["task", "run", "PL-T2"]).code, 0);
+  assert.equal(awo(ws, ["task", "run", "PL-T2", "--allow-empty-body"]).code, 0);
 
   const goals = awo(ws, ["goal", "list"]);
   assert.match(goals.stdout, /PL-G1\t\S+\t0\/2 done/);
@@ -312,7 +312,7 @@ test("doctor flags a run that was opened but never closed", () => {
   approveRequirement(ws, "PL-R1");
   awo(ws, ["goal", "new", "--from", "PL-R1"]);
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "Work", "--targets", "api"]);
-  awo(ws, ["task", "run", "PL-T1"]);
+  awo(ws, ["task", "run", "PL-T1", "--allow-empty-body"]);
 
   const out = awo(ws, ["doctor"]);
   assert.match(out.stdout, /PL-T1: run .* was opened but never closed/);
@@ -382,7 +382,7 @@ test("context orients a new session and says what to do next", () => {
   assert.match(out.stdout, /NEXT.*awo task run PL-T1/);
 
   // An open run is the most urgent thing, and a blocked task explains itself.
-  awo(ws, ["task", "run", "PL-T1", "--no-worktree"]);
+  awo(ws, ["task", "run", "PL-T1", "--no-worktree", "--allow-empty-body"]);
   assert.match(awo(ws, ["context"]).stdout, /NEXT.*PL-T1 is running/);
 
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "failed", "--summary", "tests red"]);
@@ -413,21 +413,21 @@ test("only medium and high effort are selectable; low is normalized", () => {
   awo(ws, ["task", "new", "--goal", "PL-G1", "--name", "W", "--targets", "api", "--agent", "software-engineer"]);
 
   set("high");
-  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=high/);
+  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree", "--allow-empty-body"]).stdout, /effort=high/);
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "failed"]);
   awo(ws, ["task", "status", "PL-T1", "todo"]);
 
   // `low` was dropped on evidence (§9 item 47) but must not break a policy that
   // still says it — tolerate and normalize, per §11.5.
   set("low");
-  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=medium/);
+  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree", "--allow-empty-body"]).stdout, /effort=medium/);
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "failed"]);
   awo(ws, ["task", "status", "PL-T1", "todo"]);
 
   // xhigh/max exist on some runtimes but are not offered: their gain must be
   // measured, and offering them invites reaching for them by default.
   set("xhigh");
-  const bad = awo(ws, ["task", "run", "PL-T1", "--no-worktree"]);
+  const bad = awo(ws, ["task", "run", "PL-T1", "--no-worktree", "--allow-empty-body"]);
   assert.equal(bad.code, 1);
   assert.match(bad.stderr, /Invalid effort "xhigh"/);
   assert.match(bad.stderr, /Only medium and high are selectable/);
@@ -440,7 +440,7 @@ test("only medium and high effort are selectable; low is normalized", () => {
   const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   m.models = { tiers: { low: { runtime: "codex", model: "gpt-5.4-mini" } } };
   fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
-  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree"]).stdout, /effort=medium/);
+  assert.match(awo(ws, ["task", "run", "PL-T1", "--no-worktree", "--allow-empty-body"]).stdout, /effort=medium/);
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -466,11 +466,11 @@ test("goal verify attaches the gate, readiness enforces evidence, and verdict ro
   assert.match(anonymousException.stderr, /requires --who <human>/);
 
   // One task with evidence, one excused — the gate must be able to tell them apart.
-  awo(ws, ["task", "run", "PL-T1"]);
+  awo(ws, ["task", "run", "PL-T1", "--allow-empty-body"]);
   // Measured, because an unmeasured claim no longer satisfies the gate.
   awo(ws, ["task", "event", "PL-T1", "test", "--run", "true"]);
   awo(ws, ["task", "complete", "PL-T1", "--outcome", "success", "--gate", "--unchanged", "fixture"]);
-  awo(ws, ["task", "run", "PL-T2"]);
+  awo(ws, ["task", "run", "PL-T2", "--allow-empty-body"]);
   awo(ws, ["task", "complete", "PL-T2", "--outcome", "success", "--gate", "--untested", "no db", "--unchanged", "fixture"]);
   const evidence = awo(ws, [
     "task", "evidence", "PL-T1", "--criterion", "1", "--kind", "test", "--ref", "run true",

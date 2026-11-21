@@ -356,7 +356,7 @@ export async function runDoctor(options: { cwd?: string; scope?: "active" | "all
           severity: "warn",
           area: "runs",
           message: `${task.id}: run ${ts.lastRunId} was opened but never closed`,
-          fix: `\`awo task complete ${task.id} --outcome failed\`, or move it back with \`awo task status ${task.id} todo\``,
+          fix: `continue it with \`awo task resume ${task.id}\`, or abandon it: \`awo task complete ${task.id} --outcome failed --summary "…"\``,
           group: "runs:never-closed",
         });
       }

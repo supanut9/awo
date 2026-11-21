@@ -113,6 +113,8 @@ export type EventKind =
    */
   | "brief"
   | "run.start"
+  /** A fresh worker took over an open run (`awo task resume`). */
+  | "run.resume"
   | "repo.baseline"
   | "step.start"
   | "step.end"

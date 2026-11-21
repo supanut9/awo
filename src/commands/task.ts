@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import os from "node:os";
 import fs from "fs-extra";
 import path from "path";
 import { simpleGit } from "simple-git";
@@ -15,6 +16,7 @@ import {
 import { readManifest, type Manifest } from "../manifest.js";
 import { findAllTasks, findTasksInGoal, locateTask, type TaskDefinition } from "../tasks.js";
 import {
+  applyTransition,
   assertTransition,
   mutateState,
   newTaskState,
@@ -25,9 +27,17 @@ import {
   type Actor,
   type GoalState,
   type RunOutcome,
+  type RunOwner,
+  type TaskState,
   type TaskStatus,
 } from "../state.js";
-import { fallbackHint, invocationHint, resolveModel, type ResolvedModel } from "../models.js";
+import {
+  fallbackHint,
+  invocationHint,
+  resolveModel,
+  type ModelChoice,
+  type ResolvedModel,
+} from "../models.js";
 import { ensureTaskWorktrees, type Worktree } from "../worktrees.js";
 import {
   appendEvent,
@@ -38,7 +48,16 @@ import {
   readEvents,
   writeDetail,
   type EventKind,
+  type RunEvent,
 } from "../runs.js";
+import { actorLabel, detectAgentEnvironment } from "../agent-env.js";
+import {
+  assertGoalWritable,
+  describeUnmet,
+  unmetDependencies,
+  unmetDependencyHints,
+  unwrittenTemplateLines,
+} from "../lifecycle.js";
 
 export interface TaskRow {
   id: string;
@@ -216,8 +235,10 @@ export async function runTaskStatus(
   }
   const target = to as TaskStatus;
   const actor: Actor = options.actor ?? "human";
+  const reason = options.reason?.trim() || null;
 
   const { task, goal } = await locateTask(workspaceRoot, taskId);
+  assertGoalWritable(goal, task.id);
   if (target === "done" && goal.completionPolicy.qaRequired && !options.goalVerdict) {
     throw new Error(
       `${task.id} belongs to a governed goal, so one task cannot be approved independently.\n` +
@@ -225,17 +246,44 @@ export async function runTaskStatus(
         `  \`awo goal verdict ${goal.id} --pass --summary "…" --who "<human>"\`.`
     );
   }
+  // A parked task with no reason is indistinguishable from a forgotten one.
+  if (target === "blocked" && !reason) {
+    throw new Error(
+      `Blocking ${task.id} needs a reason the next reader can act on:\n` +
+        `  awo task status ${task.id} blocked --reason "<what it is waiting for>"`
+    );
+  }
   const current = effectiveState(await readState(goal.dir, goal.id), task);
+  if (current.status === "running" && target !== "running" && target !== "cancelled") {
+    // `running` is left by closing the run, which also records its outcome. The
+    // state machine's generic hint ("may move to: cancelled") read as the only exit.
+    throw new Error(
+      `${task.id} has an open run (${current.lastRunId}); close it rather than moving it by hand:\n` +
+        `  awo task complete ${task.id} --outcome failed --summary "<why it is abandoned>"\n` +
+        `  (or continue it with \`awo task resume ${task.id}\`)`
+    );
+  }
   assertTransition(task.id, current.status, target, actor);
 
+  let openRun: string | null = null;
   await mutateState(goal.dir, goal.id, (state) => {
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
-    assertTransition(task.id, ts.status, target, actor);
     if (ts.status !== target) delete state.qa;
-    ts.status = target;
-    ts.blockedReason = target === "blocked" ? (options.reason ?? ts.blockedReason) : null;
-    state.tasks[task.id] = ts;
+    if (ts.status === "running" && target === "cancelled") openRun = ts.lastRunId;
+    applyTransition(state, task.id, target, actor, {
+      authoredStatus: task.authoredStatus,
+      reason,
+    });
   });
+  // Cancelling a running task abandons its run; say so in that run's own stream,
+  // or the log shows a run that simply stops.
+  if (openRun) {
+    await appendEvent(workspaceRoot, openRun, "note", {
+      category: "cancelled",
+      label: reason ?? "task cancelled while this run was open",
+      by: actorLabel(),
+    });
+  }
   return target;
 }
 
@@ -285,6 +333,26 @@ export interface TaskRunResult {
   fallbackInvocation: string | null;
   /** §7.1 — isolation, created rather than merely required. */
   worktrees: Worktree[];
+  /** Where the worker works, per target, as recorded on `run.start`. */
+  checkouts: RunCheckout[];
+  /** `runtime:model` that will actually execute, when `--model/--runtime` said so. */
+  executedModel: string | null;
+  /** The task was already running: this is the open run, unchanged. */
+  alreadyRunning: boolean;
+  /** The run holding the brief text, when this run's brief is identical and was recorded as a pointer. */
+  briefFrom: string | null;
+  /** Why a reviewed task was reopened (`--reopen --reason`). */
+  reopenReason: string | null;
+  /** The reason given when review last sent this task back. */
+  rejectedBecause: string | null;
+}
+
+export interface RunCheckout {
+  repo: string;
+  /** As recorded on `run.start`: workspace-relative where possible. */
+  path: string;
+  branch: string | null;
+  exists: boolean;
 }
 
 /**
@@ -305,24 +373,65 @@ export async function runTaskRun(
      * the very act of verifying anything downstream of it.
      */
     ignoreDependencies?: boolean;
+    /** Open a repair round on an in-review task; requires `reason`. */
+    reopen?: boolean;
+    reason?: string;
+    /** Run a body that is still the `task new` template, as-is. */
+    allowEmptyBody?: boolean;
+    /** What will actually execute, when it is not what model policy resolved. */
+    model?: string;
+    runtime?: string;
+    /**
+     * Return the open run instead of refusing when the task is already running.
+     * The CLI sets it — re-typing `task run` is how a worker re-reads its brief.
+     * `dispatch` does not, so it can never spawn a second worker into a live run.
+     */
+    reuseOpenRun?: boolean;
   } = {}
 ): Promise<TaskRunResult> {
   const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
   const manifest = await readManifest(workspaceRoot);
   const { task, goal } = await locateTask(workspaceRoot, taskId);
+  assertGoalWritable(goal, task.id);
   const state = await readState(goal.dir, goal.id);
   const current = effectiveState(state, task);
+  const reason = options.reason?.trim() || null;
 
   if (current.status === "running") {
+    if (options.reuseOpenRun && current.lastRunId) {
+      return describeOpenRun(workspaceRoot, task, current);
+    }
     throw new Error(
-      `${task.id} is already running (run ${current.lastRunId}). Close it with \`awo task complete ${task.id} --outcome <success|failed>\` first.`
+      `${task.id} is already running (run ${current.lastRunId}).\n` +
+        `  Continue it:  awo task resume ${task.id}\n` +
+        `  Abandon it:   awo task complete ${task.id} --outcome failed --summary "…"`
     );
   }
   if (current.status === "cancelled") {
-    throw new Error(`${task.id} is cancelled. Move it back to todo before running it.`);
+    throw new Error(`${task.id} is cancelled. Restore it first: awo task status ${task.id} todo`);
   }
   if (current.status === "done") {
-    throw new Error(`${task.id} is already done. Move it to todo if it genuinely needs redoing.`);
+    throw new Error(
+      `${task.id} is already done. If it genuinely needs redoing: awo task status ${task.id} todo`
+    );
+  }
+  if (current.status === "in-review" && !options.reopen) {
+    const decide = goal.completionPolicy.qaRequired
+      ? [`  goal QA:  awo goal verify ${goal.id}  (${goal.id} is governed: approval is goal-level)`]
+      : [
+          `  approve:  awo task verify ${task.id}`,
+          `  reject:   awo task verify ${task.id} --reject --reason "…"`,
+        ];
+    throw new Error(
+      `${task.id} is in review (run ${current.lastRunId}). Decide it, or open a repair round:\n` +
+        [...decide, `  repair:   awo task run ${task.id} --reopen --reason "<what to fix>"`].join("\n")
+    );
+  }
+  if (options.reopen && !reason) {
+    throw new Error(
+      `--reopen records a repair round, so say what it repairs:\n` +
+        `  awo task run ${task.id} --reopen --reason "<what to fix>"`
+    );
   }
 
   // §7.2 open question, decided: validate `targets` against the manifest and
@@ -335,67 +444,98 @@ export async function runTaskRun(
     );
   }
 
-  // A governed goal verifies the feature only after every task has completed, so
-  // successful `in-review` work must unblock dependent build tasks. Requiring
-  // `done` here deadlocked every strict dependency chain before goal-level QA.
-  const unmet: string[] = [];
-  for (const depId of task.dependsOn) {
-    const dep = await locateTask(workspaceRoot, depId).catch(() => null);
-    if (!dep) {
-      unmet.push(`${depId} (not found)`);
-      continue;
-    }
-    const depState = effectiveState(await readState(dep.goal.dir, dep.goal.id), dep.task);
-    if (depState.status !== "done" && depState.status !== "in-review") {
-      unmet.push(`${depId} (${depState.status})`);
+  // A brief wraps the task body, so an unwritten body briefs the worker with the
+  // title alone — 22% of atlas-shop's first briefs were the bare template and the
+  // worker invented the task. `recheck` (the only caller that skips dependencies)
+  // measures committed work and briefs nobody, so it is exempt.
+  if (!options.instruction?.trim() && !options.allowEmptyBody && !options.ignoreDependencies) {
+    const unwritten = unwrittenTemplateLines(task.body);
+    if (unwritten.length > 0) {
+      const what = unwritten[0] === ""
+        ? "empty"
+        : `still the \`awo task new\` template (${unwritten.join("  ")})`;
+      throw new Error(
+        `${task.id}'s body is ${what}, so a worker would be briefed with nothing but its title.\n` +
+          `  Write it: edit ${path.relative(workspaceRoot, task.file)}, or author tasks with \`awo task new --body-file <file>\`.\n` +
+          `  Or brief this run yourself: awo task run ${task.id} --instruction "<what to do>"\n` +
+          `  (--allow-empty-body runs it as it is.)`
+      );
     }
   }
 
-  if (unmet.length > 0 && !options.ignoreDependencies) {
-    await mutateState(goal.dir, goal.id, (s) => {
-      const ts = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
-      if (ts.status === "todo") ts.status = "queued";
-      assertTransition(task.id, ts.status, "blocked", "runner");
-      ts.status = "blocked";
-      ts.blockedReason = `unmet dependencies: ${unmet.join(", ")}`;
-      s.tasks[task.id] = ts;
-    });
-    throw new Error(
-      `${task.id} has unmet dependencies: ${unmet.join(", ")}. Marked blocked.`
-    );
+  // A governed goal verifies the feature only after every task has completed, so
+  // successful `in-review` work must unblock dependent build tasks. Requiring
+  // `done` here deadlocked every strict dependency chain before goal-level QA.
+  //
+  // The gate refuses WITHOUT writing state. It used to mark the task `blocked`, and
+  // `blocked` then refused the `task run` that would have started it once the
+  // dependency landed — a dead end measured 10–12 times on the real workspaces.
+  if (!options.ignoreDependencies) {
+    const unmet = await unmetDependencies(workspaceRoot, task);
+    if (unmet.length > 0) {
+      throw new Error(
+        `${task.id} has unmet dependencies: ${describeUnmet(unmet)} — nothing was changed.\n` +
+          `  A dependency counts once it is in-review or done.\n` +
+          unmetDependencyHints(unmet).map((hint) => `  ${hint}`).join("\n")
+      );
+    }
   }
 
   // Resolve the model before touching state. An unsupported effort or a malformed
   // policy is a config error; throwing after the task is already `running` left an
   // open run that `doctor` then reported as abandoned.
   const model = await resolveModel(workspaceRoot, task.agent, task.tier);
+  const executed = executedChoice(model, { model: options.model, runtime: options.runtime });
+  const executedModel = executed === model ? null : `${executed.runtime}:${executed.model}`;
+  const rejectedBecause = lastRejection(current);
+  const reopened = current.status === "in-review";
 
   const runId = await allocateRunId(workspaceRoot, task.id);
   const startedAt = new Date().toISOString();
+  const owner: RunOwner = {
+    runId,
+    // awo exits as soon as the run is open; what holds the run is the shell or
+    // agent session that typed `task run`.
+    pid: process.ppid ?? null,
+    host: os.hostname(),
+    actor: actorLabel(),
+    startedAt,
+    heartbeatAt: startedAt,
+  };
 
   await mutateState(goal.dir, goal.id, (s) => {
     // Any new execution makes an earlier goal-level QA brief/verdict stale.
     delete s.qa;
-    const ts = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
-    if (ts.status === "running") throw new Error(`${task.id} is already running (run ${ts.lastRunId}).`);
-    if (ts.status === "todo") {
-      assertTransition(task.id, ts.status, "queued", "runner");
-      ts.status = "queued";
+    const prior = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
+    if (prior.status === "running") throw new Error(`${task.id} is already running (run ${prior.lastRunId}).`);
+    if (prior.status === "in-review" && !options.reopen) {
+      throw new Error(`${task.id} moved to in-review meanwhile; reopen it with --reopen --reason "…".`);
     }
-    assertTransition(task.id, ts.status, "running", "runner");
-    ts.status = "running";
+    const ts = applyTransition(s, task.id, "running", "runner", {
+      authoredStatus: task.authoredStatus,
+      reason,
+      runId,
+    });
     ts.lastRunId = runId;
     ts.lastRunOutcome = null;
     ts.startedAt = startedAt;
     ts.finishedAt = null;
-    ts.blockedReason = null;
     ts.attempts += 1;
-    s.tasks[task.id] = ts;
+    ts.owner = owner;
   });
 
-  const worktreesForRun = options.noWorktree
+  // Investigation and decision tasks may declare `targets: []`: they open a run
+  // and record a finding without a repository to isolate.
+  const worktreesForRun = options.noWorktree || task.targets.length === 0
     ? []
-    : await ensureTaskWorktrees(workspaceRoot, manifest, task.id, task.targets, [...task.dependsOn].reverse());
+    : await ensureTaskWorktrees(
+        workspaceRoot,
+        manifest,
+        task.id,
+        task.targets,
+        [...task.dependsOn].reverse(),
+        { deliveryBranch: goal.deliveryBranch, baseBranches: goal.baseBranches }
+      );
 
   const worktrees = worktreesForRun;
   // A worker sandboxed to the workspace needs to write the worktree's git
@@ -407,12 +547,15 @@ export async function runTaskRun(
   // `state.worktree` was initialised to null and never written, so 100 tasks in the
   // SHOP workspace all claimed no checkout while 14 sat on disk. Record where the
   // worker was actually put; `awo worktree` reconciles against git regardless, but
-  // state should not assert something false.
-  if (usable[0]) {
-    const where = usable[0].path;
+  // state should not assert something false. The branch point goes with it, so the
+  // diff base, the baseline and QA agree on what "the task's change" means.
+  const bases = usable.flatMap((w) => (w.base ? [[w.repo, w.base] as const] : []));
+  if (usable[0] || bases.length > 0) {
+    const where = usable[0]?.path;
     await mutateState(goal.dir, goal.id, (s) => {
       const t = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
-      t.worktree = where;
+      if (where) t.worktree = where;
+      if (bases.length > 0) t.base = { ...(t.base ?? {}), ...Object.fromEntries(bases) };
       s.tasks[task.id] = t;
     });
   }
@@ -430,6 +573,7 @@ export async function runTaskRun(
   }
 
   const runCheckouts = await taskCheckouts(workspaceRoot, manifest, task, usable);
+  const intendedModel = `${model.runtime}:${model.model}`;
   await appendEvent(workspaceRoot, runId, "run.start", {
     taskId: task.id,
     goalId: goal.id,
@@ -438,8 +582,18 @@ export async function runTaskRun(
     checkouts: runCheckouts.map(({ repo, recordedPath }) => ({ repo, checkout: recordedPath })),
     tier: model.tier,
     tierFrom: model.tierSource,
-    model: `${model.runtime}:${model.model}`,
+    // `model` is what policy chose, kept for older readers. It used to be the only
+    // model on record: 142 of 145 CRM runs said `claude:haiku` while Opus or Codex
+    // did the work. `executedBy`/`executedModel` say what actually ran.
+    model: intendedModel,
+    intendedModel,
     ...(model.effort ? { effort: model.effort } : {}),
+    executedBy: options.runtime?.trim() || actorLabel(detectAgentEnvironment()),
+    ...(executedModel ? { executedModel } : {}),
+    owner: { pid: owner.pid, host: owner.host, actor: owner.actor },
+    ...(reason && reopened ? { reopenReason: reason } : {}),
+    ...(reason && !reopened ? { reason } : {}),
+    ...(rejectedBecause ? { rejectedBecause } : {}),
   });
   await recordRepositoryBaselines(
     workspaceRoot,
@@ -459,8 +613,15 @@ export async function runTaskRun(
     isolated,
     instruction: options.instruction,
   });
+  // The full text once per distinct brief. Every retry used to re-record it —
+  // 3.5 MB of identical briefs in one workspace's logs — so an unchanged brief is
+  // now a hash plus the run that holds the text.
+  const briefHash = hashBrief(brief);
+  const earlier = current.lastRunId ? await readRunBrief(workspaceRoot, current.lastRunId) : null;
+  const briefFrom = earlier?.text != null && earlier.hash === briefHash ? earlier.sourceRunId : null;
   await appendEvent(workspaceRoot, runId, "brief", {
-    text: brief,
+    briefHash,
+    ...(briefFrom ? { sameAs: briefFrom } : { text: brief }),
     ...(options.instruction ? { instruction: options.instruction } : {}),
   });
 
@@ -468,7 +629,13 @@ export async function runTaskRun(
     brief,
     model,
     worktrees,
-    invocation: invocationHint(model, task.id, workerContext),
+    checkouts: runCheckouts.map((c) => ({
+      repo: c.repo,
+      path: c.recordedPath,
+      branch: usable.find((w) => w.repo === c.repo)?.branch ?? null,
+      exists: true,
+    })),
+    invocation: invocationHint(executed, task.id, workerContext),
     fallbackInvocation: fallbackHint(model, task.id, workerContext),
     taskId: task.id,
     runId,
@@ -476,6 +643,153 @@ export async function runTaskRun(
     targets: task.targets,
     agent: task.agent,
     body: task.body,
+    executedModel,
+    alreadyRunning: false,
+    briefFrom,
+    reopenReason: reopened ? reason : null,
+    rejectedBecause,
+  };
+}
+
+/**
+ * What a caller said will actually execute, as a model choice. `--model` alone
+ * keeps the resolved runtime; `--model codex:gpt-5` names both.
+ */
+function executedChoice(model: ResolvedModel, override: { model?: string; runtime?: string }): ModelChoice {
+  let runtime = override.runtime?.trim() || undefined;
+  let name = override.model?.trim() || undefined;
+  if (name && !runtime && name.includes(":")) {
+    runtime = name.slice(0, name.indexOf(":"));
+    name = name.slice(name.indexOf(":") + 1);
+  }
+  if (!runtime && !name) return model;
+  const sameRuntime = !runtime || runtime === model.runtime;
+  if (!name && !sameRuntime) {
+    throw new Error(
+      `--runtime ${runtime} needs --model too: the resolved model ${model.model} belongs to ${model.runtime}.`
+    );
+  }
+  return {
+    runtime: runtime ?? model.runtime,
+    model: name ?? model.model,
+    // Effort and mode are runtime-specific settings; they do not carry across.
+    ...(sameRuntime && model.effort ? { effort: model.effort } : {}),
+    ...(sameRuntime && model.mode ? { mode: model.mode } : {}),
+  };
+}
+
+/** The reason review last sent this task back, if that is the latest move. */
+function lastRejection(ts: TaskState): string | null {
+  const last = ts.transitions?.at(-1);
+  return last && last.from === "in-review" && last.to === "todo" ? last.reason : null;
+}
+
+function hashBrief(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/**
+ * A run's brief, following the pointer an unchanged brief is recorded as.
+ * `sourceRunId` is the run whose event holds the text.
+ */
+export async function readRunBrief(
+  workspaceRoot: string,
+  runId: string
+): Promise<{ text: string | null; hash: string | null; sourceRunId: string | null } | null> {
+  const lastBrief = (events: RunEvent[]) => events.filter((e) => e.kind === "brief").at(-1);
+  const event = lastBrief(await readEvents(workspaceRoot, runId).catch(() => []));
+  if (!event) return null;
+  if (typeof event.text === "string") {
+    return {
+      text: event.text,
+      hash: typeof event.briefHash === "string" ? event.briefHash : hashBrief(event.text),
+      sourceRunId: runId,
+    };
+  }
+  if (typeof event.sameAs === "string") {
+    const source = lastBrief(await readEvents(workspaceRoot, event.sameAs).catch(() => []));
+    const text = typeof source?.text === "string" ? source.text : null;
+    return {
+      text,
+      hash: typeof event.briefHash === "string" ? event.briefHash : null,
+      sourceRunId: text === null ? null : event.sameAs,
+    };
+  }
+  return null;
+}
+
+/** The checkouts an open run recorded, as they are on disk now. */
+async function openRunCheckouts(workspaceRoot: string, events: RunEvent[]): Promise<RunCheckout[]> {
+  const start = events.find((e) => e.kind === "run.start");
+  const recorded = Array.isArray(start?.checkouts)
+    ? (start.checkouts as Array<{ repo?: unknown; checkout?: unknown }>)
+    : [];
+  const out: RunCheckout[] = [];
+  for (const item of recorded) {
+    if (typeof item.repo !== "string" || typeof item.checkout !== "string") continue;
+    const dir = path.resolve(workspaceRoot, item.checkout);
+    const exists = await fs.pathExists(dir);
+    const branch = exists
+      ? (await simpleGit(dir).revparse(["--abbrev-ref", "HEAD"]).catch(() => "")).trim() || null
+      : null;
+    out.push({ repo: item.repo, path: item.checkout, branch, exists });
+  }
+  return out;
+}
+
+/**
+ * The worker context for an EXISTING run: work in its first checkout, and write
+ * each checkout's git metadata so a fresh worker can still commit (§9 item 40).
+ */
+async function openRunWorkerContext(
+  workspaceRoot: string,
+  checkouts: RunCheckout[]
+): Promise<{ cwd?: string; allow: string[] }> {
+  const present = checkouts.filter((c) => c.exists);
+  const allow: string[] = [];
+  for (const checkout of present) {
+    const common = (
+      await simpleGit(path.resolve(workspaceRoot, checkout.path))
+        .raw(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .catch(() => "")
+    ).trim();
+    if (common) allow.push(common);
+  }
+  return { cwd: present[0]?.path, allow: [...new Set(allow)] };
+}
+
+/** `task run` on a task that is already running: hand back the open run, change nothing. */
+async function describeOpenRun(
+  workspaceRoot: string,
+  task: TaskDefinition,
+  ts: TaskState
+): Promise<TaskRunResult> {
+  const runId = ts.lastRunId!;
+  const events = await readEvents(workspaceRoot, runId);
+  const start = events.find((e) => e.kind === "run.start");
+  const brief = await readRunBrief(workspaceRoot, runId);
+  const checkouts = await openRunCheckouts(workspaceRoot, events);
+  const model = await resolveModel(workspaceRoot, task.agent, task.tier);
+  const executedModel = typeof start?.executedModel === "string" ? start.executedModel : null;
+  const context = await openRunWorkerContext(workspaceRoot, checkouts);
+  return {
+    brief: brief?.text ?? "",
+    taskId: task.id,
+    runId,
+    eventsFile: path.relative(workspaceRoot, dayDataFile(workspaceRoot, runId)),
+    targets: task.targets,
+    agent: task.agent,
+    body: task.body,
+    model,
+    invocation: invocationHint(executedChoice(model, { model: executedModel ?? undefined }), task.id, context),
+    fallbackInvocation: fallbackHint(model, task.id, context),
+    worktrees: [],
+    checkouts,
+    executedModel,
+    alreadyRunning: true,
+    briefFrom: brief?.sourceRunId && brief.sourceRunId !== runId ? brief.sourceRunId : null,
+    reopenReason: typeof start?.reopenReason === "string" ? start.reopenReason : null,
+    rejectedBecause: typeof start?.rejectedBecause === "string" ? start.rejectedBecause : null,
   };
 }
 
@@ -851,14 +1165,13 @@ export async function runTaskComplete(
   });
 
   await mutateState(goal.dir, goal.id, (s) => {
-    const t = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
-    assertTransition(task.id, t.status, nextStatus, "runner");
-    t.status = nextStatus;
+    const t = applyTransition(s, task.id, nextStatus, "runner", {
+      authoredStatus: task.authoredStatus,
+      reason: nextStatus === "blocked" ? (options.summary ?? `run ${runId} ${outcome}`) : null,
+      runId,
+    });
     t.lastRunOutcome = outcome;
     t.finishedAt = finishedAt;
-    t.blockedReason =
-      nextStatus === "blocked" ? (options.summary ?? `run ${runId} ${outcome}`) : null;
-    s.tasks[task.id] = t;
   });
 
   return {
@@ -881,6 +1194,155 @@ export async function runTaskVerify(
     reason: options.reason,
     goalVerdict: options.goalVerdict,
   });
+}
+
+export interface RunMeasurementSummary {
+  repo: string;
+  command: string | null;
+  exitCode: number | null;
+  diagnosis: string | null;
+  needsHuman: boolean;
+  at: string;
+}
+
+export interface TaskResumeResult {
+  taskId: string;
+  goalId: string;
+  runId: string;
+  startedAt: string | null;
+  brief: string | null;
+  /** The run holding the brief text, when this run recorded a pointer to it. */
+  briefFrom: string | null;
+  checkouts: RunCheckout[];
+  events: { total: number; byKind: Record<string, number>; recent: string[] };
+  /** The latest measured test per repo — where the next worker starts from. */
+  measurements: RunMeasurementSummary[];
+  previousOwner: RunOwner | null;
+  owner: RunOwner;
+  model: ResolvedModel;
+  invocation: string;
+}
+
+/**
+ * Hand an open run to a fresh worker — after a crash, a quota wall, or a context
+ * reset. Two of four real workspaces built their own supervisor and handoff files
+ * for exactly this, and an atlas-crm run sat open for 227 hours because nothing
+ * said who held it. This re-briefs from the run's own record: what the worker was
+ * told, where it works, what happened so far, and what the last measurement said.
+ */
+export async function runTaskResume(
+  taskId: string,
+  options: { cwd?: string } = {}
+): Promise<TaskResumeResult> {
+  const workspaceRoot = findWorkspaceRoot(options.cwd ?? process.cwd());
+  const { task, goal } = await locateTask(workspaceRoot, taskId);
+  assertGoalWritable(goal, task.id);
+  const ts = effectiveState(await readState(goal.dir, goal.id), task);
+
+  if (ts.status !== "running" || !ts.lastRunId) {
+    const next =
+      ts.status === "in-review"
+        ? `Measure it again: awo task recheck ${task.id} — or open a repair round: awo task run ${task.id} --reopen --reason "<what to fix>"`
+        : ts.status === "done"
+          ? `Measure it again: awo task recheck ${task.id}`
+          : ts.status === "cancelled"
+            ? `Restore it first: awo task status ${task.id} todo`
+            : `Start one: awo task run ${task.id}`;
+    throw new Error(`${task.id} has no open run to resume (status: ${ts.status}).\n  ${next}`);
+  }
+
+  const runId = ts.lastRunId;
+  const events = await readEvents(workspaceRoot, runId);
+  const brief = await readRunBrief(workspaceRoot, runId);
+  const checkouts = await openRunCheckouts(workspaceRoot, events);
+
+  const byKind: Record<string, number> = {};
+  for (const event of events) byKind[event.kind] = (byKind[event.kind] ?? 0) + 1;
+  const recent = events
+    .filter((event) => event.kind !== "brief" && event.kind !== "run.start")
+    .slice(-8)
+    .map(describeEvent);
+
+  const latest = new Map<string, RunEvent>();
+  for (const event of events) {
+    if (event.kind === "test" && event.verified === true) latest.set(String(event.repo ?? "repo"), event);
+  }
+  const measurements: RunMeasurementSummary[] = [...latest.entries()].map(([repo, event]) => ({
+    repo,
+    command: typeof event.command === "string" ? event.command : null,
+    exitCode: typeof event.exitCode === "number" ? event.exitCode : null,
+    diagnosis: typeof event.diagnosis === "string" ? event.diagnosis : null,
+    needsHuman: event.needsHuman === true,
+    at: event.t,
+  }));
+
+  const now = new Date().toISOString();
+  const previousOwner = ts.owner ?? null;
+  const owner: RunOwner = {
+    runId,
+    pid: process.ppid ?? null,
+    host: os.hostname(),
+    actor: actorLabel(),
+    startedAt: previousOwner?.startedAt ?? ts.startedAt ?? now,
+    heartbeatAt: now,
+  };
+
+  await mutateState(goal.dir, goal.id, (s) => {
+    const t = s.tasks[task.id] ?? newTaskState(task.authoredStatus);
+    if (t.status !== "running" || t.lastRunId !== runId) {
+      throw new Error(
+        `${task.id}'s open run changed while resuming (now ${t.status}, run ${t.lastRunId}). Run \`awo task resume ${task.id}\` again.`
+      );
+    }
+    const next = applyTransition(s, task.id, "running", "runner", {
+      authoredStatus: task.authoredStatus,
+      reason: `resumed by ${owner.actor}`,
+      runId,
+    });
+    next.owner = owner;
+  });
+  await appendEvent(workspaceRoot, runId, "run.resume", {
+    actor: owner.actor,
+    pid: owner.pid,
+    host: owner.host,
+    previousOwner: previousOwner
+      ? {
+          actor: previousOwner.actor,
+          pid: previousOwner.pid,
+          host: previousOwner.host,
+          heartbeatAt: previousOwner.heartbeatAt,
+        }
+      : null,
+  });
+
+  const start = events.find((event) => event.kind === "run.start");
+  const model = await resolveModel(workspaceRoot, task.agent, task.tier);
+  const executedModel = typeof start?.executedModel === "string" ? start.executedModel : undefined;
+  const context = await openRunWorkerContext(workspaceRoot, checkouts);
+
+  return {
+    taskId: task.id,
+    goalId: goal.id,
+    runId,
+    startedAt: ts.startedAt,
+    brief: brief?.text ?? null,
+    briefFrom: brief?.sourceRunId && brief.sourceRunId !== runId ? brief.sourceRunId : null,
+    checkouts,
+    events: { total: events.length, byKind, recent },
+    measurements,
+    previousOwner,
+    owner,
+    model,
+    invocation: invocationHint(executedChoice(model, { model: executedModel }), task.id, context),
+  };
+}
+
+function describeEvent(event: RunEvent): string {
+  const detail =
+    event.kind === "test" && event.verified === true
+      ? `${event.repo ?? "repo"}: \`${event.command}\` exit ${event.exitCode}${event.diagnosis ? ` (${event.diagnosis})` : ""}`
+      : String(event.label ?? event.msg ?? event.sha ?? event.repo ?? "");
+  return `${event.t.slice(11, 19)}  ${event.kind}${detail ? `  ${detail}` : ""}`;
 }
 
 /**

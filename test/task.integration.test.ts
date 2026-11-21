@@ -327,13 +327,17 @@ test("investigation evidence requires a finding, not an invented test or commit"
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test("a task with unmet dependencies is blocked rather than run", () => {
+test("a task with unmet dependencies is refused without touching its state", () => {
   const ws = makeWorkspace();
   const out = awo(ws, ["task", "run", "TEST-T2"]);
   assert.equal(out.code, 1);
   assert.match(out.stderr, /unmet dependencies: TEST-T1 \(todo\)/);
-  assert.equal(readState(ws).tasks["TEST-T2"].status, "blocked");
-  assert.equal(readState(ws).goalStatus, "blocked");
+  assert.match(out.stderr, /awo task run TEST-T1/);
+  // 0.8: the gate no longer writes `blocked` — that turned a wait into a dead end.
+  assert.ok(
+    !fs.existsSync(path.join(ws, "goals", "TEST-G1-demo", "state.json")),
+    "a refused dependency gate must not write state"
+  );
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -430,9 +434,15 @@ test("a task targeting an unlinked repo fails fast before any state change", () 
 test("a second run cannot open while one is already running", () => {
   const ws = makeWorkspace();
   awo(ws, ["task", "run", "TEST-T1"]);
+  const first = readState(ws).tasks["TEST-T1"];
+  // 0.8: re-typing `task run` hands back the open run (exit 0) instead of erroring,
+  // but it still never opens a second one.
   const out = awo(ws, ["task", "run", "TEST-T1"]);
-  assert.equal(out.code, 1);
-  assert.match(out.stderr, /already running/);
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, new RegExp(`already running — run ${first.lastRunId}`));
+  const after = readState(ws).tasks["TEST-T1"];
+  assert.equal(after.lastRunId, first.lastRunId);
+  assert.equal(after.attempts, 1);
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -1013,7 +1023,7 @@ function makeEvidenceWorkspace(
   approveRequirement(ws, "EV-R1");
   execFileSync(process.execPath, [CLI, "goal", "new", "--from", "EV-R1"], { cwd: ws });
   execFileSync(process.execPath, [CLI, "task", "new", "--goal", "EV-G1", "--name", "Do", "--targets", "api"], { cwd: ws });
-  execFileSync(process.execPath, [CLI, "task", "run", "EV-T1"], { cwd: ws });
+  execFileSync(process.execPath, [CLI, "task", "run", "EV-T1", "--allow-empty-body"], { cwd: ws });
   return { ws, repo, worktree: path.join(ws, "repos", ".worktrees", "api", "EV-T1") };
 }
 

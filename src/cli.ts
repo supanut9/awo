@@ -27,11 +27,13 @@ import {
   runTaskRecheck,
   runTaskEvent,
   runTaskList,
+  runTaskResume,
   runTaskRun,
   runTaskShow,
   runTaskStatus,
   runTaskVerify,
 } from "./commands/task.js";
+import { aliasOption } from "./cli-alias.js";
 import { runLogAdd, runLogList, runLogShow, runLogTail } from "./commands/log.js";
 import { runUi } from "./commands/ui.js";
 import { runGoalNew, runGoalPlan, runReqNew, runTaskNew } from "./commands/plan.js";
@@ -899,11 +901,15 @@ goal
   .command("archive <goalId>")
   .description("Move a finished or cancelled goal into goals/archive/, so the live list is only live work.")
   .option("--force", "archive a goal that is not done or cancelled (abandoned without being marked)")
-  .action(async (goalId: string, opts: { force?: boolean }) => {
+  .option("--unmerged-ok", "archive even though linked pull requests are not merged")
+  .action(async (goalId: string, opts: { force?: boolean; unmergedOk?: boolean }) => {
     try {
-      const r = await runGoalArchive(goalId, { force: opts.force });
+      const r = await runGoalArchive(goalId, { force: opts.force, unmergedOk: opts.unmergedOk });
       console.log(`${r.id} (${r.status}) archived: ${r.from} -> ${r.to}`);
-      console.log(`Its tasks, state and runs moved with it. Undo with: awo goal restore ${r.id}`);
+      if (r.unmerged.length > 0) {
+        console.log(`  archived with ${r.unmerged.length} unmerged pull request(s): ${r.unmerged.map((pr) => `${pr.repo}#${pr.number}`).join(", ")}`);
+      }
+      console.log(`Its tasks, state and runs moved with it; it is read-only until restored. Undo with: awo goal restore ${r.id}`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1236,10 +1242,12 @@ task
     }
   });
 
-task
+const taskStatus = task
   .command("status <taskId> <status>")
-  .description("Move a task's lifecycle state by hand. The only way to reach `cancelled`.")
-  .option("--reason <reason>", "why (recorded when moving to blocked)")
+  .description(
+    "Move a task's lifecycle state by hand: park it (`blocked --reason`), restore it (`todo`), or cancel it — the only way to reach `cancelled`."
+  )
+  .option("--reason <reason>", "why — recorded on the transition; required for blocked")
   .action(async (taskId: string, status: string, opts: { reason?: string }) => {
     try {
       const to = await runTaskStatus(taskId, status, { reason: opts.reason });
@@ -1249,6 +1257,7 @@ task
       process.exitCode = 1;
     }
   });
+aliasOption(taskStatus, "--why <reason>", "reason");
 
 task
   .command("run <taskId>")
@@ -1257,30 +1266,114 @@ task
   )
   .option("--no-worktree", "skip worktree creation (work in the shared checkout)")
   .option("--instruction <text>", "what you are telling this worker — recorded in the run")
-  .action(async (taskId: string, opts: { worktree?: boolean; instruction?: string }) => {
-    try {
-      const r = await runTaskRun(taskId, {
-        noWorktree: opts.worktree === false,
-        instruction: opts.instruction,
-      });
-      console.log(`${r.taskId} is running — run ${r.runId}`);
-      console.log(`agent:   ${r.agent ?? "unassigned"} — ${r.model.tier} tier (from ${r.model.tierSource})`);
-      console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}${r.model.mode ? ` (${r.model.mode} mode)` : ""}`);
-      console.log(`targets: ${r.targets.join(", ") || "none"}`);
-      console.log(`events:  ${r.eventsFile}`);
-      for (const wt of r.worktrees) {
-        if (wt.error) {
-          console.log(`WARNING: no isolation for ${wt.repo} — ${wt.error}`);
-          continue;
+  .option("--reopen", "open a repair round on an in-review task (needs --reason)")
+  .option("--reason <text>", "why this run is opened — required with --reopen")
+  .option("--allow-empty-body", "run a task whose body is still the `task new` template")
+  .option("--model <model>", "the model that will actually execute (`opus`, or `codex:gpt-5`), recorded on the run")
+  .option("--runtime <runtime>", "the runtime that will actually execute (claude, codex, gemini), recorded on the run")
+  .action(
+    async (
+      taskId: string,
+      opts: {
+        worktree?: boolean;
+        instruction?: string;
+        reopen?: boolean;
+        reason?: string;
+        allowEmptyBody?: boolean;
+        model?: string;
+        runtime?: string;
+      }
+    ) => {
+      try {
+        const r = await runTaskRun(taskId, {
+          noWorktree: opts.worktree === false,
+          instruction: opts.instruction,
+          reopen: opts.reopen,
+          reason: opts.reason,
+          allowEmptyBody: opts.allowEmptyBody,
+          model: opts.model,
+          runtime: opts.runtime,
+          reuseOpenRun: true,
+        });
+        if (r.alreadyRunning) {
+          // Idempotent: re-typing `task run` is how a worker re-reads its brief.
+          console.log(`${r.taskId} is already running — run ${r.runId} (nothing changed)`);
+          console.log(`events:  ${r.eventsFile}`);
+          for (const c of r.checkouts) {
+            console.log(`work in: ${c.path}  (${c.repo}${c.branch ? ` on ${c.branch}` : ""}${c.exists ? "" : " — MISSING on disk"})`);
+          }
+          if (r.checkouts.length === 0) console.log(`work in: no recorded checkout`);
+          console.log(`hand to: ${r.invocation}`);
+          console.log(`\n${r.briefFrom ? `(brief unchanged since run ${r.briefFrom})\n` : ""}${r.brief}`);
+          console.log(
+            `\nA fresh worker taking over should run \`awo task resume ${r.taskId}\` — it records the hand-over and shows the events so far.`
+          );
+          return;
         }
+        console.log(`${r.taskId} is running — run ${r.runId}`);
+        if (r.reopenReason) console.log(`reopened: ${r.reopenReason}`);
+        else if (r.rejectedBecause) console.log(`rejected in review: ${r.rejectedBecause}`);
+        console.log(`agent:   ${r.agent ?? "unassigned"} — ${r.model.tier} tier (from ${r.model.tierSource})`);
+        console.log(`model:   ${r.model.runtime}:${r.model.model}${r.model.effort ? ` effort=${r.model.effort}` : ""}${r.model.mode ? ` (${r.model.mode} mode)` : ""}`);
+        if (r.executedModel) console.log(`runs as: ${r.executedModel} (recorded as the executed model)`);
+        console.log(`targets: ${r.targets.join(", ") || "none"}`);
+        console.log(`events:  ${r.eventsFile}`);
+        for (const wt of r.worktrees) {
+          if (wt.error) {
+            console.log(`WARNING: no isolation for ${wt.repo} — ${wt.error}`);
+            continue;
+          }
+          console.log(
+            `work in: ${wt.path}  (${wt.repo} on ${wt.branch}${wt.basedOn ? ` from ${wt.basedOn}` : ""}${wt.reused ? ", reused" : ""})`
+          );
+        }
+        if (r.targets.length === 0) console.log(`work in: no repository — this task has no targets`);
+        else if (r.worktrees.length === 0) console.log(`work in: shared checkout — NO worktree isolation`);
+        console.log(`hand to: ${r.invocation}`);
+        if (r.fallbackInvocation) console.log(`if quota: ${r.fallbackInvocation}`);
+        if (r.body) console.log(`\n${r.body}`);
         console.log(
-          `work in: ${wt.path}  (${wt.repo} on ${wt.branch}${wt.basedOn ? ` from ${wt.basedOn}` : ""}${wt.reused ? ", reused" : ""})`
+          `\nRecord progress with \`awo task event ${r.taskId} <kind> --label "…"\`, then close with \`awo task complete ${r.taskId} --outcome success\`.`
+        );
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    }
+  );
+
+task
+  .command("resume <taskId>")
+  .description(
+    "Hand a task's OPEN run to a fresh worker: prints its brief, worktrees, events so far and last measurement per repo, and records the hand-over."
+  )
+  .action(async (taskId: string) => {
+    try {
+      const r = await runTaskResume(taskId);
+      const was = r.previousOwner
+        ? `, held by ${r.previousOwner.actor}${r.previousOwner.pid ? ` (pid ${r.previousOwner.pid} on ${r.previousOwner.host})` : ""}, last seen ${r.previousOwner.heartbeatAt}`
+        : "";
+      console.log(`${r.taskId} — resuming run ${r.runId} (opened ${r.startedAt ?? "unknown"}${was})`);
+      console.log(`now held by ${r.owner.actor}${r.owner.pid ? ` (pid ${r.owner.pid} on ${r.owner.host})` : ""}`);
+      for (const c of r.checkouts) {
+        console.log(`work in: ${c.path}  (${c.repo}${c.branch ? ` on ${c.branch}` : ""}${c.exists ? "" : " — MISSING on disk"})`);
+      }
+      if (r.checkouts.length === 0) console.log(`work in: no recorded checkout`);
+      const kinds = Object.entries(r.events.byKind).map(([k, n]) => `${k}×${n}`).join(", ");
+      console.log(`so far:  ${r.events.total} event(s) — ${kinds || "none"}`);
+      for (const line of r.events.recent) console.log(`  ${line}`);
+      console.log(`last measurement:`);
+      if (r.measurements.length === 0) {
+        console.log(`  none yet — measure with \`awo task event ${r.taskId} test --run "<cmd>" --baseline\``);
+      }
+      for (const m of r.measurements) {
+        console.log(
+          `  ${m.repo}: \`${m.command ?? "test"}\` exit ${m.exitCode ?? "?"}${m.diagnosis ? ` — ${m.diagnosis}` : ""}${m.needsHuman ? " (needs a human)" : ""}  at ${m.at}`
         );
       }
-      if (r.worktrees.length === 0) console.log(`work in: shared checkout — NO worktree isolation`);
       console.log(`hand to: ${r.invocation}`);
-      if (r.fallbackInvocation) console.log(`if quota: ${r.fallbackInvocation}`);
-      if (r.body) console.log(`\n${r.body}`);
+      console.log(`\n--- brief${r.briefFrom ? ` (unchanged since run ${r.briefFrom})` : ""} ---`);
+      console.log(r.brief ?? "(no brief recorded for this run)");
       console.log(
         `\nRecord progress with \`awo task event ${r.taskId} <kind> --label "…"\`, then close with \`awo task complete ${r.taskId} --outcome success\`.`
       );
@@ -1435,11 +1528,11 @@ task
     }
   });
 
-task
+const taskVerify = task
   .command("verify <taskId>")
   .description("QA gate: approve an in-review task (-> done) or reject it (-> todo).")
   .option("--reject", "send it back to todo instead of approving")
-  .option("--reason <reason>", "why it was rejected")
+  .option("--reason <reason>", "why — recorded on the transition and shown to the next run")
   .action(async (taskId: string, opts: { reject?: boolean; reason?: string }) => {
     try {
       const to = await runTaskVerify(taskId, { approve: !opts.reject, reason: opts.reason });
@@ -1449,6 +1542,7 @@ task
       process.exitCode = 1;
     }
   });
+aliasOption(taskVerify, "--why <reason>", "reason");
 
 /**
  * Reported rather than summarised: a label you believe was applied is worse than one

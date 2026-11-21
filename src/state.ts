@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import path from "path";
 import { atomicWriteFile, withFileLock } from "./file-lock.js";
+import { actorLabel } from "./agent-env.js";
 
 /**
  * §7.4 — task LIFECYCLE, distinct from a run's OUTCOME. A board shows this;
@@ -31,15 +32,28 @@ const TRANSITIONS: ReadonlyArray<{ from: TaskStatus; to: TaskStatus; actors: Act
   { from: "todo", to: "queued", actors: ["runner", "human"] },
   { from: "queued", to: "running", actors: ["runner"] },
   { from: "todo", to: "running", actors: ["runner"] },
+  // A blocked task is retried by starting it, not by a detour through `todo`:
+  // measured on the real workspaces, 10–12 `blocked -> running` refusals and 33
+  // `task status <id> todo` workarounds whose only purpose was to satisfy this table.
+  { from: "blocked", to: "running", actors: ["runner"] },
+  // A repair round on reviewed work (`task run --reopen --reason`), recorded as a
+  // new run instead of a rejection-then-restart that loses why it was reopened.
+  { from: "in-review", to: "running", actors: ["runner"] },
   { from: "running", to: "in-review", actors: ["runner"] },
   { from: "running", to: "done", actors: ["runner"] },
   { from: "running", to: "blocked", actors: ["runner"] },
-  { from: "queued", to: "blocked", actors: ["runner"] },
+  { from: "queued", to: "blocked", actors: ["runner", "human"] },
+  // A human may park work that is waiting on something outside awo. `blocked` used
+  // to be reachable only by a failing run, so parking meant cancelling.
+  { from: "todo", to: "blocked", actors: ["human"] },
+  { from: "in-review", to: "blocked", actors: ["human"] },
   { from: "in-review", to: "done", actors: ["qa", "human"] },
   { from: "in-review", to: "todo", actors: ["qa", "human"] },
   { from: "blocked", to: "todo", actors: ["human"] },
   { from: "blocked", to: "queued", actors: ["human"] },
   { from: "done", to: "todo", actors: ["human"] },
+  // Cancelling is a decision a human can revisit; it was a one-way door.
+  { from: "cancelled", to: "todo", actors: ["human"] },
   // `cancelled` from anywhere, human only — never an agent (§7.4).
   ...TASK_STATUSES.filter((s) => s !== "cancelled").map((from) => ({
     from,
@@ -246,6 +260,53 @@ export function assertTransition(
         ? ` From "${from}", ${actor} may move to: ${allowed.join(", ")}.`
         : ` ${actor} may not move a task out of "${from}".`;
   throw new Error(`Invalid transition for ${taskId}: "${from}" -> "${to}".${hint}`);
+}
+
+/** Enough history to explain a task's last few rounds without growing state.json forever. */
+export const TRANSITION_HISTORY_LIMIT = 50;
+
+/**
+ * The one way a lifecycle move is written: assert it, set it, and record who made
+ * it and why. A bare `ts.status = …` left no trace, so a rejection reason or a
+ * cancellation's justification existed only in whichever terminal typed it.
+ *
+ * Leaving `running` always drops the run owner — whatever closed the run, nobody
+ * holds it any more — and `blockedReason` only ever describes a `blocked` task.
+ */
+export function applyTransition(
+  state: GoalState,
+  taskId: string,
+  to: TaskStatus,
+  actor: Actor,
+  options: {
+    by?: string;
+    reason?: string | null;
+    runId?: string | null;
+    /** Starting status when state has no entry yet (the task file's `status:`). */
+    authoredStatus?: TaskStatus;
+  } = {}
+): TaskState {
+  const ts = state.tasks[taskId] ?? newTaskState(options.authoredStatus);
+  const from = ts.status;
+  assertTransition(taskId, from, to, actor);
+  const reason = options.reason?.trim() || null;
+  ts.status = to;
+  ts.blockedReason = to === "blocked" ? (reason ?? ts.blockedReason ?? null) : null;
+  if (to !== "running") ts.owner = null;
+  ts.transitions = [
+    ...(ts.transitions ?? []),
+    {
+      from,
+      to,
+      actor,
+      by: options.by ?? actorLabel(),
+      reason,
+      runId: options.runId ?? ts.lastRunId ?? null,
+      at: new Date().toISOString(),
+    },
+  ].slice(-TRANSITION_HISTORY_LIMIT);
+  state.tasks[taskId] = ts;
+  return ts;
 }
 
 /** §7.4 — derived from task states, stored only for cheap reads. */

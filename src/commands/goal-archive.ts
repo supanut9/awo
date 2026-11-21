@@ -2,8 +2,8 @@ import fs from "fs-extra";
 import path from "path";
 import { findWorkspaceRoot } from "../workspace.js";
 import { findGoals, findTasksInGoal, goalsDir, goalArchiveDir, type GoalDefinition } from "../tasks.js";
-import { readState, reconcileGoalState } from "../state.js";
-import type { GoalStatus } from "../state.js";
+import { mutateState, readState, reconcileGoalState } from "../state.js";
+import type { GoalState, GoalStatus, PullRequestState } from "../state.js";
 import { evaluateGoalReadiness } from "./readiness.js";
 
 /**
@@ -44,6 +44,37 @@ export interface GoalArchiveResult {
   from: string;
   to: string;
   status: GoalStatus;
+  /** Linked PRs that were not merged when the goal was archived (`--unmerged-ok`). */
+  unmerged: UnmergedPullRequest[];
+}
+
+export interface UnmergedPullRequest {
+  taskId: string;
+  repo: string;
+  number: number;
+  url: string;
+  /** `OPEN`, `CLOSED`, or null when the snapshot predates 0.8 and never recorded it. */
+  state: PullRequestState["state"] | null;
+}
+
+/**
+ * Every linked PR that is not known to be merged. A snapshot taken before 0.8 has
+ * no `state`/`merged`, and "unknown" is not "merged": shop had 2 clean PRs in 105
+ * goals, so archiving on an unverified assumption is how unmerged work disappears.
+ */
+function unmergedPullRequests(state: GoalState): UnmergedPullRequest[] {
+  const out: UnmergedPullRequest[] = [];
+  for (const [taskId, ts] of Object.entries(state.tasks)) {
+    const seen = new Set<string>();
+    for (const pr of [...Object.values(ts.pullRequests ?? {}), ...(ts.pullRequest ? [ts.pullRequest] : [])]) {
+      const key = `${pr.repo}#${pr.number}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (pr.merged === true || pr.state === "MERGED") continue;
+      out.push({ taskId, repo: pr.repo, number: pr.number, url: pr.url, state: pr.state ?? null });
+    }
+  }
+  return out;
 }
 
 function isTerminal(status: GoalStatus): boolean {
@@ -52,7 +83,7 @@ function isTerminal(status: GoalStatus): boolean {
 
 export async function runGoalArchive(
   goalId: string,
-  options: { cwd?: string; force?: boolean } = {}
+  options: { cwd?: string; force?: boolean; unmergedOk?: boolean } = {}
 ): Promise<GoalArchiveResult> {
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const goals = await findGoals(root);
@@ -81,6 +112,23 @@ export async function runGoalArchive(
     );
   }
 
+  const unmerged = unmergedPullRequests(await readState(goal.dir, goal.id));
+  if (unmerged.length > 0 && !options.unmergedOk) {
+    throw new Error(
+      `${goalId} has linked pull requests that are not merged:\n` +
+        unmerged
+          .map(
+            (pr) =>
+              `  ${pr.taskId}  ${pr.repo}#${pr.number}  ` +
+              (pr.state
+                ? `${pr.state}  ${pr.url}`
+                : `state unknown (snapshot predates 0.8) — refresh: awo pr status ${pr.taskId}`)
+          )
+          .join("\n") +
+        `\nMerge or close them first, or archive anyway with --unmerged-ok.`
+    );
+  }
+
   const target = path.join(goalArchiveDir(root), goalId);
   if (await fs.pathExists(target)) {
     throw new Error(`${path.relative(root, target)} already exists — resolve it by hand.`);
@@ -88,12 +136,20 @@ export async function runGoalArchive(
 
   await fs.ensureDir(goalArchiveDir(root));
   await fs.move(goal.dir, target);
+  // Frozen after the move, so a failed move never leaves a live goal claiming to
+  // be archived. Readers show this instead of re-deriving a status that later
+  // tooling (readiness rules, reconciliation) might compute differently.
+  await mutateState(target, goalId, (state) => {
+    state.archivedStatus = status;
+    state.archivedAt = new Date().toISOString();
+  });
 
   return {
     id: goalId,
     from: path.relative(root, goal.dir),
     to: path.relative(root, target),
     status,
+    unmerged,
   };
 }
 
@@ -121,12 +177,21 @@ export async function runGoalRestore(
 
   const status = await reconciledStatus(root, goal);
   await fs.move(goal.dir, target);
+  // Live again: the frozen status no longer describes it.
+  const restored = await readState(target, goalId);
+  if (restored.archivedStatus !== undefined || restored.archivedAt !== undefined) {
+    await mutateState(target, goalId, (state) => {
+      delete state.archivedStatus;
+      delete state.archivedAt;
+    });
+  }
 
   return {
     id: goalId,
     from: path.relative(root, goal.dir),
     to: path.relative(root, target),
     status,
+    unmerged: [],
   };
 }
 
@@ -172,9 +237,12 @@ export async function runGoalList(
     rows.push({
       id: goal.id,
       title: goal.title,
-      status: state.goalStatus === "done"
-        ? (await evaluateGoalReadiness(root, goal, raw, tasks)).status
-        : state.goalStatus,
+      // An archived goal reports what it was when it was filed away.
+      status: goal.archived && raw.archivedStatus
+        ? raw.archivedStatus
+        : state.goalStatus === "done"
+          ? (await evaluateGoalReadiness(root, goal, raw, tasks)).status
+          : state.goalStatus,
       done: statuses.filter((s) => s === "done").length,
       cancelled: statuses.filter((s) => s === "cancelled").length,
       blocked: statuses.filter((s) => s === "blocked").length,
