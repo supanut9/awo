@@ -51,6 +51,7 @@ import {
   runPrPreflight,
   runPrReconcile,
   runPrStatus,
+  type PrSyncRow,
 } from "./commands/pr.js";
 import { runSync, syncHadProblems } from "./commands/sync.js";
 import { doctorExitCode, groupFindings, runDoctor } from "./commands/doctor.js";
@@ -1563,6 +1564,43 @@ function reportPrMetadata(
   }
 }
 
+/** Columns padded to their widest cell; the last column is left ragged. */
+function printTable(rows: string[][]): void {
+  const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => (r[i] ?? "").length)));
+  for (const row of rows) {
+    console.log(row.map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i]))).join("  ").trimEnd());
+  }
+}
+
+function prStateLabel(row: PrSyncRow): string {
+  return row.pr.state ?? (row.pr.merged ? "MERGED" : "OPEN");
+}
+
+/** `--all`: one compact line per linked PR, then a one-line tally. */
+function reportPrTable(rows: PrSyncRow[], withThreads: boolean): void {
+  if (rows.length === 0) {
+    console.log("No linked PRs in live goals.");
+    return;
+  }
+  const header = ["TASK", "PR", "STATE", "CHECKS", "REVIEWS", "MERGE"];
+  if (withThreads) header.push("THREADS", "CREATED");
+  header.push("NOTE");
+  const body = rows.map((r) => {
+    const cells = [r.taskId, `${r.repo}#${r.number}`, prStateLabel(r), r.pr.checks, r.pr.reviews, r.pr.mergeState];
+    if (withThreads) cells.push(String(r.unresolved), r.createdTaskIds.join(",") || "-");
+    cells.push(r.error ? `ERROR: ${r.error.split("\n")[0]}` : (r.warning ?? r.note ?? ""));
+    return cells;
+  });
+  printTable([header, ...body]);
+  const tasks = new Set(rows.map((r) => r.taskId));
+  const moved = new Set(rows.filter((r) => r.movedToDone).map((r) => r.taskId));
+  const errors = rows.filter((r) => r.error).length;
+  console.log(
+    `${rows.length} PR(s) across ${tasks.size} task(s); ${moved.size} moved to done` +
+      (errors > 0 ? `; ${errors} could not be read` : "")
+  );
+}
+
 const pr = program.command("pr").description("Link, reconcile, and safely finalize GitHub pull requests.");
 
 pr
@@ -1574,12 +1612,17 @@ pr
       const rows = await runPrPreflight(opts);
       for (const row of rows) {
         console.log(`${row.repo}\tauthenticated\tpermission=${row.permission}\tdefault=${row.defaultBranch}`);
-        if (row.requiredAccount && row.activeAccount !== row.requiredAccount) {
+        if (row.requiredAccount && row.accountError) {
           console.log(
             `  ! ${row.repo} must be acted on as ${row.requiredAccount}, but gh is active as ` +
-              `${row.activeAccount ?? "unknown"} — gh auth switch --user ${row.requiredAccount}`
+              `${row.activeAccount ?? "unknown"} and has no stored token for it — gh auth login (as ${row.requiredAccount})`
           );
           process.exitCode = 1;
+        } else if (row.accountVia === "stored-token") {
+          console.log(
+            `  account ${row.requiredAccount} via its stored gh token (active account: ` +
+              `${row.activeAccount ?? "unknown"}) — as required by ${row.repo}`
+          );
         } else if (row.requiredAccount) {
           console.log(`  account ${row.activeAccount} — as required by ${row.repo}`);
         }
@@ -1591,39 +1634,31 @@ pr
   });
 
 pr
-  .command("link <taskId>")
-  .description("Link a task to an existing GitHub PR and persist its live snapshot.")
-  .requiredOption("--repo <repo>", "linked repository name")
-  .requiredOption("--number <n>", "GitHub PR number", (v) => parseInt(v, 10))
+  .command("link [taskId]")
+  .description("Link a task (or with --goal, every task of a goal) to a GitHub PR and refresh it.")
+  .option("--repo <repo>", "linked repository name (default: the task's only target)")
+  .option("--number <n>", "GitHub PR number (default: the PR whose head is the task's branch)", (v) => parseInt(v, 10))
+  .option("--goal <goalId>", "link one goal-branch PR to every live task of this goal that targets --repo")
   .option("--no-meta", "link only: do not set assignee or labels")
-  .action(async (taskId: string, opts: { repo: string; number: number; meta?: boolean }) => {
-    try {
-      const linked = await runPrLink({
-        taskId,
-        repo: opts.repo,
-        number: opts.number,
-        noMeta: opts.meta === false,
-      });
-      console.log(`${taskId} -> ${linked.repo}#${linked.number} ${linked.url}`);
-      if (linked.metadata) reportPrMetadata(linked.metadata, taskId);
-    } catch (err) {
-      console.error((err as Error).message);
-      process.exitCode = 1;
-    }
-  });
-
-pr
-  .command("meta <taskId>")
-  .description("Set the linked PR's assignee and labels from the task. Existing labels only.")
-  .option("--label <name...>", "extra labels on top of the task's own")
-  .option("--assignee <login>", "override the assignee (default: the authenticated gh user)")
-  .option("--dry-run", "show what would change without touching the PR")
   .action(
-    async (taskId: string, opts: { label?: string[]; assignee?: string; dryRun?: boolean }) => {
+    async (
+      taskId: string | undefined,
+      opts: { repo?: string; number?: number; goal?: string; meta?: boolean }
+    ) => {
       try {
-        const r = await runPrMeta(taskId, opts);
-        console.log(`${taskId} -> ${r.repo}#${r.number}${opts.dryRun ? " (dry run)" : ""}`);
-        reportPrMetadata(r, taskId);
+        const linked = await runPrLink({
+          taskId,
+          goal: opts.goal,
+          repo: opts.repo,
+          number: opts.number,
+          noMeta: opts.meta === false,
+        });
+        if (linked.inferredFrom) console.log(`found ${linked.repo}#${linked.number} by head branch ${linked.inferredFrom}`);
+        for (const row of linked.linked) {
+          console.log(`${row.taskId} -> ${linked.repo}#${linked.number} ${linked.url}`);
+          if (row.note) console.log(`  ${row.note}`);
+        }
+        if (linked.metadata) reportPrMetadata(linked.metadata, taskId ?? opts.goal ?? "");
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;
@@ -1632,13 +1667,50 @@ pr
   );
 
 pr
-  .command("status <taskId>")
-  .description("Refresh and show the linked PR's checks, review decision, and merge state.")
-  .action(async (taskId: string) => {
+  .command("meta <taskId>")
+  .description("Set the linked PR's assignee and labels from the task. Existing labels only.")
+  .option("--repo <repo>", "only the PR in this repo (default: every linked PR)")
+  .option("--label <name...>", "extra labels on top of the task's own")
+  .option("--assignee <login>", "override the assignee (default: the authenticated gh user)")
+  .option("--dry-run", "show what would change without touching the PR")
+  .action(
+    async (taskId: string, opts: { repo?: string; label?: string[]; assignee?: string; dryRun?: boolean }) => {
+      try {
+        for (const r of await runPrMeta(taskId, opts)) {
+          console.log(`${taskId} -> ${r.repo}#${r.number}${opts.dryRun ? " (dry run)" : ""}`);
+          reportPrMetadata(r, taskId);
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    }
+  );
+
+pr
+  .command("status [taskId]")
+  .description("Refresh linked PR(s): state, checks, reviews, merge state. A merged PR settles its task.")
+  .option("--repo <repo>", "only the PR in this repo (default: every linked PR)")
+  .option("--all", "every linked PR of every task in live (non-archived) goals")
+  .action(async (taskId: string | undefined, opts: { repo?: string; all?: boolean }) => {
     try {
-      const status = await runPrStatus(taskId);
-      console.log(`${status.repo}#${status.number}\tchecks=${status.checks}\treviews=${status.reviews}\tmerge=${status.mergeState}${status.isDraft ? "\tdraft" : ""}`);
-      console.log(status.url);
+      const rows = await runPrStatus(taskId, opts);
+      if (opts.all) {
+        reportPrTable(rows, false);
+      } else {
+        for (const row of rows) {
+          if (!row.refreshed) {
+            console.error(`${row.repo}#${row.number}\t${row.error}`);
+            continue;
+          }
+          const s = row.pr;
+          console.log(`${s.repo}#${s.number}\t${prStateLabel(row)}\tchecks=${s.checks}\treviews=${s.reviews}\tmerge=${s.mergeState}${s.isDraft ? "\tdraft" : ""}`);
+          console.log(s.url);
+        }
+        const note = rows.find((r) => r.note)?.note;
+        if (note) console.log(note);
+      }
+      if (rows.some((r) => r.error)) process.exitCode = 1;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1646,14 +1718,32 @@ pr
   });
 
 pr
-  .command("reconcile <taskId>")
-  .description("Refresh a linked PR and create one repair task for each new unresolved review thread.")
-  .action(async (taskId: string) => {
+  .command("reconcile [taskId]")
+  .description("Refresh linked PR(s) and file ONE repair task per PR for new unresolved review threads.")
+  .option("--repo <repo>", "only the PR in this repo (default: every linked PR)")
+  .option("--all", "every linked PR of every task in live (non-archived) goals")
+  .action(async (taskId: string | undefined, opts: { repo?: string; all?: boolean }) => {
     try {
-      const result = await runPrReconcile(taskId);
-      console.log(`${result.pr.repo}#${result.pr.number}\t${result.unresolved} unresolved review thread(s)`);
-      if (result.createdTaskIds.length > 0) console.log(`created: ${result.createdTaskIds.join(", ")}`);
-      if (result.warning) console.log(`WARNING: ${result.warning}`);
+      const rows = await runPrReconcile(taskId, opts);
+      if (opts.all) {
+        reportPrTable(rows, true);
+      } else {
+        for (const row of rows) {
+          if (!row.refreshed) {
+            console.error(`${row.repo}#${row.number}\t${row.error}`);
+            continue;
+          }
+          console.log(`${row.repo}#${row.number}\t${row.unresolved} unresolved review thread(s)`);
+          if (row.skipped > 0) console.log(`skipped: ${row.skipped} thread(s) by bots or pullRequests.ignoreAuthors`);
+          if (row.createdTaskIds.length > 0) console.log(`created: ${row.createdTaskIds.join(", ")}`);
+          if (row.adoptedTaskIds.length > 0) console.log(`linked existing repair task: ${row.adoptedTaskIds.join(", ")}`);
+          if (row.warning) console.log(`WARNING: ${row.warning}`);
+          if (row.error) console.error(row.error);
+        }
+        const note = rows.find((r) => r.note)?.note;
+        if (note) console.log(note);
+      }
+      if (rows.some((r) => r.error)) process.exitCode = 1;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -1662,13 +1752,17 @@ pr
 
 pr
   .command("finalize <taskId>")
-  .description("Apply pullRequests.mergePolicy. AWO never approves a PR; human-only never merges.")
-  .option("--dry-run", "show an authorized-maintainer merge without calling GitHub")
-  .action(async (taskId: string, opts: { dryRun?: boolean }) => {
+  .description("Apply the repo's mergePolicy to a completed task's PR(s). AWO never approves; human-only never merges.")
+  .option("--repo <repo>", "only the PR in this repo (default: every linked PR)")
+  .option("--dry-run", "read-only: reads GitHub, but writes no state, creates no task and merges nothing")
+  .action(async (taskId: string, opts: { repo?: string; dryRun?: boolean }) => {
     try {
-      const result = await runPrFinalize(taskId, opts);
-      console.log(`${result.action}\t${result.reason}`);
-      if (result.action === "blocked") process.exitCode = 1;
+      const results = await runPrFinalize(taskId, opts);
+      const many = results.length > 1;
+      for (const result of results) {
+        console.log(`${result.action}\t${many ? `${result.repo}#${result.number}\t` : ""}${result.reason}`);
+      }
+      if (results.some((r) => r.action === "blocked")) process.exitCode = 1;
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
