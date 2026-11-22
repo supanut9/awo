@@ -199,8 +199,10 @@ export async function runGoalClose(
   // ---- linked PRs that have not merged ----
   // Archiving froze goals whose PRs were still open; in atlas-shop only 2 of 105
   // goals had cleanly merged PRs. A closed goal must mean the work landed.
+  // Cancelled tasks included: an open PR left by cancelled work still exists on
+  // GitHub, and `goal archive` refuses it — the two must agree, or close would
+  // report nothing blocking and then fail at the archive step.
   for (const task of authored) {
-    if (statusOf(task.id) === "cancelled") continue;
     for (const pr of linkedPullRequests(rolled, task.id)) {
       if (pr.merged === true || pr.state === "MERGED" || options.unmergedOk) continue;
       const name = `${pr.repo}#${pr.number}`;

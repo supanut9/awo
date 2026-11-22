@@ -199,7 +199,7 @@ Grouped by lane (file ownership below). IDs reference the findings above.
 |---|---|---|---|
 | commander | 12.1.0 | 15.1.0 | **12.1.0** (major deferred) |
 | chokidar | 5.0.0 | 6.0.0 | **5.0.0** (major deferred) |
-| simple-git | 3.36.0 | 4.1.0 | **3.36.0** (major deferred) |
+| simple-git | 3.36.0 | 4.1.0 | **4.1.0** (security: four critical advisories in ≤3.36.0 — see §9) |
 | fs-extra | 11.3.6 | 11.4.1 | **11.4.1** |
 | gray-matter | 4.0.3 | 4.0.3 | 4.0.3 |
 | mongodb | 7.5.0 | 7.9.1 | **7.9.1** |
@@ -262,3 +262,23 @@ in all four workspaces; push branch, open PR. `npm publish` only on explicit app
   than 0.7.1 on shop, and with fewer noise findings.
 - No destructive path remains that deletes a registered worktree, a clone, or legacy worktrees
   without an explicit flag and safety check.
+
+## 9. Outcome (2026-11-22)
+
+- **Implementation:** all nine lanes landed on `upgrade/integration` and were merged in the order
+  B1 → D2 → E → F → G → D1 → A → B2 → C, with the cross-lane seams wired by the integrator
+  (audited transitions for merged PRs, the worktree base recorded on the task, the installer guard
+  before every measured command, QA history on every overwrite, stale locks in doctor, trace-based
+  coverage in the dashboard reader, the dependency-link exclude).
+- **Review:** an independent Codex review raised 14 findings; an independent Claude review verified
+  them (10 confirmed, 4 partly, 0 refuted) and added 6 (N1–N6). All 20 were fixed except:
+  - *Legacy prose test evidence still counts toward readiness* (Codex #5) — deliberate: it is
+    pre-0.8 data, shown as `claimed`; refusing it would block every in-flight goal on upgrade.
+    Nothing in 0.8 can create new unverified test evidence.
+  - *Prune vs. concurrent task start* (Codex #10) — fails closed (`git worktree remove` refuses dirty
+    trees; a lost fresh baseline only produces a baseline error). Left for the delivery-group work.
+- **Security dependency decision:** simple-git ≤3.36.0 carries four critical advisories
+  (GHSA-g4wm-2vf7-vfgr, GHSA-858h-whjf-mvg5, GHSA-x6jw-m9v5-85vh, and its argv-parser's
+  GHSA-v5rq-49vh-5v5c), fixed only in 4.x. awo passes goal-frontmatter branch names into git, so the
+  "majors deferred" rule is overridden for simple-git alone: 3.36.0 → 4.1.0, kept only if the full
+  suite stays green.

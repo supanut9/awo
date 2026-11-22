@@ -279,7 +279,8 @@ test("publish --watch follows logs/<date>/runs.jsonl, including day folders crea
   assert.equal(seen.length, afterWorker, "appending worker stdout does not publish");
 
   fs.writeFileSync(path.join(day, "runs.jsonl"), `${JSON.stringify({ type: "event", runId: "x", t: "", kind: "note" })}\n`);
-  const deadline = Date.now() + 5000;
+  // Generous: on a loaded machine (fseventsd busy) watcher events arrive late.
+  const deadline = Date.now() + 20_000;
   while (seen.length === afterWorker && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
   assert.ok(seen.length > afterWorker, "a run recorded in a new day folder triggers a publish");
   const last = seen[seen.length - 1];

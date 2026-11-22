@@ -565,7 +565,7 @@ test("awo remove keeps a clone unless --delete-checkout, and refuses to delete u
   commit(clone, "local.txt", "unpushed\n");
   const refused = awo(ws, ["remove", "svc", "--delete-checkout"]);
   assert.notEqual(refused.code, 0);
-  assert.match(refused.stderr, /Refusing to delete repos\/svc: 1 commit\(s\) on local branches that no remote has/);
+  assert.match(refused.stderr, /Refusing to delete repos\/svc: 1 commit\(s\) on HEAD, local branches or tags that no remote has/);
   assert.equal(manifest().repos.length, 1, "a refusal leaves the registration alone");
   assert.ok(fs.existsSync(path.join(clone, "local.txt")));
 

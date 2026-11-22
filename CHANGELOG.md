@@ -39,6 +39,15 @@ half the criterion evidence was prose, and `log tail` showed agents the wrong ru
 - The built-in `low` tier resolves to Claude sonnet, not haiku.
 - `engines.node` is `>=20.19` (the real floor of chokidar 5 / mongodb 7).
 
+### Security
+
+- simple-git 3.36.0 → **4.1.0**, clearing four critical advisories (GHSA-g4wm-2vf7-vfgr,
+  GHSA-858h-whjf-mvg5, GHSA-x6jw-m9v5-85vh, GHSA-v5rq-49vh-5v5c); awo passes
+  goal-frontmatter branch names into git. `npm audit --omit=dev` is clean.
+- Delegation quotes are kept only in the redactable prompt section; evidence
+  exceptions go through the same human gate as approvals.
+- Locks are released at process exit rather than mid-write, and only by their owner.
+
 ### Evidence and completion
 
 - `--untested` only excuses a run with no measurement; failing, stale and
@@ -146,7 +155,24 @@ half the criterion evidence was prose, and `log tail` showed agents the wrong ru
   withheld by default, secrets always masked) and purges full-detail events when
   detail is reduced. `agent org` counts runtime status.
 - In-major dependency updates (fs-extra, mongodb, uuid, vite, react, tailwind,
-  marked, …); majors (commander, chokidar, simple-git, TypeScript) deferred.
+  marked, …); majors (commander, chokidar, TypeScript, preact) deferred.
+
+### Review fixes (independent Codex + Claude review of the upgrade)
+
+- `dispatch` accepts a run its worker already closed; `awo run` stops on a gate
+  refusal (`gate-refused`) instead of moving on.
+- A PR merged before a task's latest run began cannot finish that run.
+- `remove --delete-checkout` counts detached-HEAD and tag commits.
+- Exit 2 is "not runnable" only when no test summary was parsed (`make test`).
+- A refused worktree leaves that repo without a checkout rather than falling back
+  to the shared one.
+- Criterion binding applies completion's receipt rules; nested conditions are part
+  of a criterion's hash and the approval digest; re-attaching after a reorder never
+  rewrites another labelled criterion's evidence.
+- A PASS keeps the GAP it supersedes; `task complete` claims the close under the
+  state lock; `goal close` and `goal archive` agree on unmerged PRs.
+- Legacy migrations check every destination before moving and re-register moved
+  worktrees with git.
 
 ### Fixed (stabilization, previously unreleased)
 
