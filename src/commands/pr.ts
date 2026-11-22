@@ -365,6 +365,21 @@ function settleMergedTask(
   }
   const reason = `${merged.map((p) => `PR #${p.number}`).join(", ")} merged`;
   if (ts.status === "done") return { moved: false, note: null };
+  if (goal.archived) {
+    return { moved: false, note: `${reason}, but ${goal.id} is archived — restore it to change ${task.id}: awo goal restore ${goal.id}` };
+  }
+  // A PR merged before the task's latest run began cannot carry that run's work:
+  // a reopened task would otherwise be finished by its own history.
+  const runStart = ts.startedAt ? Date.parse(ts.startedAt) : Number.NaN;
+  const stale = merged.filter((p) => p.mergedAt && Number.isFinite(runStart) && Date.parse(p.mergedAt) < runStart);
+  if (stale.length > 0) {
+    return {
+      moved: false,
+      note:
+        `${prRefs(stale)} merged before ${task.id}'s latest run started, so it does not carry that work — ` +
+        `link the PR that does: awo pr link ${task.id} --repo <repo> --number <n>`,
+    };
+  }
   if (ts.status !== "in-review") {
     const next =
       ts.status === "running" ? ` — finish the run first: awo task complete ${task.id} --outcome success` : "";

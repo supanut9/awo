@@ -271,8 +271,19 @@ export interface Verdict {
   needsHuman: boolean;
 }
 
-/** Shell "misuse" and "command not found": the command never reached a test. */
-const NOT_RUNNABLE_EXITS = new Set([2, 127]);
+/**
+ * "Not executable" and "command not found": the command never reached a test.
+ * Exit 2 is shell misuse — but it is also what GNU make returns when any recipe
+ * fails, so it counts only when the output shows no test ran at all. Otherwise a
+ * `make test` suite with old failures plus a new regression read as "not runnable".
+ */
+function couldNotRun(m: Measurement): boolean {
+  if (m.exitCode === 126 || m.exitCode === 127) return true;
+  if (m.exitCode !== 2) return false;
+  const c = m.counts;
+  return m.passed === undefined && m.failed === undefined && c.cases === undefined &&
+    c.passed === undefined && c.failed === undefined;
+}
 
 /**
  * A failing test means either the code is wrong or the test is wrong, and which
@@ -296,11 +307,7 @@ export function diagnose(
   // The same "cannot run" exit on both sides says the command, not the code, is
   // broken — a missing binary, a typo'd script. Recording that as a pre-existing
   // failure made it look like evidence about the suite.
-  if (
-    base &&
-    head.exitCode !== null && NOT_RUNNABLE_EXITS.has(head.exitCode) &&
-    base.exitCode !== null && NOT_RUNNABLE_EXITS.has(base.exitCode)
-  ) {
+  if (base && couldNotRun(head) && couldNotRun(base)) {
     return {
       diagnosis: "not-runnable",
       explanation:

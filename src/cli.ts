@@ -1059,7 +1059,7 @@ program
         console.log("");
         console.log(`stopped: ${r.stoppedBecause}`);
         console.log(r.message);
-        if (r.stoppedBecause === "task-failed" || r.stoppedBecause === "needs-human") {
+        if (r.stoppedBecause === "task-failed" || r.stoppedBecause === "needs-human" || r.stoppedBecause === "gate-refused") {
           process.exitCode = 1;
         }
       } catch (err) {
@@ -1620,7 +1620,9 @@ task
     "test: the measured command or its runId (default: the latest passing one); manual: where the proof is; exception: the decision"
   )
   .option("--who <human>", "human accepting an exception; required for --kind exception")
-  .action(async (taskId: string, opts: { criterion: string; kind: "test" | "manual" | "exception"; ref?: string; who?: string }) => {
+  .option("--delegated-by <human>", "an agent recording a human's exception: who accepted it")
+  .option("--instruction <quote>", "the delegating human's words, verbatim")
+  .action(async (taskId: string, opts: { criterion: string; kind: "test" | "manual" | "exception"; ref?: string; who?: string; delegatedBy?: string; instruction?: string }) => {
     try {
       const r = await runTaskEvidence({ taskId, ...opts });
       for (const item of r.attached) {

@@ -65,6 +65,9 @@ export interface UnmergedPullRequest {
 function unmergedPullRequests(state: GoalState): UnmergedPullRequest[] {
   const out: UnmergedPullRequest[] = [];
   for (const [taskId, ts] of Object.entries(state.tasks)) {
+    // A cancelled task's PR carries work nobody is delivering; `goal close` skips
+    // it too, and the two must agree or close passes and then archive refuses.
+    if (ts.status === "cancelled") continue;
     const seen = new Set<string>();
     for (const pr of [...Object.values(ts.pullRequests ?? {}), ...(ts.pullRequest ? [ts.pullRequest] : [])]) {
       const key = `${pr.repo}#${pr.number}`;

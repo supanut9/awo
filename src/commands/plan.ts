@@ -22,6 +22,7 @@ import { allocateRunId, writeDetail } from "../runs.js";
 import { mutateState, newTaskState } from "../state.js";
 import { atomicWriteFile, withFileLock } from "../file-lock.js";
 import { retireQa } from "../qa-history.js";
+import { assertGoalWritable } from "../lifecycle.js";
 
 
 /**
@@ -753,6 +754,9 @@ export async function runTaskNew(options: {
 
   const goals = await findGoals(root);
   const goal = goals.find((g) => g.id === options.goal);
+  // An archived goal shows its frozen status; a task added behind it would be
+  // live work nobody can see.
+  if (goal) assertGoalWritable(goal);
   if (!goal) {
     throw new Error(
       goals.length > 0

@@ -113,6 +113,11 @@ async function taskCheckouts(
 ): Promise<TaskCheckout[]> {
   const out: TaskCheckout[] = [];
   for (const repo of task.targets) {
+    // A refused worktree (a foreign directory at its path, diverged dependency
+    // branches) must not quietly become the shared checkout: measurements and
+    // commits there would be credited to this task. No checkout means `task
+    // event` refuses for that repo instead.
+    if (worktrees.some((candidate) => candidate.repo === repo && candidate.error)) continue;
     const worktree = worktrees.find((candidate) => candidate.repo === repo && !candidate.error);
     const entry = manifest.repos.find((candidate) => candidate.name === repo);
     if (!entry) continue;
@@ -416,7 +421,12 @@ export async function runTaskStatus(
     const ts = state.tasks[task.id] ?? newTaskState(task.authoredStatus);
     if (ts.status !== target) {
       // The verdict's own transitions rewrite QA right after; anything else retires it.
-      if (options.goalVerdict) delete state.qa;
+      // A prior verdict (a GAP before this PASS) goes to history; a bare brief is
+      // rewritten by the verdict itself, so it is simply cleared.
+      if (options.goalVerdict) {
+        if (state.qa?.verdict) retireQa(state, `superseded by the goal verdict`);
+        else delete state.qa;
+      }
       else retireQa(state, `${task.id} moved ${ts.status} -> ${target}`);
     }
     if (ts.status === "running" && target === "cancelled") openRun = ts.lastRunId;
@@ -862,7 +872,7 @@ export async function runTaskRun(
     });
   }
 
-  const runCheckouts = await taskCheckouts(workspaceRoot, manifest, task, usable);
+  const runCheckouts = await taskCheckouts(workspaceRoot, manifest, task, worktrees);
   const intendedModel = `${model.runtime}:${model.model}`;
   await appendEvent(workspaceRoot, runId, "run.start", {
     taskId: task.id,
@@ -1607,6 +1617,25 @@ export async function runTaskComplete(
   // were recorded as `claude:haiku` while the work was done by Opus or Codex.
   const actualModel = options.model?.trim() || undefined;
   const untested = outcome === "success" ? options.untested?.trim() || undefined : undefined;
+
+  // Claim the close under the state lock before writing anything final: two
+  // concurrent completes (or a cancel racing one) both wrote `run.end` and an index
+  // row. A claim older than ten minutes is from a process that died mid-close.
+  await mutateState(goal.dir, goal.id, (s) => {
+    const t = s.tasks[task.id];
+    if (!t || t.status !== "running" || t.lastRunId !== runId) {
+      throw new Error(`${task.id}'s run ${runId} was closed or changed by another process meanwhile; nothing was written.`);
+    }
+    const claim = t.owner?.closing;
+    if (claim && Date.now() - Date.parse(claim.at) < 10 * 60_000) {
+      throw new Error(`${task.id}'s run ${runId} is already being closed (pid ${claim.pid}); nothing was written.`);
+    }
+    t.owner = {
+      ...(t.owner ?? { runId, pid: null, host: os.hostname(), actor: actorLabel(), startedAt: t.startedAt ?? new Date().toISOString(), heartbeatAt: new Date().toISOString() }),
+      closing: { at: new Date().toISOString(), pid: process.pid },
+    };
+  });
+
   await appendEvent(workspaceRoot, runId, "run.end", {
     outcome,
     ...(actualModel ? { actualModel } : {}),

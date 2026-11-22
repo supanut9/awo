@@ -46,6 +46,24 @@ function timestamp(at: Date = new Date()): string {
  * goal recreated by hand — silently lost one of them. Two copies of user content
  * are a decision for a person, not for a migration.
  */
+/** `git worktree repair` every moved checkout (depth ≤ 2) whose `.git` is a file. */
+async function repairMovedWorktrees(dir: string): Promise<string[]> {
+  const failed: string[] = [];
+  const visit = async (at: string, depth: number): Promise<void> => {
+    const marker = await fs.lstat(path.join(at, ".git")).catch(() => null);
+    if (marker?.isFile()) {
+      await simpleGit(at).raw(["worktree", "repair"]).catch(() => failed.push(path.relative(dir, at) || "."));
+      return;
+    }
+    if (depth >= 2) return;
+    for (const entry of await fs.readdir(at, { withFileTypes: true }).catch(() => [])) {
+      if (entry.isDirectory()) await visit(path.join(at, entry.name), depth + 1);
+    }
+  };
+  await visit(dir, 0);
+  return failed;
+}
+
 async function moveOrStop(root: string, from: string, to: string): Promise<void> {
   if (await fs.pathExists(to)) {
     const rel = (p: string): string => path.relative(root, p);
@@ -117,14 +135,16 @@ async function shelveArchivedRequirements(root: string): Promise<boolean> {
     const status = /^status:\s*"?([a-z-]+)"?\s*$/m.exec(text)?.[1];
     if (!status || !SHELVED.has(status)) continue;
 
-    await moveOrStop(root, from, path.join(archive, name));
-
     // Assets travel with the document that links them, or its relative links break.
+    // Both destinations are checked before either moves: moving the document and
+    // then stopping on its assets left them orphaned, and a re-run no longer sees
+    // the document, so it never comes back for them.
     const id = name.replace(/\.md$/, "");
     const assets = path.join(dir, `${id}-assets`);
-    if (await fs.pathExists(assets)) {
-      await moveOrStop(root, assets, path.join(archive, `${id}-assets`));
-    }
+    const pairs: Array<[string, string]> = [[from, path.join(archive, name)]];
+    if (await fs.pathExists(assets)) pairs.push([assets, path.join(archive, `${id}-assets`)]);
+    for (const [src, dest] of pairs) if (await fs.pathExists(dest)) await moveOrStop(root, src, dest);
+    for (const [src, dest] of pairs) await moveOrStop(root, src, dest);
     moved = true;
   }
 
@@ -343,9 +363,19 @@ async function restructureWorkspace(root: string, notes: string[] = []): Promise
     const kept = path.join(root, ".workspace", `legacy-worktrees-${timestamp()}`);
     const contents = await legacyWorktreeListing(stray);
     await moveOrStop(root, stray, kept);
+    // Git still records each worktree at its old path, and the next `git worktree
+    // prune` anywhere would drop the registration — index, and any detached-HEAD
+    // commits, with it. Point git at the new location.
+    const unrepaired = await repairMovedWorktrees(kept);
     // Self-ignoring, so gigabytes of checkouts never show up as untracked files in a
     // workspace that is itself a git repo.
     await fs.writeFile(path.join(kept, ".gitignore"), "*\n");
+    if (unrepaired.length > 0) {
+      notes.push(
+        `could not re-register ${unrepaired.length} moved worktree(s) with git (${unrepaired.join(", ")}); ` +
+          `run \`git worktree repair <path>\` in each before any \`git worktree prune\``
+      );
+    }
     const rel = path.relative(root, kept);
     notes.push(
       `preserved the legacy .worktrees/ checkouts in ${rel}/ (${contents.length > 0 ? contents.join(", ") : "empty"}) — ` +

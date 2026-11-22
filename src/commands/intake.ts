@@ -252,9 +252,10 @@ export function criterionHash(text: string): string {
 }
 
 /** The digest an approval is pinned to: every criterion's text, in order. */
-export function criteriaDigest(criteria: Array<{ text: string }>): string {
+export function criteriaDigest(criteria: Array<{ text: string; hash?: string }>): string {
+  // Per-criterion hashes when present: they cover nested conditions the text omits.
   return createHash("sha256")
-    .update(criteria.map((criterion) => criterion.text.replace(/\s+/g, " ").trim()).join("\n"))
+    .update(criteria.map((criterion) => criterion.hash ?? criterion.text.replace(/\s+/g, " ").trim()).join("\n"))
     .digest("hex");
 }
 
@@ -302,7 +303,10 @@ export function findCriteriaDetailed(body: string): Array<ParsedCriterion> {
 const RAW_HEADING = /\b(raw requirement|verbatim)\b/i;
 
 function parseCriteria(body: string, includeRaw: boolean): Array<ParsedCriterion> {
-  type Item = { label: string | null; lines: string[]; subStarted: boolean; bare: boolean };
+  // `sub` holds the item's nested conditions: not criteria of their own, but part
+  // of what the criterion says — so part of its hash, or editing a nested
+  // permission rule would leave old evidence looking current.
+  type Item = { label: string | null; lines: string[]; sub: string[]; subStarted: boolean; bare: boolean };
   const items: Item[] = [];
   const seenLabels = new Set<string>();
   const state = {
@@ -330,7 +334,7 @@ function parseCriteria(body: string, includeRaw: boolean): Array<ParsedCriterion
     if (labelledOnly && !label) return;
     if (label && seenLabels.has(label)) return;
     if (label) seenLabels.add(label);
-    state.current = { label, lines: [text], subStarted: false, bare };
+    state.current = { label, lines: [text], sub: [], subStarted: false, bare };
     items.push(state.current);
   };
 
@@ -397,6 +401,7 @@ function parseCriteria(body: string, includeRaw: boolean): Array<ParsedCriterion
         else open(text, labelledOnly, false);
       } else if (current) {
         current.subStarted = true;
+        current.sub.push(line.trim());
       }
       continue;
     }
@@ -416,6 +421,10 @@ function parseCriteria(body: string, includeRaw: boolean): Array<ParsedCriterion
       current.lines.push(line.trim());
       continue;
     }
+    if (current && current.subStarted && indent >= 2) {
+      current.sub.push(line.trim());
+      continue;
+    }
     if (indent === 0) {
       close();
       state.parentOffset = null;
@@ -423,9 +432,18 @@ function parseCriteria(body: string, includeRaw: boolean): Array<ParsedCriterion
   }
 
   return items
-    .map((item) => ({ label: item.label, text: item.lines.join(" ").replace(/\s+/g, " ").trim() }))
+    .map((item) => ({
+      label: item.label,
+      text: item.lines.join(" ").replace(/\s+/g, " ").trim(),
+      nested: item.sub.map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean),
+    }))
     .filter(({ text }) => text !== "" && !/^_.*_$/.test(text) && text !== "…" && !/^todo$/i.test(text))
-    .map((item, i) => ({ index: i + 1, label: item.label, text: item.text, hash: criterionHash(item.text) }));
+    .map((item, i) => ({
+      index: i + 1,
+      label: item.label,
+      text: item.text,
+      hash: criterionHash(item.nested.length > 0 ? `${item.text}\n${item.nested.join("\n")}` : item.text),
+    }));
 }
 
 export interface ProposeResult {
@@ -601,7 +619,9 @@ export async function runReqDecide(
         options.why ? `**Reason:** ${options.why}` : "",
         actor.delegation
           ? `**Delegated by:** ${actor.delegation.by}, recorded by ${actor.delegation.via}` +
-            (actor.delegation.instruction ? ` — instruction: "${actor.delegation.instruction}"` : " — no instruction quoted")
+            // The quote lives only in the prompt section, which publish redaction
+            // withholds; repeating it here would publish a person's words verbatim.
+            (actor.delegation.instruction ? " — their instruction is recorded as the prompt" : " — no instruction quoted")
           : "",
         `**Acceptance criteria at the time of the decision (${criteria.length}):**`,
         ...criteria.map((c) => `- ${c}`),

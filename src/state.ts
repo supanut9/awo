@@ -95,6 +95,8 @@ export interface RunOwner {
   startedAt: string;
   /** Last time this run recorded anything (event, resume). */
   heartbeatAt: string;
+  /** Set while one `task complete` is writing the close, so a second one refuses. */
+  closing?: { at: string; pid: number } | null;
 }
 
 export interface TransitionRecord {

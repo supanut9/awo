@@ -10,6 +10,8 @@ export interface LockOwner {
   pid: number;
   hostname: string;
   acquiredAt: string;
+  /** Per-acquisition nonce: a holder removes the lock only while it still owns it. */
+  token?: string;
 }
 
 /**
@@ -31,7 +33,12 @@ function parseOwner(raw: unknown): LockOwner | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
   if (typeof o.pid !== "number" || typeof o.hostname !== "string") return null;
-  return { pid: o.pid, hostname: o.hostname, acquiredAt: String(o.acquiredAt ?? "") };
+  return {
+    pid: o.pid,
+    hostname: o.hostname,
+    acquiredAt: String(o.acquiredAt ?? ""),
+    ...(typeof o.token === "string" ? { token: o.token } : {}),
+  };
 }
 
 async function readOwner(lock: string): Promise<LockOwner | null> {
@@ -94,11 +101,18 @@ function releaseHeldSync(): void {
 }
 
 function onSignal(signal: NodeJS.Signals): void {
-  releaseHeldSync();
   uninstallHandlers();
-  // Only re-raise when nobody else is listening: `awo ui` and `publish --watch`
-  // install their own graceful-stop handlers, and those decide when to exit.
-  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+  // `awo ui` and `publish --watch` install their own graceful-stop handlers and
+  // keep running while in-flight writes finish. Releasing their locks now would
+  // let another process in mid-write; the `exit` handler releases them once the
+  // process really ends. Only when nobody else is listening does this signal end
+  // the process here, so only then are the locks released here.
+  if (process.listenerCount(signal) === 0) {
+    releaseHeldSync();
+    process.kill(process.pid, signal);
+  } else {
+    process.once("exit", releaseHeldSync);
+  }
 }
 
 function installHandlers(): void {
@@ -146,15 +160,19 @@ export async function withFileLock<T>(
   }
   held.add(lock);
   installHandlers();
+  const token = randomUUID();
   try {
     await fs.writeJson(path.join(lock, "owner.json"), {
-      pid: process.pid, hostname: os.hostname(), acquiredAt: new Date().toISOString(),
+      pid: process.pid, hostname: os.hostname(), acquiredAt: new Date().toISOString(), token,
     } satisfies LockOwner);
     return await action();
   } finally {
     held.delete(lock);
     if (held.size === 0) uninstallHandlers();
-    await fs.remove(lock);
+    // Remove only our own lock. If it was reclaimed and re-acquired meanwhile,
+    // deleting it would hand a live writer's exclusion to whoever comes next.
+    const owner = await readOwner(lock);
+    if (!owner || owner.token === undefined || owner.token === token) await fs.remove(lock);
   }
 }
 

@@ -131,11 +131,19 @@ export async function runDispatch(
     ok: code === 0 && !timedOut,
   });
 
-  const outcome: DispatchResult["outcome"] = code === 0 && !timedOut ? "success" : "failed";
+  let outcome: DispatchResult["outcome"] = code === 0 && !timedOut ? "success" : "failed";
 
   let completed = false;
   let completionError: string | undefined;
-  if (!options.noComplete) {
+  // The brief tells a worker to close its own run with `task complete`; one that
+  // did has already passed the gate. Completing again would fail on "no open run"
+  // and report a finished worker as a dispatch failure.
+  const closedByWorker = (await readEvents(root, runId)).find((event) => event.kind === "run.end");
+  if (closedByWorker) {
+    completed = true;
+    const recorded = closedByWorker.outcome;
+    if (recorded === "success" || recorded === "failed" || recorded === "skipped") outcome = recorded;
+  } else if (!options.noComplete) {
     // A dispatched worker rarely records its own `test` event, so an honest
     // success needs the reason stated rather than the evidence faked. But only
     // then: passing `untested` unconditionally let a worker that measured a red

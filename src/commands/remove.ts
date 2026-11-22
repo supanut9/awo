@@ -108,15 +108,23 @@ async function cloneBlockers(workspaceRoot: string, name: string, clone: string)
   if (status === null) out.push("git status failed");
   else if (status.trim()) out.push(`${status.trim().split("\n").length} uncommitted or untracked change(s)`);
 
-  const unpushed = await git.raw(["rev-list", "--count", "--branches", "--not", "--remotes"]).catch(() => null);
+  // HEAD and tags too: a detached HEAD can hold the only copy of a commit even
+  // when every branch is pushed.
+  const unpushed = await git
+    .raw(["rev-list", "--count", "HEAD", "--branches", "--tags", "--not", "--remotes"])
+    .catch(() => null);
   const count = unpushed === null ? NaN : Number.parseInt(unpushed.trim(), 10);
   if (!Number.isFinite(count)) out.push("could not count unpushed commits");
-  else if (count > 0) out.push(`${count} commit(s) on local branches that no remote has`);
+  else if (count > 0) out.push(`${count} commit(s) on HEAD, local branches or tags that no remote has`);
 
-  const stashes = (await git.raw(["stash", "list"]).catch(() => "")).trim();
-  if (stashes) out.push(`${stashes.split("\n").length} stash entr(ies)`);
+  // Inspection failures fail closed: a check that could not run is not a pass.
+  const stashes = await git.raw(["stash", "list"]).catch(() => null);
+  if (stashes === null) out.push("could not list stashes");
+  else if (stashes.trim()) out.push(`${stashes.trim().split("\n").length} stash entr(ies)`);
 
-  const worktrees = (await git.raw(["worktree", "list", "--porcelain"]).catch(() => ""))
+  const listed = await git.raw(["worktree", "list", "--porcelain"]).catch(() => null);
+  if (listed === null) out.push("could not list its worktrees");
+  const worktrees = (listed ?? "")
     .split("\n")
     .filter((l) => l.startsWith("worktree ")).length;
   if (worktrees > 1) out.push(`${worktrees - 1} worktree(s) of it still registered`);

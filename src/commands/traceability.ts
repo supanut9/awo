@@ -14,6 +14,9 @@ import {
 import { readEvents, readIndex, runSlot } from "../runs.js";
 import { actorLabel } from "../agent-env.js";
 import { retireQa } from "../qa-history.js";
+import { assertGoalWritable } from "../lifecycle.js";
+import { resolveHumanGate } from "../human-gate.js";
+import { readManifest } from "../manifest.js";
 
 export interface CriterionTrace {
   index: number;
@@ -127,13 +130,19 @@ async function measuredTests(
     for (const event of await readEvents(root, runId)) {
       if (event.kind !== "test" || event.verified !== true) continue;
       const exitCode = typeof event.exitCode === "number" ? event.exitCode : null;
+      // The receipt rules `task complete` applies: a tree that changed while the
+      // command ran, an inconclusive result awaiting a human, or a command that
+      // never reached a test does not verify a criterion either.
+      const treeMoved = typeof event.treeId === "string" && typeof event.treeIdAfter === "string" &&
+        event.treeId !== event.treeIdAfter;
+      const inconclusive = event.needsHuman === true || event.diagnosis === "not-runnable" || event.diagnosis === "unknown";
       tests.push({
         runId,
         at: event.t,
         command: typeof event.command === "string" ? event.command : "",
         repo: typeof event.repo === "string" ? event.repo : null,
         exitCode,
-        passed: exitCode === 0 && event.timedOut !== true,
+        passed: exitCode === 0 && event.timedOut !== true && !treeMoved && !inconclusive,
       });
     }
   }
@@ -272,6 +281,8 @@ export async function runTaskEvidence(options: {
   kind: CriterionEvidenceKind;
   ref?: string;
   who?: string;
+  delegatedBy?: string;
+  instruction?: string;
   cwd?: string;
 }): Promise<TaskEvidenceResult> {
   if (!(["test", "manual", "exception"] as string[]).includes(options.kind)) {
@@ -286,12 +297,20 @@ export async function runTaskEvidence(options: {
         : "--kind exception needs --ref <the decision or ticket that accepts the gap>."
     );
   }
-  if (options.kind === "exception" && !options.who?.trim()) {
-    throw new Error("--kind exception requires --who <human> so the acceptance is attributable.");
-  }
-
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
+  // Accepting a gap is a human decision like an approval: an exception satisfies
+  // readiness, so an agent that could name any `--who` could close its own gaps.
+  const exceptionActor = options.kind === "exception"
+    ? resolveHumanGate({
+        command: `awo task evidence ${options.taskId} --criterion ${String(options.criterion)} --kind exception --ref "…"`,
+        manifest: await readManifest(root),
+        root,
+        options: { who: options.who, delegatedBy: options.delegatedBy, instruction: options.instruction },
+        requireWho: "--kind exception requires --who <human> so the acceptance is attributable.",
+      })
+    : null;
   const { task, goal } = await locateTask(root, options.taskId);
+  assertGoalWritable(goal, task.id);
   const { criteria } = await criteriaForGoal(root, goal.id);
   const selected = selectCriteria(options.criterion, criteria, goal.id);
 
@@ -315,7 +334,7 @@ export async function runTaskEvidence(options: {
         kind: options.kind,
         ref: ref ?? measurement!.command,
         recordedAt,
-        ...(options.kind === "exception" ? { acceptedBy: options.who!.trim() } : {}),
+        ...(exceptionActor ? { acceptedBy: exceptionActor.by, by: exceptionActor.via } : {}),
         criterionHash: criterion.hash,
         ...(criterion.label ? { criterionLabel: criterion.label } : {}),
         ...(measurement
@@ -333,8 +352,12 @@ export async function runTaskEvidence(options: {
         by,
       };
       const entries = (state.criteria[String(criterion.index)] ??= []);
+      // The same evidence for the same criterion: an entry another labelled
+      // criterion left in this positional bucket (after a reorder) is not ours to
+      // rewrite, or re-attaching AC-1 would quietly strip AC-2's coverage.
       const same = entries.find(
         (item) =>
+          (!item.criterionLabel || !criterion.label || item.criterionLabel === criterion.label) &&
           item.taskId === evidence.taskId &&
           item.kind === evidence.kind &&
           item.ref === evidence.ref &&

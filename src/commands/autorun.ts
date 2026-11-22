@@ -34,6 +34,7 @@ export type StopReason =
   | "needs-human"
   | "nothing-ready"
   | "blocked-dependency"
+  | "gate-refused"
   | "budget";
 
 export interface RunStep {
@@ -187,6 +188,17 @@ export async function runAuto(options: {
       result.message =
         `${task.id} produced evidence that needs a human — \`awo log show ${dispatched.runId}\`.\n` +
         `  Not continuing: the next task would build on a result nobody has judged.`;
+      return result;
+    }
+
+    if (dispatched.completionError) {
+      // The worker exited cleanly but its run could not close — a failing or
+      // stale measurement, usually. Going on would build on work the gate refused.
+      result.stoppedBecause = "gate-refused";
+      result.message =
+        `${task.id}'s run ${dispatched.runId} is still open: closing it was refused.\n` +
+        `  ${dispatched.completionError.split("\n").join("\n  ")}\n` +
+        `  Fix it, then \`awo task complete ${task.id} --summary "…"\` (or \`awo task resume ${task.id}\`).`;
       return result;
     }
 

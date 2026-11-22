@@ -98,3 +98,55 @@ test("task run cuts the worktree from the goal's deliveryBranch and records the 
   assert.equal(base?.ref, "feature/goal-x");
   assert.equal(base?.sha, git(api, "rev-parse", "feature/goal-x").trim());
 });
+
+// ---- fixes from the combined Codex + Claude review ----
+
+const distModule = (name: string) => import(new URL(`file://${path.join(REPO_ROOT, "dist", name)}`).href);
+
+test("exit 2 with a parsed test summary is a test result, not 'not runnable' (make's failure exit)", async () => {
+  const { diagnose } = await distModule("evidence.js");
+  const none = { newTests: [], modifiedTests: [], weakenedTests: [], testFiles: [], codeFiles: [] };
+  const make = (failed: number) => ({ command: "make test", exitCode: 2, durationSec: 1, tail: "", passed: 10, failed, counts: { passed: 10, failed, parser: "jest" } });
+  assert.notEqual(diagnose(make(3), make(2), none).diagnosis, "not-runnable");
+  const bare = { command: "nope", exitCode: 2, durationSec: 0, tail: "", counts: { parser: "unknown" } };
+  assert.equal(diagnose(bare, bare, none).diagnosis, "not-runnable");
+});
+
+test("a criterion's nested conditions are part of its hash, so editing them is detected", async () => {
+  const { findCriteriaDetailed } = await distModule("commands/intake.js");
+  const doc = (rule: string) => `## Acceptance criteria\n- AC-1: Access control\n  - only ${rule} may edit\n- AC-2: Audit log\n`;
+  const [a1, a2] = findCriteriaDetailed(doc("admins"));
+  const [b1, b2] = findCriteriaDetailed(doc("owners"));
+  assert.equal(findCriteriaDetailed(doc("admins")).length, 2, "nested bullets are not criteria of their own");
+  assert.equal(a1.text, b1.text);
+  assert.notEqual(a1.hash, b1.hash);
+  assert.equal(a2.hash, b2.hash);
+});
+
+test("remove --delete-checkout refuses a clone whose detached HEAD holds the only copy of a commit", (t) => {
+  const root = tempRoot(t);
+  const origin = path.join(root, "origin.git");
+  git(root, "init", "-q", "--bare", "-b", "main", origin);
+  const seed = path.join(root, "seed");
+  git(root, "clone", "-q", origin, seed);
+  fs.writeFileSync(path.join(seed, "README.md"), "# api\n");
+  git(seed, "add", "README.md");
+  git(seed, "commit", "-qm", "init");
+  git(seed, "push", "-q", "origin", "HEAD:main");
+
+  const ws = path.join(root, "ws");
+  fs.mkdirSync(ws);
+  execFileSync(process.execPath, [CLI, "init", "--key", "RM"], { cwd: ws, stdio: "ignore" });
+  const add = awo(ws, ["add", origin, "--name", "api"]);
+  assert.equal(add.code, 0, add.stderr + add.stdout);
+  const clone = path.join(ws, "repos", "api");
+  git(clone, "checkout", "-q", "--detach");
+  fs.writeFileSync(path.join(clone, "only-here.txt"), "x\n");
+  git(clone, "add", "only-here.txt");
+  git(clone, "commit", "-qm", "detached work");
+
+  const out = awo(ws, ["remove", "api", "--delete-checkout"]);
+  assert.notEqual(out.code, 0, out.stdout);
+  assert.match(out.stderr + out.stdout, /HEAD, local branches or tags that no remote has/);
+  assert.ok(fs.existsSync(path.join(clone, "only-here.txt")));
+});

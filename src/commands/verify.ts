@@ -14,6 +14,7 @@ import { runLogAdd } from "./log.js";
 import { runGoalReadiness } from "./readiness.js";
 import { retireQa } from "../qa-history.js";
 import { describeActor, resolveHumanGate, type DecisionActor } from "../human-gate.js";
+import { assertGoalWritable } from "../lifecycle.js";
 
 /**
  * §7.1 QA gate, made operable.
@@ -70,6 +71,7 @@ export async function runGoalVerify(
         : `Unknown goal "${goalId}". None exist yet.`
     );
   }
+  assertGoalWritable(goal);
 
   const tasks = await findTasksInGoal(goal.dir);
   const state = await readState(goal.dir, goal.id);
@@ -297,6 +299,7 @@ export async function runGoalVerdict(
   const root = findWorkspaceRoot(options.cwd ?? process.cwd());
   const goal = (await findGoals(root)).find((g) => g.id === goalId);
   if (!goal) throw new Error(`Unknown goal "${goalId}".`);
+  assertGoalWritable(goal);
   if (options.pass && options.newScope) {
     throw new Error("--new-scope only applies to --gap.");
   }
@@ -342,10 +345,13 @@ export async function runGoalVerdict(
     model: options.model ? [options.model] : [],
     outcome: options.pass ? "success" : "failed",
     summary: `${options.pass ? "PASS" : "GAP"} — ${options.summary}`,
+    // The delegating person's words go only in the prompt section, the field
+    // publish redaction withholds — never repeated into notes.
+    ...(actor.delegation?.instruction ? { prompt: actor.delegation.instruction } : {}),
     note: [
       actor.delegation
         ? `Decision delegated by ${actor.by}; recorded by ${actor.via}` +
-          (actor.delegation.instruction ? ` on the instruction: "${actor.delegation.instruction}"` : " (no instruction quoted)")
+          (actor.delegation.instruction ? " (their instruction is recorded as the prompt)" : " (no instruction quoted)")
         : `Decision recorded by ${describeActor(actor)}`,
       ...(options.note ?? []),
     ],
